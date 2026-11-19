@@ -892,6 +892,8 @@ class AudioPreviewEngine {
     return this.cachedAcousticProfiles;
   }
 
+  private lastAutoSoloEvalPerfMs = 0;
+
   private ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
     if (!this.ctx) {
@@ -1088,11 +1090,12 @@ class AudioPreviewEngine {
       return;
     }
 
-    // Continuous uncut playback: only re-align if a track drifted noticeably (> 380ms) and isn't already seeking
-    if (el.seeking || nowPerf - holder.lastSeekPerfMs < 200) {
+    // Continuous uncut playback: avoid interrupting OS audio decoder ring-buffers on minor jitter;
+    // only emergency re-align if a track drifted severely (> 0.9s) and isn't already seeking
+    if (el.seeking || nowPerf - holder.lastSeekPerfMs < 1000) {
       return;
     }
-    if (drift > 0.38) {
+    if (drift > 0.9) {
       holder.pendingSeekSec = null;
       holder.lastSeekPerfMs = nowPerf;
       try {
@@ -1110,6 +1113,7 @@ class AudioPreviewEngine {
   /** Marks that the user manually scrubbed/jumped playhead so next sync seeks immediately */
   public requestSeek(): void {
     this.forceSeekPending = true;
+    this.playStartPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
   }
 
   /** Pre-warms <audio> elements as soon as tracks are loaded so pressing Space starts immediately */
@@ -1369,7 +1373,11 @@ class AudioPreviewEngine {
                   h.audio.readyState >= 2
                 );
               })
-              .sort((a, b) => Math.abs(a.syncOffsetMs || 0) - Math.abs(b.syncOffsetMs || 0))[0];
+              .sort(
+                (a, b) =>
+                  (a.muted ? 1 : 0) - (b.muted ? 1 : 0) ||
+                  Math.abs(a.syncOffsetMs || 0) - Math.abs(b.syncOffsetMs || 0)
+              )[0];
 
             if (activeClockTrack) {
               const holder = this.trackElements.get(activeClockTrack.id);
@@ -1389,6 +1397,11 @@ class AudioPreviewEngine {
                       currentPlayheadSec + stepSec * 0.5,
                       nextPlayheadSec + drift * 0.2
                     );
+                  } else if (Math.abs(drift) >= 0.35 && Math.abs(drift) < 2.0) {
+                    nextPlayheadSec =
+                      drift > 0
+                        ? Math.min(span.editedEndSec, nextPlayheadSec + drift * 0.45)
+                        : currentPlayheadSec + stepSec * 0.25;
                   }
                 }
               }
@@ -1443,7 +1456,6 @@ class AudioPreviewEngine {
       this.forceSeekPending || !this.wasPlaying || mapped.spanIndex !== this.lastSpanIndex;
 
     const playableTracks = selectPlayableTracks(state);
-    const acousticProfiles = this.getAcousticProfiles(state.tracks);
     const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     // 1. Transcript-guided lookahead (220ms) + holdover (480ms)
@@ -1451,7 +1463,11 @@ class AudioPreviewEngine {
       this.lastHeldSpeakerId = mapped.activeSpeakerId;
       this.speakerHoldUntilPerfMs.set(mapped.activeSpeakerId, nowPerf + 480);
     }
-    if (playableTracks.length > 1 && state.autoSoloMode !== 'off') {
+    const shouldEvalAutoSolo =
+      crossedCutOrScrub || nowPerf - this.lastAutoSoloEvalPerfMs >= 65;
+    if (shouldEvalAutoSolo && playableTracks.length > 1 && state.autoSoloMode !== 'off') {
+      this.lastAutoSoloEvalPerfMs = nowPerf;
+      const acousticProfiles = this.getAcousticProfiles(state.tracks);
       const lookahead = resolveEditedPlayheadToSource(
         state,
         timeline,

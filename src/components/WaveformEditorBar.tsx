@@ -1367,7 +1367,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     return { byId, sharedRefCeiling };
   }, [speakerTracks, state.loudnessAligned, hiResEnvelopeRev]);
 
-  const totalSec = Math.max(1, timeline.totalEditedDurationSec);
+  const totalSec = Math.max(0.01, timeline.totalEditedDurationSec);
 
   // BGM 轨紧凑化高度（不用那么高，固定约 34px）
   const BGM_LANE_COMPACT_H = 34;

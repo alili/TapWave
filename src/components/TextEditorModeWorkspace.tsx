@@ -1000,7 +1000,14 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                             if (onSeekToHighlight) {
                               onSeekToHighlight(hl);
                             } else {
-                              onSeekToSec(hl.sourceStartMs / 1000);
+                              const hlSrcSec = hl.sourceStartMs / 1000;
+                              const span = timeline.playbackSpans.find(
+                                (s) => hlSrcSec >= s.sourceStartSec - 0.05 && hlSrcSec <= s.sourceEndSec + 0.05
+                              );
+                              const targetSec = span
+                                ? span.editedStartSec + Math.max(0, hlSrcSec - span.sourceStartSec)
+                                : hlSrcSec;
+                              onSeekToSec(targetSec);
                             }
                           }}
                           className="text-xs text-zinc-200 leading-snug line-clamp-2 select-text cursor-pointer hover:text-purple-200"
