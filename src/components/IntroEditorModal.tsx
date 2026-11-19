@@ -15,7 +15,7 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { AuxAudioSlot, HighlightMuteInterval, PodcastProjectState } from '../types/podcast';
+import { AuxAudioSlot, HighlightMuteInterval, PodcastProjectState, SpeakerTrack } from '../types/podcast';
 import {
   computeColdOpenDurationSec,
   computeIntroBgmDurationSec,
@@ -25,6 +25,12 @@ import {
   TimelineComputation,
 } from '../engine/timelineEngine';
 import { audioPreview } from '../engine/audioPreviewEngine';
+import {
+  computeLegacyPeaksCalibration,
+  HiResWaveformEnvelope,
+  loadTrackHiResEnvelope,
+  sampleCalibratedWaveformPoint,
+} from '../engine/waveformEnvelopeLoader';
 
 interface IntroEditorModalProps {
   open: boolean;
@@ -81,34 +87,85 @@ type DragAction =
       rectWidth: number;
     };
 
-function samplePeaksForSlice(
-  peaks: number[] | undefined,
-  durationMs: number | undefined,
-  sliceStartMs: number,
-  sliceEndMs: number,
-  numBars: number
-): number[] {
-  const out = new Array<number>(numBars).fill(0.12);
-  if (!peaks || peaks.length === 0 || !durationMs || durationMs <= 0) {
-    for (let i = 0; i < numBars; i++) {
-      out[i] = 0.2 + 0.55 * Math.abs(Math.sin(i * 0.7 + sliceStartMs * 0.001));
-    }
-    return out;
-  }
-  const spanMs = Math.max(1, sliceEndMs - sliceStartMs);
-  for (let i = 0; i < numBars; i++) {
-    const t0 = sliceStartMs + (i / numBars) * spanMs;
-    const t1 = sliceStartMs + ((i + 1) / numBars) * spanMs;
-    const idx0 = Math.max(0, Math.min(peaks.length - 1, Math.floor((t0 / durationMs) * peaks.length)));
-    const idx1 = Math.max(idx0, Math.min(peaks.length - 1, Math.floor((t1 / durationMs) * peaks.length)));
-    let maxV = 0;
-    for (let k = idx0; k <= idx1; k++) {
-      if (peaks[k] > maxV) maxV = peaks[k];
-    }
-    out[i] = Math.max(0.08, Math.min(1, maxV * 1.4));
-  }
-  return out;
+interface HiResClipWaveformCanvasProps {
+  hiRes?: HiResWaveformEnvelope;
+  legacyPeaks: number[];
+  durationMs: number;
+  sliceStartMs: number;
+  sliceEndMs: number;
+  color: string;
+  dimmed?: boolean;
+  gainFn?: (relSec: number) => number;
 }
+
+const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.memo(
+  ({ hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed = false, gainFn }) => {
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(1, Math.round(rect.width));
+      const H = Math.max(1, Math.round(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+
+      const safeDurMs = Math.max(1, durationMs || hiRes?.durationMs || sliceEndMs || 1000);
+      const calibration = hiRes ?? computeLegacyPeaksCalibration(legacyPeaks);
+      const sharedRefCeiling = calibration.p992Peak || 0.72;
+      const midY = H / 2;
+      const maxAmp = Math.max(4, H * 0.44);
+      const spanMs = Math.max(1, sliceEndMs - sliceStartMs);
+      const halfWinRatio = Math.max(0.0005, (spanMs / W) * 0.5 / safeDurMs);
+
+      ctx.strokeStyle = dimmed ? 'rgba(113, 113, 122, 0.55)' : color;
+      ctx.lineWidth = 1;
+
+      for (let x = 0; x < W; x += 1.5) {
+        const tMs = sliceStartMs + (x / W) * spanMs;
+        const ratio = Math.max(0, Math.min(0.999999, tMs / safeDurMs));
+        const pt = sampleCalibratedWaveformPoint(
+          hiRes,
+          legacyPeaks,
+          ratio,
+          halfWinRatio,
+          1.0,
+          calibration,
+          sharedRefCeiling
+        );
+        const g = gainFn ? gainFn((tMs - sliceStartMs) / 1000) : 1.0;
+        const posH = Math.max(1, pt.posPeak * maxAmp * g);
+        const negH = Math.max(1, pt.negPeak * maxAmp * g);
+
+        ctx.globalAlpha = dimmed ? 0.45 : 0.78;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, midY - posH);
+        ctx.lineTo(x + 0.5, midY + negH);
+        ctx.stroke();
+
+        const rmsH = Math.max(0.5, pt.rms * maxAmp * g);
+        ctx.globalAlpha = dimmed ? 0.5 : 0.95;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, midY - rmsH);
+        ctx.lineTo(x + 0.5, midY + rmsH);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }, [hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed, gainFn]);
+
+    return <canvas ref={canvasRef} className="w-full h-full block pointer-events-none" />;
+  }
+);
 
 export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   open,
@@ -127,6 +184,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   const [playheadSec, setPlayheadSec] = useState(0);
   const [selectedHlId, setSelectedHlId] = useState<string | null>(null);
   const [dragAction, setDragAction] = useState<DragAction | null>(null);
+  const hiResEnvelopesRef = useRef<Map<string, HiResWaveformEnvelope>>(new Map());
+  const [hiResRev, setHiResRev] = useState(0);
 
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const trackAreaRef = useRef<HTMLDivElement | null>(null);
@@ -185,7 +244,63 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       return;
     }
     audioPreview.preloadTracks(stateRef.current);
-  }, [open]);
+
+    let cancelled = false;
+    const loadAssetEnvelope = (id: string, filePath?: string, audioUrl?: string, peaks: number[] = [], durationMs = 0) => {
+      if (!filePath && !audioUrl) return;
+      const pseudoTrack: SpeakerTrack = {
+        id,
+        name: id,
+        role: 'host',
+        roleLabel: '',
+        color: '#a855f7',
+        filePath,
+        audioUrl,
+        durationMs,
+        rawLufs: -16,
+        autoGainDb: 0,
+        syncOffsetMs: 0,
+        roomToneStartMs: 0,
+        roomToneEndMs: 0,
+        peaks,
+        solo: false,
+        muted: false,
+      };
+      void loadTrackHiResEnvelope(pseudoTrack).then((env) => {
+        if (cancelled || !env) return;
+        if (hiResEnvelopesRef.current.get(id) !== env) {
+          hiResEnvelopesRef.current.set(id, env);
+          setHiResRev((v) => v + 1);
+        }
+      });
+    };
+
+    speakerTracks.forEach((tr) =>
+      loadAssetEnvelope(tr.id, tr.filePath, tr.audioUrl, tr.peaks, tr.durationMs)
+    );
+    if (state.introVoiceover?.enabled) {
+      loadAssetEnvelope(
+        '__intro_vo__',
+        state.introVoiceover.filePath,
+        state.introVoiceover.audioUrl,
+        state.introVoiceover.peaks ?? [],
+        (state.introVoiceover.durationSec ?? 5) * 1000
+      );
+    }
+    const introBgmPath = state.introBgm?.filePath || state.bgmWavPath;
+    if (state.introBgm?.enabled && (introBgmPath || state.introBgm?.audioUrl)) {
+      loadAssetEnvelope(
+        '__intro_bgm__',
+        introBgmPath,
+        state.introBgm.audioUrl,
+        state.introBgm.peaks ?? [],
+        (state.introBgm.durationSec ?? 10) * 1000
+      );
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [open, speakerTracks, state.introVoiceover, state.introBgm, state.bgmWavPath]);
 
   const updatePlayheadDom = (sec: number) => {
     const pct = Math.max(0, Math.min(100, (sec / timelineSpanSec) * 100));
@@ -994,13 +1109,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         const isSelected = selectedHlId === hl.id;
                         const isPrimarySpeaker = hl.speakerId === tr.id;
                         const isClipMuted = isTrackMuted || Boolean(hl.mutedTrackIds?.includes(tr.id));
-                        const bars = samplePeaksForSlice(
-                          tr.peaks,
-                          tr.durationMs,
-                          hl.sourceStartMs,
-                          hl.sourceEndMs,
-                          36
-                        );
+                        const trEnv = hiResEnvelopesRef.current.get(tr.id);
+                        void hiResRev;
 
                         return (
                           <div
@@ -1089,17 +1199,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                               </button>
                             </div>
 
-                            <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none px-0.5">
-                              {bars.map((amp, i) => (
-                                <div
-                                  key={i}
-                                  style={{
-                                    height: `${Math.round(amp * 100)}%`,
-                                    backgroundColor: isClipMuted ? '#71717a' : tr.color,
-                                  }}
-                                  className="flex-1 rounded-full opacity-80"
-                                />
-                              ))}
+                            <div className="flex-1 min-h-0 w-full pointer-events-none">
+                              <HiResClipWaveformCanvas
+                                hiRes={trEnv}
+                                legacyPeaks={tr.peaks}
+                                durationMs={tr.durationMs || trEnv?.durationMs || hl.sourceEndMs}
+                                sliceStartMs={hl.sourceStartMs}
+                                sliceEndMs={hl.sourceEndMs}
+                                color={tr.color}
+                                dimmed={isClipMuted}
+                              />
                             </div>
 
                             {(hl.partiallyMutedRanges ?? [])
@@ -1167,11 +1276,21 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         });
                       }}
                       title="左右拖动调整固定口播起播时间"
-                      className="absolute top-1 bottom-1 rounded-md border border-amber-400/80 bg-amber-500/20 cursor-grab active:cursor-grabbing px-2 py-0.5 flex items-center gap-2 shadow-sm"
+                      className="absolute top-1 bottom-1 rounded-md border border-amber-400/80 bg-amber-500/15 cursor-grab active:cursor-grabbing overflow-hidden px-1.5 py-0.5 flex flex-col justify-between shadow-sm"
                     >
-                      <span className="text-[10px] font-mono text-amber-200 truncate pointer-events-none">
+                      <span className="text-[9px] font-mono text-amber-200 truncate pointer-events-none z-10 leading-none">
                         🎙️ @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
                       </span>
+                      <div className="flex-1 min-h-0 w-full pointer-events-none">
+                        <HiResClipWaveformCanvas
+                          hiRes={hiResEnvelopesRef.current.get('__intro_vo__')}
+                          legacyPeaks={state.introVoiceover.peaks ?? []}
+                          durationMs={introVoDurationSec * 1000}
+                          sliceStartMs={0}
+                          sliceEndMs={introVoDurationSec * 1000}
+                          color="#fbbf24"
+                        />
+                      </div>
                     </div>
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
@@ -1180,7 +1299,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   )}
                 </div>
 
-                {/* 片头 BGM 紧凑轨（含闪避包络） */}
+                {/* 片头 BGM 紧凑轨（真实波形 + 闪避包络） */}
                 <div className="h-[44px] shrink-0 relative bg-zinc-950/40">
                   {state.introBgm?.enabled && (state.introBgm.filePath || state.introBgm.audioUrl || state.bgmWavPath) ? (
                     <div
@@ -1188,21 +1307,22 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         left: '0%',
                         width: `${Math.min(100, (introBgmDurationSec / timelineSpanSec) * 100)}%`,
                       }}
-                      className="absolute top-1 bottom-1 rounded-md border border-blue-500/60 bg-blue-500/15 overflow-hidden px-2 py-0.5 flex items-end gap-[2px]"
+                      className="absolute top-1 bottom-1 rounded-md border border-blue-500/60 bg-blue-500/10 overflow-hidden px-1.5 py-0.5 flex flex-col justify-between"
                     >
-                      {Array.from({ length: 80 }).map((_, i) => {
-                        const t = ((i + 0.5) / 80) * introBgmDurationSec;
-                        const ducked = isSecDucked(t);
-                        return (
-                          <div
-                            key={i}
-                            style={{ height: `${ducked ? duckPct : 88}%` }}
-                            className={`flex-1 rounded-t-xs transition-all ${
-                              ducked ? 'bg-purple-400/50' : 'bg-blue-400/75'
-                            }`}
-                          />
-                        );
-                      })}
+                      <span className="text-[9px] font-mono text-blue-200 truncate pointer-events-none z-10 leading-none">
+                        🎵 {state.introBgm.fileName} (避让 {state.bgmDuckDb ?? -18}dB)
+                      </span>
+                      <div className="flex-1 min-h-0 w-full pointer-events-none">
+                        <HiResClipWaveformCanvas
+                          hiRes={hiResEnvelopesRef.current.get('__intro_bgm__')}
+                          legacyPeaks={state.introBgm.peaks ?? []}
+                          durationMs={(state.introBgm.durationSec ?? introBgmDurationSec) * 1000}
+                          sliceStartMs={0}
+                          sliceEndMs={introBgmDurationSec * 1000}
+                          color="#60a5fa"
+                          gainFn={(t) => (isSecDucked(t) ? duckPct / 100 : 1.0)}
+                        />
+                      </div>
                     </div>
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">

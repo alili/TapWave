@@ -1836,8 +1836,8 @@ class AudioPreviewEngine {
         clipHolder,
         targetClipSec,
         crossedCutOrScrub,
-        isPrimaryHlTrack ? 0.25 : 0.065,
-        450
+        isPrimaryHlTrack ? 0.9 : 0.08,
+        isPrimaryHlTrack ? 1000 : 600
       );
       this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
       if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
@@ -2023,7 +2023,9 @@ class AudioPreviewEngine {
         applyPitchPreservingPlaybackRate(voEl, playbackRate);
         this.applySlewedVolume(voHolder, 0.94, !this.wasPlaying);
         const offsetInVo = Math.max(0, playheadSec - voStartSec);
-        this.seekHolderOnSpliceOnly(voHolder, offsetInVo, crossedCutOrScrub, 0.25, 450);
+        const voNeedInitialSeek =
+          this.forceSeekPending || !this.wasPlaying || Math.abs(voEl.currentTime - offsetInVo) > 0.15;
+        this.seekHolderOnSpliceOnly(voHolder, offsetInVo, voNeedInitialSeek && crossedCutOrScrub, 0.9, 1200);
         if (voEl.paused && !voEl.ended) {
           void voEl.play().catch(() => {});
         }
@@ -2090,7 +2092,7 @@ class AudioPreviewEngine {
       if (holder.audio.duration && Number.isFinite(holder.audio.duration)) {
         const modTime = offsetSecInBgm % Math.max(1, holder.audio.duration);
         const manualSeekOrStart = this.forceSeekPending || !this.wasPlaying;
-        this.seekHolderOnSpliceOnly(holder, modTime, manualSeekOrStart, 0.35, 600);
+        this.seekHolderOnSpliceOnly(holder, modTime, manualSeekOrStart, 1.5, 2000);
       }
       if (holder.audio.paused) {
         void holder.audio.play().catch(() => {});
