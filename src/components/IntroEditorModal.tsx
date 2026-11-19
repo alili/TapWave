@@ -130,8 +130,12 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const trackAreaRef = useRef<HTMLDivElement | null>(null);
+  const scrubberRef = useRef<HTMLDivElement | null>(null);
   const playheadLineRef = useRef<HTMLDivElement | null>(null);
+  const scrubberFillRef = useRef<HTMLDivElement | null>(null);
+  const scrubberThumbRef = useRef<HTMLDivElement | null>(null);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
+  const scrubberTimeRef = useRef<HTMLSpanElement | null>(null);
   const playheadRef = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -183,21 +187,32 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     audioPreview.preloadTracks(stateRef.current);
   }, [open]);
 
+  const updatePlayheadDom = (sec: number) => {
+    const pct = Math.max(0, Math.min(100, (sec / timelineSpanSec) * 100));
+    const introPct = Math.max(0, Math.min(100, (sec / totalIntroSec) * 100));
+    if (playheadLineRef.current) {
+      playheadLineRef.current.style.left = `${pct}%`;
+    }
+    if (scrubberFillRef.current) {
+      scrubberFillRef.current.style.width = `${introPct}%`;
+    }
+    if (scrubberThumbRef.current) {
+      scrubberThumbRef.current.style.left = `${introPct}%`;
+    }
+    const formatted = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
+    if (timeReadoutRef.current) {
+      timeReadoutRef.current.textContent = formatted;
+    }
+    if (scrubberTimeRef.current) {
+      scrubberTimeRef.current.textContent = formatted;
+    }
+  };
+
   // Ultra-smooth 60fps playhead loop updating DOM directly (0 React re-renders during playback!)
   useEffect(() => {
     if (!open || !isPlaying) return;
     let rafId = 0;
     let lastMs = performance.now();
-
-    const updatePlayheadDom = (sec: number) => {
-      const pct = Math.max(0, Math.min(100, (sec / timelineSpanSec) * 100));
-      if (playheadLineRef.current) {
-        playheadLineRef.current.style.left = `${pct}%`;
-      }
-      if (timeReadoutRef.current) {
-        timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
-      }
-    };
 
     const tick = (nowMs: number) => {
       const dt = Math.min(0.1, Math.max(0, (nowMs - lastMs) / 1000));
@@ -291,12 +306,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
         const sec = Number((ratio * timelineSpanSec).toFixed(2));
         playheadRef.current = sec;
         setPlayheadSec(sec);
-        if (playheadLineRef.current) {
-          playheadLineRef.current.style.left = `${(sec / timelineSpanSec) * 100}%`;
-        }
-        if (timeReadoutRef.current) {
-          timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
-        }
+        updatePlayheadDom(sec);
         audioPreview.requestSeek();
         if (isPlaying) {
           audioPreview.syncMultiTrackPlayback(stateRef.current, timelineRef.current, sec, true);
@@ -435,6 +445,17 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const trackColorBySpeaker = new Map(state.tracks.map((t) => [t.id, t]));
 
+  const seekIntroToSec = (sec: number) => {
+    const clamped = Math.max(0, Math.min(timelineSpanSec, Number(sec.toFixed(2))));
+    playheadRef.current = clamped;
+    setPlayheadSec(clamped);
+    updatePlayheadDom(clamped);
+    audioPreview.requestSeek();
+    if (isPlaying) {
+      audioPreview.syncMultiTrackPlayback(stateRef.current, timelineRef.current, clamped, true);
+    }
+  };
+
   const togglePlay = () => {
     if (isPlaying) {
       audioPreview.pauseMultiTrackPlayback();
@@ -447,6 +468,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       startAt = 0;
       playheadRef.current = 0;
       setPlayheadSec(0);
+      updatePlayheadDom(0);
     }
     audioPreview.startFromUserGesture(state, timeline, startAt, onNotify);
     setIsPlaying(true);
@@ -518,91 +540,137 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   };
 
   const playheadPct = Math.max(0, Math.min(100, (playheadSec / timelineSpanSec) * 100));
+  const introProgressPct = Math.max(0, Math.min(100, (playheadSec / totalIntroSec) * 100));
 
   const wrapperClass = embedded
-    ? 'flex-1 min-w-0 h-full flex flex-col bg-zinc-950 overflow-hidden'
+    ? 'flex-1 min-w-0 h-full flex flex-col bg-zinc-950 overflow-hidden px-3 py-2'
     : 'fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4';
   const cardClass = embedded
-    ? 'w-full h-full bg-zinc-900/95 flex flex-col overflow-hidden'
-    : 'w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]';
+    ? 'w-full h-full flex flex-col overflow-hidden gap-1.5'
+    : 'w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh] p-3 gap-2';
 
   return (
     <div className={wrapperClass}>
       <div className={cardClass}>
-        {/* Header */}
-        <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/75">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-purple-600/20 border border-purple-500/40 flex items-center justify-center">
-              <Film className="w-4 h-4 text-purple-400" />
+        {/* 顶部文本框区：与音轨视图顶部发言卡片完全一致，展示片头金句片段与固定口播 */}
+        <div className="shrink-0 rounded-xl border border-zinc-800/90 bg-zinc-900/55 px-3 py-2 flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              <span className="font-semibold text-zinc-100">片头金句与口播文案预览</span>
+              <span className="px-2 py-0.5 rounded-full bg-purple-500/15 border border-purple-500/35 font-mono text-[10px] text-purple-300">
+                共 {clipWindows.length} 段金句 · 总片头 {totalIntroSec.toFixed(1)}s
+              </span>
+              <span className="text-[11px] text-zinc-500 hidden md:inline">
+                按 Space 空格播放预览片头 · 单击卡片定位游标
+              </span>
             </div>
-            <div>
-              <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                <span>片头独立多轨编辑器</span>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-purple-500/15 border border-purple-500/35 text-purple-300">
-                  总片头 {totalIntroSec.toFixed(1)}s
-                </span>
-              </h2>
-              <p className="text-[11px] text-zinc-400 mt-0.5">
-                复用多轨波形视图 · 拖动片段移动/缩放长度 · 按住 Shift 或切换「段落静音」框选静音某音轨片段
-              </p>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isPlaying) {
+                    audioPreview.pauseMultiTrackPlayback();
+                    setIsPlaying(false);
+                  }
+                  onSeekMainPlayhead(playheadRef.current);
+                  onClose();
+                }}
+                className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[11px] text-zinc-200 flex items-center gap-1 cursor-pointer"
+              >
+                {embedded ? (
+                  <span>返回音轨视图</span>
+                ) : (
+                  <>
+                    <X className="w-3 h-3" />
+                    <span>关闭</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              if (isPlaying) {
-                audioPreview.pauseMultiTrackPlayback();
-                setIsPlaying(false);
-              }
-              onSeekMainPlayhead(playheadRef.current);
-              onClose();
-            }}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {/* 水平金句文本框卡片流 */}
+          <div className="flex items-stretch gap-2 overflow-x-auto pb-1">
+            {clipWindows.length === 0 ? (
+              <div className="px-3 py-2 rounded-lg border border-dashed border-zinc-700/80 text-xs text-zinc-500 flex items-center gap-2">
+                <Film className="w-3.5 h-3.5 text-zinc-500" />
+                <span>暂未添加金句片段，可在左侧金句栏或正片波形框选「加入金句」</span>
+              </div>
+            ) : (
+              clipWindows.map(({ highlight: hl, startSec, endSec }, idx) => {
+                const tr = trackColorBySpeaker.get(hl.speakerId);
+                const color = tr?.color || '#a855f7';
+                const isActive = playheadSec >= startSec && playheadSec <= endSec;
+                const isSelected = selectedHlId === hl.id;
+                return (
+                  <div
+                    key={hl.id}
+                    onClick={() => {
+                      setSelectedHlId(hl.id);
+                      seekIntroToSec(startSec);
+                    }}
+                    className={`w-64 shrink-0 rounded-lg border px-2.5 py-2 cursor-pointer transition flex flex-col justify-between gap-1 ${
+                      isActive
+                        ? 'border-emerald-500/80 bg-emerald-950/30 ring-1 ring-emerald-400/35'
+                        : isSelected
+                        ? 'border-purple-400/80 bg-purple-950/25'
+                        : 'border-zinc-800 bg-zinc-950/75 hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1.5 text-[11px]">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className="w-1.5 h-3.5 rounded-full shrink-0"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span className="font-semibold text-zinc-100 truncate">
+                          #{idx + 1} {hl.speakerName}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-purple-300 shrink-0">
+                        @{startSec.toFixed(1)}s ({hl.durationSec.toFixed(1)}s)
+                      </span>
+                    </div>
+                    <p className="text-xs text-zinc-200 leading-snug line-clamp-2">
+                      “{hl.text}”
+                    </p>
+                  </div>
+                );
+              })
+            )}
+
+            {state.introVoiceover?.enabled && (state.introVoiceover.filePath || state.introVoiceover.audioUrl) && (
+              <div
+                onClick={() => seekIntroToSec(introVoStartSec)}
+                className={`w-56 shrink-0 rounded-lg border px-2.5 py-2 cursor-pointer transition flex flex-col justify-between gap-1 ${
+                  playheadSec >= introVoStartSec && playheadSec <= introVoStartSec + introVoDurationSec
+                    ? 'border-amber-400 bg-amber-950/35 ring-1 ring-amber-400/40'
+                    : 'border-amber-500/40 bg-amber-950/15 hover:border-amber-400/70'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1 text-[11px]">
+                  <span className="font-semibold text-amber-200 flex items-center gap-1 truncate">
+                    <Mic className="w-3 h-3 text-amber-400 shrink-0" />
+                    <span>固定口播</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-amber-300 shrink-0">
+                    @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-100/80 truncate">
+                  {state.introVoiceover.fileName}
+                </p>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Transport & Controls */}
-        <div className="px-5 py-2.5 border-b border-zinc-800/80 bg-zinc-900/95 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        {/* 工具栏：与音轨视图一致的控制条 */}
+        <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-1 py-0.5 text-xs">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                playheadRef.current = 0;
-                setPlayheadSec(0);
-                if (playheadLineRef.current) playheadLineRef.current.style.left = '0%';
-                if (timeReadoutRef.current) timeReadoutRef.current.textContent = '00:00.0';
-                audioPreview.requestSeek();
-              }}
-              title="回到 00:00"
-              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={togglePlay}
-              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer transition ${
-                isPlaying
-                  ? 'bg-amber-500 text-zinc-950'
-                  : 'bg-purple-600 hover:bg-purple-500 text-white'
-              }`}
-            >
-              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-              <span>{isPlaying ? '暂停预览' : '试听片头'}</span>
-            </button>
-            <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 font-mono text-[11px] text-zinc-200 tabular-nums">
-              <span ref={timeReadoutRef}>
-                {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
-              </span>
-              <span className="text-zinc-500 mx-1">/</span>
-              <span className="text-purple-300">{totalIntroSec.toFixed(1)}s</span>
-            </span>
-
-            {/* Edit vs Range Mute Tool Switch */}
-            <div className="ml-2 inline-flex rounded-lg bg-zinc-950 border border-zinc-800 p-0.5">
+            <div className="inline-flex rounded-lg bg-zinc-900 border border-zinc-800 p-0.5">
               <button
                 type="button"
                 onClick={() => setToolMode('edit')}
@@ -630,7 +698,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               </button>
             </div>
 
-            <label className="ml-1 flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
+            <label className="flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={state.coldOpenEnabled}
@@ -639,14 +707,46 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 }
                 className="rounded accent-purple-500"
               />
-              <span>启用片头金句</span>
+              <span>挂载片头金句</span>
             </label>
+
+            <button
+              type="button"
+              onClick={resetSequentialHighlights}
+              className="px-2 py-1 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-300 cursor-pointer"
+            >
+              自动顺序排列
+            </button>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <div className="flex items-center gap-1.5 text-[11px] text-zinc-300">
-              <Volume2 className="w-3.5 h-3.5 text-blue-400" />
-              <span>BGM 闪避:</span>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800">
+              <button
+                type="button"
+                onClick={() => seekIntroToSec(0)}
+                title="回到 00:00"
+                className="p-1 text-zinc-400 hover:text-zinc-100 rounded hover:bg-zinc-800 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={togglePlay}
+                title="播放 / 暂停片头预览 (Space)"
+                className={`px-2.5 py-0.5 rounded font-semibold flex items-center gap-1 cursor-pointer transition ${
+                  isPlaying
+                    ? 'bg-amber-500 text-zinc-950'
+                    : 'bg-purple-600 hover:bg-purple-500 text-white'
+                }`}
+              >
+                {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                <span>{isPlaying ? '暂停' : '试听片头'}</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-[11px] text-zinc-300">
+              <Volume2 className="w-3 h-3 text-blue-400" />
+              <span>避让</span>
               <input
                 type="range"
                 min={-30}
@@ -656,64 +756,102 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 onChange={(e) =>
                   onUpdateState((p) => ({ ...p, bgmDuckDb: Number(e.target.value) }))
                 }
-                className="w-20 accent-blue-500 cursor-pointer"
+                className="w-16 accent-blue-500 cursor-pointer"
               />
-              <span className="font-mono text-blue-300 w-10 text-right">
+              <span className="font-mono text-blue-300 w-9 text-right">
                 {state.bgmDuckDb ?? -18}dB
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={resetSequentialHighlights}
-              className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[11px] text-zinc-200 cursor-pointer"
-            >
-              自动顺序排列
-            </button>
-
-            <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg px-1.5 py-0.5">
+            <div className="flex items-center gap-1 bg-zinc-950/90 border border-zinc-800 rounded-lg px-1.5 py-0.5">
               <button
                 type="button"
                 onClick={() => setZoom((z) => Math.max(1, Number((z / 1.5).toFixed(2))))}
-                className="p-1 text-zinc-400 hover:text-white cursor-pointer"
+                className="p-0.5 text-zinc-400 hover:text-white cursor-pointer"
               >
                 <Minus className="w-3 h-3" />
               </button>
-              <span className="font-mono text-[11px] text-zinc-200 w-10 text-center">
+              <span className="font-mono text-[11px] text-zinc-200 w-9 text-center">
                 {zoom.toFixed(1)}x
               </span>
               <button
                 type="button"
                 onClick={() => setZoom((z) => Math.min(16, Number((z * 1.5).toFixed(2))))}
-                className="p-1 text-zinc-400 hover:text-white cursor-pointer"
+                className="p-0.5 text-zinc-400 hover:text-white cursor-pointer"
               >
                 <Plus className="w-3 h-3" />
               </button>
             </div>
+
+            <div className="px-2.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 font-mono tabular-nums text-zinc-400">
+              <span ref={timeReadoutRef} className="text-zinc-100 font-semibold">
+                {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
+              </span>
+              <span className="mx-1 text-zinc-600">/</span>
+              <span className="text-purple-400 font-semibold">{totalIntroSec.toFixed(1)}s</span>
+            </div>
           </div>
         </div>
 
-        {/* Multi-Track Intro Timeline (matching main track DAW structure) */}
-        <div className="flex-1 overflow-y-auto p-4 bg-zinc-950/60">
-          <div className="flex rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden">
-            {/* Left Track Headers */}
-            <div className="w-48 shrink-0 border-r border-zinc-800 bg-zinc-900/75 flex flex-col">
-              <div className="h-7 border-b border-zinc-800 px-3 flex items-center text-[10px] font-mono text-zinc-500">
-                时间标尺 (⌘+滚轮缩放)
-              </div>
+        {/* 片头进度条：与音轨视图进度条完全一致 */}
+        <div className="px-2.5 py-1 rounded-lg bg-zinc-950/90 border border-zinc-800/85 flex items-center gap-2.5 select-none shrink-0">
+          <span
+            ref={scrubberTimeRef}
+            className="font-mono tabular-nums text-[11px] text-purple-300 font-semibold w-14 shrink-0"
+          >
+            {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
+          </span>
+          <div
+            ref={scrubberRef}
+            onPointerDown={(e) => {
+              const el = scrubberRef.current;
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+              const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+              seekIntroToSec(ratio * totalIntroSec);
+            }}
+            className="relative flex-1 h-4 flex items-center cursor-pointer group"
+          >
+            <div className="relative w-full h-1.5 group-hover:h-2 transition-all rounded-full bg-zinc-800/95 overflow-hidden">
+              <div
+                ref={scrubberFillRef}
+                style={{ width: `${introProgressPct}%` }}
+                className="absolute inset-y-0 left-0 bg-gradient-to-r from-purple-600 via-purple-500 to-blue-400 rounded-full"
+              />
+            </div>
+            <div
+              ref={scrubberThumbRef}
+              style={{ left: `${introProgressPct}%` }}
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white border-2 border-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.85)] pointer-events-none"
+            />
+          </div>
+          <span className="font-mono tabular-nums text-[11px] text-purple-400 font-semibold w-16 text-right shrink-0">
+            {totalIntroSec.toFixed(1)}s
+          </span>
+        </div>
 
+        {/* 多轨 DAW 视图：左 176px 音轨头 + 右可缩放音轨画布，与音轨视图结构完全一致 */}
+        <div className="flex-1 min-h-0 flex rounded-xl border border-zinc-800/90 bg-zinc-950 overflow-hidden shadow-inner">
+          {/* Left Track Headers (176px, matching WaveformEditorBar) */}
+          <div className="w-[176px] shrink-0 border-r border-zinc-800/90 bg-zinc-900/75 flex flex-col">
+            <div className="h-[22px] shrink-0 border-b border-zinc-800/90 px-2.5 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+              <span>音轨</span>
+              <span>片头时间轴</span>
+            </div>
+
+            <div className="flex-1 min-h-0 flex flex-col">
               {speakerTracks.map((tr) => (
                 <div
                   key={tr.id}
-                  className="h-24 border-b border-zinc-800/80 px-3 py-2 flex flex-col justify-between"
+                  className="flex-1 min-h-[54px] border-b border-zinc-800/60 px-2.5 py-1.5 flex flex-col justify-center gap-1"
                 >
-                  <div className="flex items-center justify-between gap-1.5">
+                  <div className="flex items-center justify-between gap-1">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span
                         className="w-1.5 h-3.5 rounded-full shrink-0"
                         style={{ backgroundColor: tr.color }}
                       />
-                      <span className="text-xs font-semibold text-zinc-100 truncate">
+                      <span className="text-[11px] font-semibold text-zinc-100 truncate">
                         {tr.name}
                       </span>
                     </div>
@@ -722,10 +860,10 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         type="button"
                         onClick={() => toggleTrackSolo(tr.id)}
                         title="独奏此轨 (Solo)"
-                        className={`w-4 h-4 rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
+                        className={`w-[16px] h-[16px] rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
                           tr.solo
                             ? 'bg-amber-500 text-zinc-950'
-                            : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                            : 'bg-zinc-800/90 text-zinc-400 hover:text-white'
                         }`}
                       >
                         S
@@ -734,105 +872,98 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         type="button"
                         onClick={() => toggleTrackMute(tr.id)}
                         title="静音此轨 (Mute)"
-                        className={`w-4 h-4 rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
+                        className={`w-[16px] h-[16px] rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
                           tr.muted
-                            ? 'bg-red-500 text-white'
-                            : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                            ? 'bg-red-500/90 text-white'
+                            : 'bg-zinc-800/90 text-zinc-400 hover:text-white'
                         }`}
                       >
                         M
                       </button>
                     </div>
                   </div>
-                  <span className="text-[10px] text-zinc-500 truncate">
-                    {tr.roleLabel} · 主讲 {clipWindows.filter((w) => w.highlight.speakerId === tr.id).length} / 共 {clipWindows.length} 段
-                  </span>
+                  <div className="text-[10px] text-zinc-500 truncate">
+                    {tr.roleLabel}
+                  </div>
                 </div>
               ))}
 
-              {/* Intro Voiceover Track Header */}
-              <div className="h-20 border-b border-zinc-800/80 px-3 py-2 flex flex-col justify-between">
-                <div className="flex items-center justify-between gap-1">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-200">
-                    <Mic className="w-3.5 h-3.5 text-amber-400" />
+              {/* 固定口播紧凑轨头 */}
+              <div className="h-[44px] shrink-0 border-b border-zinc-800/60 px-2.5 flex items-center justify-between gap-1 bg-zinc-900/40">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1 text-[11px] font-semibold text-amber-200 truncate">
+                    <Mic className="w-3 h-3 text-amber-400 shrink-0" />
                     <span>固定口播</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onImportBgm('intro_vo')}
-                    title="导入或更换固定口播音频"
-                    className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
-                  >
-                    <Upload className="w-3 h-3" />
-                  </button>
+                  <div className="text-[9px] text-zinc-500 truncate">
+                    {state.introVoiceover?.enabled ? `@${introVoStartSec.toFixed(1)}s` : '未启用'}
+                  </div>
                 </div>
-                <span className="text-[10px] text-zinc-400 truncate">
-                  {state.introVoiceover?.enabled
-                    ? `${state.introVoiceover.fileName} (@${introVoStartSec.toFixed(1)}s)`
-                    : '未开启或未上传'}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => onImportBgm('intro_vo')}
+                  title="导入或更换固定口播音频"
+                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer shrink-0"
+                >
+                  <Upload className="w-3 h-3" />
+                </button>
               </div>
 
-              {/* Intro BGM Track Header */}
-              <div className="h-20 px-3 py-2 flex flex-col justify-between">
-                <div className="flex items-center justify-between gap-1">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-200">
-                    <Music className="w-3.5 h-3.5 text-blue-400" />
+              {/* 片头 BGM 紧凑轨头 */}
+              <div className="h-[44px] shrink-0 px-2.5 flex items-center justify-between gap-1 bg-zinc-900/40">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1 text-[11px] font-semibold text-blue-200 truncate">
+                    <Music className="w-3 h-3 text-blue-400 shrink-0" />
                     <span>片头 BGM</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onImportBgm('intro')}
-                    title="导入或更换片头 BGM"
-                    className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
-                  >
-                    <Upload className="w-3 h-3" />
-                  </button>
+                  <div className="text-[9px] text-zinc-500 truncate">
+                    {state.introBgm?.enabled ? `${introBgmDurationSec.toFixed(1)}s` : '未启用'}
+                  </div>
                 </div>
-                <span className="text-[10px] text-zinc-400 truncate">
-                  {state.introBgm?.enabled
-                    ? `${state.introBgm.fileName} (${introBgmDurationSec.toFixed(1)}s)`
-                    : '未开启或未上传'}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => onImportBgm('intro')}
+                  title="导入或更换片头 BGM"
+                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer shrink-0"
+                >
+                  <Upload className="w-3 h-3" />
+                </button>
               </div>
             </div>
+          </div>
 
-            {/* Right Scrollable Zoomed Track Viewport */}
-            <div ref={scrollViewportRef} className="flex-1 overflow-x-auto relative select-none">
+          {/* Right Scrollable Multi-Track Canvas Area */}
+          <div ref={scrollViewportRef} className="flex-1 overflow-x-auto relative select-none">
+            <div
+              ref={trackAreaRef}
+              style={{ width: `${zoom * 100}%`, minWidth: '100%' }}
+              className="relative h-full flex flex-col"
+            >
+              {/* Ruler (22px) */}
               <div
-                ref={trackAreaRef}
-                style={{ width: `${zoom * 100}%`, minWidth: '100%' }}
-                className="relative"
+                onPointerDown={(e) => {
+                  const el = trackAreaRef.current;
+                  if (!el) return;
+                  const rect = el.getBoundingClientRect();
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                  const sec = Number((ratio * timelineSpanSec).toFixed(2));
+                  seekIntroToSec(sec);
+                  setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
+                }}
+                className="h-[22px] shrink-0 border-b border-zinc-800 bg-zinc-900/50 relative cursor-pointer"
               >
-                {/* Ruler */}
-                <div
-                  onPointerDown={(e) => {
-                    const el = trackAreaRef.current;
-                    if (!el) return;
-                    const rect = el.getBoundingClientRect();
-                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-                    const sec = Number((ratio * timelineSpanSec).toFixed(2));
-                    playheadRef.current = sec;
-                    setPlayheadSec(sec);
-                    if (playheadLineRef.current) playheadLineRef.current.style.left = `${(sec / timelineSpanSec) * 100}%`;
-                    if (timeReadoutRef.current) timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
-                    audioPreview.requestSeek();
-                    setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
-                  }}
-                  className="h-7 border-b border-zinc-800 bg-zinc-900/50 relative cursor-pointer"
-                >
-                  {rulerTicks.map((t) => (
-                    <div
-                      key={t}
-                      style={{ left: `${(t / timelineSpanSec) * 100}%` }}
-                      className="absolute top-0 bottom-0 border-l border-zinc-700/70 pl-1 flex items-center text-[10px] font-mono text-zinc-400 pointer-events-none"
-                    >
-                      {t}s
-                    </div>
-                  ))}
-                </div>
+                {rulerTicks.map((t) => (
+                  <div
+                    key={t}
+                    style={{ left: `${(t / timelineSpanSec) * 100}%` }}
+                    className="absolute top-0 bottom-0 border-l border-zinc-700/70 pl-1 flex items-center text-[10px] font-mono text-zinc-400 pointer-events-none"
+                  >
+                    {t}s
+                  </div>
+                ))}
+              </div>
 
-                {/* Speaker Track Lanes */}
+              <div className="flex-1 min-h-0 flex flex-col">
                 {speakerTracks.map((tr) => {
                   const isTrackMuted = tr.muted;
                   return (
@@ -848,178 +979,164 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                           setDragAction({ kind: 'mute_range', trackId: tr.id, startSec: sec, endSec: sec });
                         }
                       }}
-                      className={`h-24 border-b border-zinc-800/80 relative bg-zinc-950/80 ${
+                      className={`flex-1 min-h-[54px] border-b border-zinc-800/60 relative bg-zinc-950/80 ${
                         toolMode === 'mute_range' ? 'cursor-crosshair' : ''
                       }`}
                     >
-                      {/* Center 0-crossing axis */}
                       <div
                         className="absolute left-0 right-0 top-1/2 h-px pointer-events-none opacity-25"
                         style={{ backgroundColor: tr.color }}
                       />
 
                       {clipWindows.map(({ highlight: hl, startSec, endSec }) => {
-                          const leftPct = (startSec / timelineSpanSec) * 100;
-                          const widthPct = Math.max(0.8, ((endSec - startSec) / timelineSpanSec) * 100);
-                          const isSelected = selectedHlId === hl.id;
-                          const isPrimarySpeaker = hl.speakerId === tr.id;
-                          const isClipMuted = isTrackMuted || Boolean(hl.mutedTrackIds?.includes(tr.id));
-                          const bars = samplePeaksForSlice(
-                            tr.peaks,
-                            tr.durationMs,
-                            hl.sourceStartMs,
-                            hl.sourceEndMs,
-                            36
-                          );
+                        const leftPct = (startSec / timelineSpanSec) * 100;
+                        const widthPct = Math.max(0.8, ((endSec - startSec) / timelineSpanSec) * 100);
+                        const isSelected = selectedHlId === hl.id;
+                        const isPrimarySpeaker = hl.speakerId === tr.id;
+                        const isClipMuted = isTrackMuted || Boolean(hl.mutedTrackIds?.includes(tr.id));
+                        const bars = samplePeaksForSlice(
+                          tr.peaks,
+                          tr.durationMs,
+                          hl.sourceStartMs,
+                          hl.sourceEndMs,
+                          36
+                        );
 
-                          return (
-                            <div
-                              key={`${tr.id}_${hl.id}`}
-                              style={{
-                                left: `${leftPct}%`,
-                                width: `${widthPct}%`,
-                                borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}88`,
-                                backgroundColor: isClipMuted
-                                  ? 'rgba(63,63,70,0.35)'
-                                  : isPrimarySpeaker
-                                  ? `${tr.color}28`
-                                  : `${tr.color}12`,
-                              }}
-                              onPointerDown={(e) => {
-                                if (toolMode === 'mute_range' || e.shiftKey) return;
-                                e.stopPropagation();
-                                setSelectedHlId(hl.id);
-                                setDragAction({
-                                  kind: 'move_hl',
-                                  hlId: hl.id,
-                                  startClientX: e.clientX,
-                                  origStartSec: startSec,
-                                });
-                              }}
-                              className={`absolute top-2 bottom-2 rounded-lg border-2 overflow-hidden flex flex-col justify-between px-2 py-1 shadow-md ${
-                                toolMode === 'mute_range'
-                                  ? 'cursor-crosshair'
-                                  : 'cursor-grab active:cursor-grabbing'
-                              }`}
-                            >
-                              {/* Left trim handle */}
-                              {toolMode === 'edit' && (
-                                <div
-                                  onPointerDown={(e) => {
-                                    e.stopPropagation();
-                                    setSelectedHlId(hl.id);
-                                    setDragAction({
-                                      kind: 'trim_hl_left',
-                                      hlId: hl.id,
-                                      startClientX: e.clientX,
-                                      origIntroStartSec: startSec,
-                                      origSourceStartMs: hl.sourceStartMs,
-                                      origSourceEndMs: hl.sourceEndMs,
-                                      origDurationSec: hl.durationSec,
-                                    });
-                                  }}
-                                  title="左右拖动缩放/修剪金句开头"
-                                  className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
-                                />
-                              )}
+                        return (
+                          <div
+                            key={`${tr.id}_${hl.id}`}
+                            style={{
+                              left: `${leftPct}%`,
+                              width: `${widthPct}%`,
+                              borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}88`,
+                              backgroundColor: isClipMuted
+                                ? 'rgba(63,63,70,0.35)'
+                                : isPrimarySpeaker
+                                ? `${tr.color}28`
+                                : `${tr.color}12`,
+                            }}
+                            onPointerDown={(e) => {
+                              if (toolMode === 'mute_range' || e.shiftKey) return;
+                              e.stopPropagation();
+                              setSelectedHlId(hl.id);
+                              setDragAction({
+                                kind: 'move_hl',
+                                hlId: hl.id,
+                                startClientX: e.clientX,
+                                origStartSec: startSec,
+                              });
+                            }}
+                            className={`absolute top-1.5 bottom-1.5 rounded-md border overflow-hidden flex flex-col justify-between px-1.5 py-0.5 shadow-sm ${
+                              toolMode === 'mute_range'
+                                ? 'cursor-crosshair'
+                                : 'cursor-grab active:cursor-grabbing'
+                            }`}
+                          >
+                            {toolMode === 'edit' && (
+                              <div
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedHlId(hl.id);
+                                  setDragAction({
+                                    kind: 'trim_hl_left',
+                                    hlId: hl.id,
+                                    startClientX: e.clientX,
+                                    origIntroStartSec: startSec,
+                                    origSourceStartMs: hl.sourceStartMs,
+                                    origSourceEndMs: hl.sourceEndMs,
+                                    origDurationSec: hl.durationSec,
+                                  });
+                                }}
+                                title="左右拖动缩放/修剪金句开头"
+                                className="absolute left-0 top-0 bottom-0 w-1.5 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                              />
+                            )}
+                            {toolMode === 'edit' && (
+                              <div
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedHlId(hl.id);
+                                  setDragAction({
+                                    kind: 'trim_hl_right',
+                                    hlId: hl.id,
+                                    startClientX: e.clientX,
+                                    origSourceStartMs: hl.sourceStartMs,
+                                    origDurationSec: hl.durationSec,
+                                    maxSourceMs: tr.durationMs ?? hl.sourceEndMs + 30000,
+                                  });
+                                }}
+                                title="左右拖动缩放/扩展金句结尾"
+                                className="absolute right-0 top-0 bottom-0 w-1.5 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                              />
+                            )}
 
-                              {/* Right trim handle */}
-                              {toolMode === 'edit' && (
-                                <div
-                                  onPointerDown={(e) => {
-                                    e.stopPropagation();
-                                    setSelectedHlId(hl.id);
-                                    setDragAction({
-                                      kind: 'trim_hl_right',
-                                      hlId: hl.id,
-                                      startClientX: e.clientX,
-                                      origSourceStartMs: hl.sourceStartMs,
-                                      origDurationSec: hl.durationSec,
-                                      maxSourceMs: tr.durationMs ?? hl.sourceEndMs + 30000,
-                                    });
-                                  }}
-                                  title="左右拖动缩放/扩展金句结尾"
-                                  className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
-                                />
-                              )}
-
-                              <div className="flex items-center justify-between gap-1 text-[10px] font-mono z-10 pl-1 pr-1">
-                                <span className="text-zinc-200 truncate pointer-events-none">
-                                  {isPrimarySpeaker ? '★ ' : ''}@{startSec.toFixed(1)}s · {hl.durationSec.toFixed(1)}s
-                                </span>
-                                <button
-                                  type="button"
-                                  onPointerDown={(e) => e.stopPropagation()}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    toggleHighlightTrackMute(hl.id, tr.id);
-                                  }}
-                                  title={isClipMuted ? '取消静音此片段' : '静音此金句片段'}
-                                  className={`px-1 rounded text-[9px] cursor-pointer ${
-                                    isClipMuted
-                                      ? 'bg-red-500/80 text-white'
-                                      : 'bg-zinc-900/70 text-zinc-300 hover:text-white'
-                                  }`}
-                                >
-                                  {isClipMuted ? '🔇' : '🔊'}
-                                </button>
-                              </div>
-
-                              {/* Bipolar Waveform */}
-                              <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none px-1">
-                                {bars.map((amp, i) => (
-                                  <div
-                                    key={i}
-                                    style={{
-                                      height: `${Math.round(amp * 100)}%`,
-                                      backgroundColor: isClipMuted ? '#71717a' : tr.color,
-                                    }}
-                                    className="flex-1 rounded-full opacity-75"
-                                  />
-                                ))}
-                              </div>
-
-                              <div className="text-[10px] text-zinc-200 truncate pointer-events-none pl-1 pr-1 z-10">
-                                “{hl.text}”
-                              </div>
-
-                              {/* Partially muted sub-ranges inside this clip */}
-                              {(hl.partiallyMutedRanges ?? [])
-                                .filter((pm) => pm.trackId === tr.id)
-                                .map((pm) => {
-                                  const pmLeftPct =
-                                    ((pm.sourceStartMs - hl.sourceStartMs) /
-                                      Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
-                                    100;
-                                  const pmWidthPct =
-                                    ((pm.sourceEndMs - pm.sourceStartMs) /
-                                      Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
-                                    100;
-                                  return (
-                                    <button
-                                      key={pm.id}
-                                      type="button"
-                                      onPointerDown={(e) => e.stopPropagation()}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        removePartialMuteRange(hl.id, pm.id);
-                                      }}
-                                      style={{
-                                        left: `${Math.max(0, pmLeftPct)}%`,
-                                        width: `${Math.min(100, Math.max(4, pmWidthPct))}%`,
-                                      }}
-                                      title="已静音该音轨段落（点击恢复声音）"
-                                      className="absolute inset-y-0 bg-red-950/75 border-x border-red-400/80 flex items-center justify-center text-[10px] text-red-200 z-20 cursor-pointer hover:bg-red-900/80"
-                                    >
-                                      🔇
-                                    </button>
-                                  );
-                                })}
+                            <div className="flex items-center justify-between gap-1 text-[9px] font-mono z-10 pl-0.5 pr-0.5">
+                              <span className="text-zinc-200 truncate pointer-events-none">
+                                {isPrimarySpeaker ? '★ ' : ''}@{startSec.toFixed(1)}s
+                              </span>
+                              <button
+                                type="button"
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleHighlightTrackMute(hl.id, tr.id);
+                                }}
+                                className={`px-1 rounded text-[9px] cursor-pointer ${
+                                  isClipMuted ? 'bg-red-500/80 text-white' : 'bg-zinc-900/70 text-zinc-300'
+                                }`}
+                              >
+                                {isClipMuted ? '🔇' : '🔊'}
+                              </button>
                             </div>
-                          );
-                        })}
 
-                      {/* Active mute_range drag preview */}
+                            <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none px-0.5">
+                              {bars.map((amp, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    height: `${Math.round(amp * 100)}%`,
+                                    backgroundColor: isClipMuted ? '#71717a' : tr.color,
+                                  }}
+                                  className="flex-1 rounded-full opacity-80"
+                                />
+                              ))}
+                            </div>
+
+                            {(hl.partiallyMutedRanges ?? [])
+                              .filter((pm) => pm.trackId === tr.id)
+                              .map((pm) => {
+                                const pmLeftPct =
+                                  ((pm.sourceStartMs - hl.sourceStartMs) /
+                                    Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
+                                  100;
+                                const pmWidthPct =
+                                  ((pm.sourceEndMs - pm.sourceStartMs) /
+                                    Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
+                                  100;
+                                return (
+                                  <button
+                                    key={pm.id}
+                                    type="button"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removePartialMuteRange(hl.id, pm.id);
+                                    }}
+                                    style={{
+                                      left: `${Math.max(0, pmLeftPct)}%`,
+                                      width: `${Math.min(100, Math.max(4, pmWidthPct))}%`,
+                                    }}
+                                    title="已静音该音轨段落（点击恢复声音）"
+                                    className="absolute inset-y-0 bg-red-950/75 border-x border-red-400/80 flex items-center justify-center text-[10px] text-red-200 z-20 cursor-pointer hover:bg-red-900/80"
+                                  >
+                                    🔇
+                                  </button>
+                                );
+                              })}
+                          </div>
+                        );
+                      })}
+
                       {dragAction?.kind === 'mute_range' && dragAction.trackId === tr.id && (
                         <div
                           style={{
@@ -1033,8 +1150,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   );
                 })}
 
-                {/* Intro Voiceover Lane */}
-                <div className="h-20 border-b border-zinc-800/80 relative bg-zinc-950/60">
+                {/* 固定口播紧凑轨 */}
+                <div className="h-[44px] shrink-0 border-b border-zinc-800/60 relative bg-zinc-950/60">
                   {state.introVoiceover?.enabled && (state.introVoiceover.filePath || state.introVoiceover.audioUrl) ? (
                     <div
                       style={{
@@ -1050,107 +1167,61 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         });
                       }}
                       title="左右拖动调整固定口播起播时间"
-                      className="absolute top-2 bottom-2 rounded-lg border-2 border-amber-400/80 bg-amber-500/20 cursor-grab active:cursor-grabbing px-2.5 py-1 flex flex-col justify-between shadow-md"
+                      className="absolute top-1 bottom-1 rounded-md border border-amber-400/80 bg-amber-500/20 cursor-grab active:cursor-grabbing px-2 py-0.5 flex items-center gap-2 shadow-sm"
                     >
-                      <div className="flex items-center justify-between text-[10px] font-mono text-amber-200 pointer-events-none">
-                        <span className="font-semibold truncate">🎙️ {state.introVoiceover.fileName}</span>
-                        <span className="shrink-0">
-                          @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
-                        </span>
-                      </div>
-                      <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none">
-                        {samplePeaksForSlice(
-                          state.introVoiceover.peaks,
-                          introVoDurationSec * 1000,
-                          0,
-                          introVoDurationSec * 1000,
-                          32
-                        ).map((amp, i) => (
-                          <div
-                            key={i}
-                            style={{ height: `${Math.round(amp * 100)}%` }}
-                            className="flex-1 rounded-full bg-amber-400/75"
-                          />
-                        ))}
-                      </div>
+                      <span className="text-[10px] font-mono text-amber-200 truncate pointer-events-none">
+                        🎙️ @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
+                      </span>
                     </div>
                   ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-                      未开启或未上传固定口播（点击左侧上传按钮导入）
+                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
+                      未开启固定口播
                     </div>
                   )}
                 </div>
 
-                {/* Intro BGM Lane with Live Ducking Envelope */}
-                <div className="h-20 relative bg-zinc-950/40">
+                {/* 片头 BGM 紧凑轨（含闪避包络） */}
+                <div className="h-[44px] shrink-0 relative bg-zinc-950/40">
                   {state.introBgm?.enabled && (state.introBgm.filePath || state.introBgm.audioUrl || state.bgmWavPath) ? (
                     <div
                       style={{
                         left: '0%',
                         width: `${Math.min(100, (introBgmDurationSec / timelineSpanSec) * 100)}%`,
                       }}
-                      className="absolute top-2 bottom-2 rounded-lg border border-blue-500/60 bg-blue-500/15 overflow-hidden px-2.5 py-1 flex flex-col justify-between"
+                      className="absolute top-1 bottom-1 rounded-md border border-blue-500/60 bg-blue-500/15 overflow-hidden px-2 py-0.5 flex items-end gap-[2px]"
                     >
-                      <div className="flex items-center justify-between text-[10px] font-mono text-blue-200 z-10 pointer-events-none">
-                        <span className="font-semibold truncate">🎵 {state.introBgm.fileName}</span>
-                        <span className="shrink-0">
-                          0.0s ~ {introBgmDurationSec.toFixed(1)}s (避让 {state.bgmDuckDb ?? -18}dB)
-                        </span>
-                      </div>
-
-                      <div className="relative h-8 w-full flex items-end gap-[2px] pointer-events-none">
-                        {Array.from({ length: 80 }).map((_, i) => {
-                          const t = ((i + 0.5) / 80) * introBgmDurationSec;
-                          const ducked = isSecDucked(t);
-                          return (
-                            <div
-                              key={i}
-                              style={{ height: `${ducked ? duckPct : 88}%` }}
-                              className={`flex-1 rounded-t-xs transition-all ${
-                                ducked ? 'bg-purple-400/50' : 'bg-blue-400/75'
-                              }`}
-                            />
-                          );
-                        })}
-                      </div>
+                      {Array.from({ length: 80 }).map((_, i) => {
+                        const t = ((i + 0.5) / 80) * introBgmDurationSec;
+                        const ducked = isSecDucked(t);
+                        return (
+                          <div
+                            key={i}
+                            style={{ height: `${ducked ? duckPct : 88}%` }}
+                            className={`flex-1 rounded-t-xs transition-all ${
+                              ducked ? 'bg-purple-400/50' : 'bg-blue-400/75'
+                            }`}
+                          />
+                        );
+                      })}
                     </div>
                   ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-                      未开启或未上传片头 BGM（点击左侧上传按钮导入）
+                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
+                      未开启片头 BGM
                     </div>
                   )}
                 </div>
+              </div>
 
-                {/* Playhead vertical line (updated directly via ref at 60fps) */}
-                <div
-                  ref={playheadLineRef}
-                  style={{ left: `${playheadPct}%` }}
-                  className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-20 shadow-[0_0_8px_rgba(239,68,68,0.85)]"
-                >
-                  <div className="w-2.5 h-2.5 -ml-[4px] bg-red-500 rotate-45 rounded-xs" />
-                </div>
+              {/* Playhead vertical line */}
+              <div
+                ref={playheadLineRef}
+                style={{ left: `${playheadPct}%` }}
+                className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-20 shadow-[0_0_8px_rgba(239,68,68,0.85)]"
+              >
+                <div className="w-2.5 h-2.5 -ml-[4px] bg-red-500 rotate-45 rounded-xs" />
               </div>
             </div>
           </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-5 py-3 border-t border-zinc-800 bg-zinc-950/70 flex items-center justify-between text-xs text-zinc-400">
-          <span>所有修改已实时同步至片头与导出配置 · 主音轨仅保留正文内容</span>
-          <button
-            type="button"
-            onClick={() => {
-              if (isPlaying) {
-                audioPreview.pauseMultiTrackPlayback();
-                setIsPlaying(false);
-              }
-              onSeekMainPlayhead(playheadRef.current);
-              onClose();
-            }}
-            className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold cursor-pointer"
-          >
-            {embedded ? '返回音轨视图' : '完成编排'}
-          </button>
         </div>
       </div>
     </div>
