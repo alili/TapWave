@@ -107,6 +107,7 @@ interface WaveformEditorBarProps {
   onImportBgm?: (slot: AuxAudioSlot) => void;
   onUpdateBgmAsset?: (slot: AuxAudioSlot, patch: Partial<BgmTrackAsset>) => void;
   onOpenIntroEditor?: () => void;
+  onInsertSilenceAtPlayhead?: (durationSec: number) => void;
   onNotify?: (message: string) => void;
   onRenameSpeakerTrack?: (trackId: string, newName?: string) => void;
   onSelectToken?: (tokenId: string, flatIndex: number, shiftKey: boolean, metaKey: boolean) => void;
@@ -1174,6 +1175,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onSetWaveformSelectionMode,
   onUpdateBgmAsset,
   onOpenIntroEditor,
+  onInsertSilenceAtPlayhead,
   onNotify,
 }) => {
   // 主音轨视图严格从正片 00:00 开始（片头高光/口播/片头BGM已分离至独立片头编辑器）
@@ -1263,6 +1265,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const deckLastClickedIdxRef = useRef<number | null>(null);
 
   const [dockHeight, setDockHeight] = useState<number>(DEFAULT_DOCK_HEIGHT);
+  const [insertSilenceSec, setInsertSilenceSec] = useState<number>(1.0);
   const [resizingHeight, setResizingHeight] = useState<boolean>(false);
   const [deckCollapsed, setDeckCollapsed] = useState<boolean>(false);
   const [deckFlowMode, setDeckFlowMode] = useState<'horizontal' | 'vertical'>('horizontal');
@@ -1339,6 +1342,24 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const [hoverRatio, setHoverRatio] = useState<number | null>(null);
   const [hoverLaneIdx, setHoverLaneIdx] = useState<number | null>(null);
   const [overlapJumpIdx, setOverlapJumpIdx] = useState<number>(0);
+  const [showCutMarkers, setShowCutMarkers] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('podcraft_show_cut_markers') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const toggleShowCutMarkers = useCallback(() => {
+    setShowCutMarkers((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('podcraft_show_cut_markers', String(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
   const [tokenContextMenu, setTokenContextMenu] = useState<{
     x: number;
     y: number;
@@ -2390,72 +2411,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
     // 3a/3b. 片头高光与固定口播已分离至独立片头编辑器，主音轨保持纯粹正文视图
 
-    // 3d. Multi-Track Speech Overlap Zones (语音重合轨道提示带)
-    if (timelineZones.allOverlapZones.length > 0) {
-      timelineZones.allOverlapZones.forEach((ov) => {
-        if (ov.r2 < viewStartRatio || ov.r1 > viewEndRatio) return;
-        const ox0 = Math.max(0, ratioToX(ov.r1));
-        const ox1 = Math.min(W, ratioToX(ov.r2));
-        const ow = Math.max(2, ox1 - ox0);
-
-        ctx.fillStyle = ov.muted
-          ? 'rgba(113, 113, 122, 0.08)'
-          : 'rgba(168, 85, 247, 0.085)';
-        ctx.fillRect(ox0, RULER_H, ow, BODY_H);
-
-        ctx.save();
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = ov.muted
-          ? 'rgba(161, 161, 170, 0.35)'
-          : 'rgba(192, 132, 252, 0.45)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(Math.round(ox0) + 0.5, RULER_H);
-        ctx.lineTo(Math.round(ox0) + 0.5, H);
-        if (ow >= 5) {
-          ctx.moveTo(Math.round(ox0 + ow) - 0.5, RULER_H);
-          ctx.lineTo(Math.round(ox0 + ow) - 0.5, H);
-        }
-        ctx.stroke();
-        ctx.restore();
-
-        if (ow >= 38) {
-          const badgeLabel =
-            ow >= 120
-              ? ov.muted
-                ? '🔀 重合 · 副轨静音'
-                : state.autoSoloMode !== 'off' && !ov.keepFullVolume
-                ? '🔀 语音重合 · 副轨降音'
-                : '🔀 语音重合 · 原声'
-              : '🔀 重合';
-          ctx.font = wordTimelineMode
-            ? '600 8.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
-            : '600 9.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-          const textW = ctx.measureText(badgeLabel).width;
-          const pillW = Math.min(ow - 4, textW + 10);
-          if (pillW >= 32) {
-            ctx.fillStyle = ov.muted
-              ? 'rgba(39, 39, 42, 0.9)'
-              : 'rgba(88, 28, 135, 0.88)';
-            ctx.beginPath();
-            ctx.roundRect(ox0 + 2, topBadgeY, pillW, topBadgeH, wordTimelineMode ? 3 : 3.5);
-            ctx.fill();
-            ctx.strokeStyle = ov.muted
-              ? 'rgba(161, 161, 170, 0.45)'
-              : 'rgba(216, 180, 254, 0.55)';
-            ctx.lineWidth = 0.75;
-            ctx.stroke();
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(ox0 + 3, topBadgeY, Math.max(0, pillW - 2), topBadgeH);
-            ctx.clip();
-            ctx.fillStyle = ov.muted ? '#d4d4d8' : '#f3e8ff';
-            ctx.fillText(badgeLabel, ox0 + 7, topBadgeCenterY);
-            ctx.restore();
-          }
-        }
-      });
-    }
+    // 3d. 重复/重合处无需在波形上特地标注（保留自动降音/静音波形幅度效果）
 
     // 4. Multi-Track Lanes, DAW Clip Regions & True Audition Bipolar Peak + RMS Envelopes
     const stepPx = 1.0;
@@ -2560,37 +2516,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           ctx.roundRect(rx0 + 0.5, yTop + clipPadY, rw - 1, 1.5, [4, 4, 0, 0]);
           ctx.fill();
         }
-      });
-
-      // Draw Secondary Overlapping Speech Track Sub-Clip Box (语音重合副轨自动降音框)
-      secOverlaps.forEach((ov) => {
-        if (ov.r2 < viewStartRatio || ov.r1 > viewEndRatio) return;
-        const rx0 = Math.max(0, ratioToX(ov.r1));
-        const rx1 = Math.min(W, ratioToX(ov.r2));
-        const rw = Math.max(3, rx1 - rx0);
-        const clipPadY = 4;
-        const clipH = Math.max(8, laneH - clipPadY * 2);
-        const isDucked = !ov.muted && state.autoSoloMode !== 'off' && !ov.keepFullVolume;
-
-        ctx.save();
-        ctx.fillStyle = ov.muted
-          ? 'rgba(63, 63, 70, 0.22)'
-          : isDucked
-          ? 'rgba(168, 85, 247, 0.16)'
-          : 'rgba(16, 185, 129, 0.14)';
-        ctx.beginPath();
-        ctx.roundRect(rx0, yTop + clipPadY, rw, clipH, 4);
-        ctx.fill();
-
-        ctx.setLineDash([3, 2]);
-        ctx.strokeStyle = ov.muted
-          ? 'rgba(161, 161, 170, 0.5)'
-          : isDucked
-          ? 'rgba(216, 180, 254, 0.68)'
-          : 'rgba(52, 211, 153, 0.65)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.restore();
       });
 
       const coreLineColor = lightenHex(tr.color, 36);
@@ -3036,39 +2961,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         }
         ctx.restore();
       });
-
-      // Secondary Overlap Ducked Track Label placed in bottom strip of lane so it never overlaps top speech text
-      secOverlaps.forEach((ov) => {
-        if (ov.r2 < viewStartRatio || ov.r1 > viewEndRatio) return;
-        const rx0 = Math.max(0, ratioToX(ov.r1));
-        const rx1 = Math.min(W, ratioToX(ov.r2));
-        const rw = rx1 - rx0;
-        if (rw < 58 || laneH < 48) return;
-        const label = ov.muted
-          ? '🔇 副轨静音'
-          : state.autoSoloMode !== 'off' && !ov.keepFullVolume
-          ? '🔉 副轨自动降音'
-          : '🔊 副轨原声';
-        const badgeY = yTop + laneH - 17;
-        ctx.save();
-        ctx.font = '600 9.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-        ctx.textBaseline = 'middle';
-        const tw = Math.min(rw - 6, ctx.measureText(label).width + 8);
-        ctx.fillStyle = ov.muted
-          ? 'rgba(39, 39, 42, 0.88)'
-          : state.autoSoloMode !== 'off' && !ov.keepFullVolume
-          ? 'rgba(88, 28, 135, 0.86)'
-          : 'rgba(6, 78, 59, 0.86)';
-        ctx.beginPath();
-        ctx.roundRect(rx0 + 3, badgeY, tw, 14, 3);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.rect(rx0 + 4, badgeY, Math.max(0, tw - 2), 14);
-        ctx.clip();
-        ctx.fillStyle = ov.muted ? '#d4d4d8' : '#f3e8ff';
-        ctx.fillText(label, rx0 + 6, badgeY + 7);
-        ctx.restore();
-      });
     });
 
     // 4a-bgm. Dedicated BGM / Music Track Lane (紧凑伴奏车道：片头固定长度 + 片尾拖动截取与自动适应音量)
@@ -3407,41 +3299,64 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       const lastWordPillRightByLane = new Float64Array(speakerTracks.length).fill(-999);
       ctx.save();
 
-      // Adobe Audition-style Equal-Power Crossfade Splice Indicators drawn behind speech text & badges
-      timelineZones.cutSeams.forEach((seam) => {
-        if (seam.ratio < viewStartRatio || seam.ratio > viewEndRatio) return;
-        const sx = ratioToX(seam.ratio);
-        const halfSeamPx = Math.max(
-          2,
-          Math.min(28, ((0.036 / 2) / Math.max(0.05, visibleSec)) * W)
-        );
-        ctx.save();
-        ctx.strokeStyle = 'rgba(52, 211, 153, 0.48)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.moveTo(sx, RULER_H + 1);
-        ctx.lineTo(sx, H - 1);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        if (visibleSec <= 45) {
-          ctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
-          ctx.fillRect(sx - halfSeamPx, RULER_H + 1, halfSeamPx * 2, BODY_H - 2);
-          // Draw crisp `><` equal-power envelope curves at bottom strip of body so it never occludes top speech text
-          const envBot = H - 3;
-          const envTop = Math.max(RULER_H + 4, H - Math.min(16, BODY_H - 4));
-          ctx.strokeStyle = 'rgba(110, 231, 183, 0.72)';
-          ctx.lineWidth = 1.1;
+      // 剪辑处标注（贯穿虚线 + 交叉淡化包络 + 顶部「✂️ 剪辑」胶囊，可通过工具栏开关切换显示）
+      let lastCutBadgeRightX = -999;
+      if (showCutMarkers) {
+        timelineZones.cutSeams.forEach((seam) => {
+          if (seam.ratio < viewStartRatio || seam.ratio > viewEndRatio) return;
+          const sx = ratioToX(seam.ratio);
+          const halfSeamPx = Math.max(
+            2,
+            Math.min(28, ((0.036 / 2) / Math.max(0.05, visibleSec)) * W)
+          );
+          ctx.save();
+          ctx.strokeStyle = 'rgba(52, 211, 153, 0.72)';
+          ctx.lineWidth = 1.15;
+          ctx.setLineDash([3, 3]);
           ctx.beginPath();
-          ctx.moveTo(sx - halfSeamPx, envTop);
-          ctx.quadraticCurveTo(sx, envTop, sx + halfSeamPx, envBot);
-          ctx.moveTo(sx - halfSeamPx, envBot);
-          ctx.quadraticCurveTo(sx, envTop, sx + halfSeamPx, envTop);
+          ctx.moveTo(sx, RULER_H + 1);
+          ctx.lineTo(sx, H - 1);
           ctx.stroke();
-        }
-        ctx.restore();
-      });
+          ctx.setLineDash([]);
+
+          if (visibleSec <= 45) {
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.10)';
+            ctx.fillRect(sx - halfSeamPx, RULER_H + 1, halfSeamPx * 2, BODY_H - 2);
+            const envBot = H - 3;
+            const envTop = Math.max(RULER_H + 4, H - Math.min(16, BODY_H - 4));
+            ctx.strokeStyle = 'rgba(110, 231, 183, 0.78)';
+            ctx.lineWidth = 1.1;
+            ctx.beginPath();
+            ctx.moveTo(sx - halfSeamPx, envTop);
+            ctx.quadraticCurveTo(sx, envTop, sx + halfSeamPx, envBot);
+            ctx.moveTo(sx - halfSeamPx, envBot);
+            ctx.quadraticCurveTo(sx, envTop, sx + halfSeamPx, envTop);
+            ctx.stroke();
+          }
+
+          if (sx >= 6 && sx <= W - 18 && sx > lastCutBadgeRightX + 6) {
+            const cutLabel = visibleSec <= 45 ? '✂️ 剪辑' : '✂️';
+            ctx.font = '600 9px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+            const lw = ctx.measureText(cutLabel).width;
+            const pillW = lw + 8;
+            const pillH = 14;
+            const px = Math.min(W - pillW - 4, Math.max(2, sx - pillW / 2));
+            const py = RULER_H + 3;
+            ctx.fillStyle = 'rgba(6, 78, 59, 0.90)';
+            ctx.beginPath();
+            ctx.roundRect(px, py, pillW, pillH, 3);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(52, 211, 153, 0.75)';
+            ctx.lineWidth = 0.75;
+            ctx.stroke();
+            ctx.fillStyle = '#a7f3d0';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(cutLabel, px + 4, py + pillH / 2 + 0.5);
+            lastCutBadgeRightX = px + pillW;
+          }
+          ctx.restore();
+        });
+      }
 
       for (let k = Math.max(0, startIdx - 1); k < arr.length; k++) {
         const m = arr[k];
@@ -3449,18 +3364,40 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         if (m.editedEndSec < viewStartSec) continue;
 
         if (m.token.deleted) {
-          const cutX = Math.round(ratioToX(m.editedStartSec / totalSec)) + 0.5;
-          if (cutX >= 0 && cutX <= W && Math.abs(cutX - lastCutSeamX) >= 6) {
-            lastCutSeamX = cutX;
-            ctx.save();
-            ctx.setLineDash([2, 3]);
-            ctx.strokeStyle = 'rgba(34, 211, 238, 0.42)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(cutX, RULER_H);
-            ctx.lineTo(cutX, H);
-            ctx.stroke();
-            ctx.restore();
+          if (showCutMarkers) {
+            const cutX = Math.round(ratioToX(m.editedStartSec / totalSec)) + 0.5;
+            if (cutX >= 0 && cutX <= W && Math.abs(cutX - lastCutSeamX) >= 6) {
+              lastCutSeamX = cutX;
+              ctx.save();
+              ctx.setLineDash([2, 3]);
+              ctx.strokeStyle = 'rgba(34, 211, 238, 0.55)';
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(cutX, RULER_H);
+              ctx.lineTo(cutX, H);
+              ctx.stroke();
+              if (cutX >= 6 && cutX <= W - 18 && cutX > lastCutBadgeRightX + 6) {
+                const cutLabel = '✂️';
+                ctx.font = '600 9px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+                const lw = ctx.measureText(cutLabel).width;
+                const pillW = lw + 6;
+                const pillH = 14;
+                const px = Math.min(W - pillW - 4, Math.max(2, cutX - pillW / 2));
+                const py = RULER_H + 3;
+                ctx.fillStyle = 'rgba(8, 51, 68, 0.88)';
+                ctx.beginPath();
+                ctx.roundRect(px, py, pillW, pillH, 3);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(34, 211, 238, 0.65)';
+                ctx.lineWidth = 0.75;
+                ctx.stroke();
+                ctx.fillStyle = '#a5f3fc';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(cutLabel, px + 3, py + pillH / 2 + 0.5);
+                lastCutBadgeRightX = px + pillW;
+              }
+              ctx.restore();
+            }
           }
           continue;
         }
@@ -3632,6 +3569,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     wordTimelineMode,
     rulerHeightPx,
     visibleWordAnnotations,
+    showCutMarkers,
   ]);
 
   const minDragRatioSpan = Math.max(0.01 / totalSec, 0.004 / zoom);
@@ -5461,6 +5399,20 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             </div>
           )}
 
+          <button
+            type="button"
+            onClick={toggleShowCutMarkers}
+            title={showCutMarkers ? '点击隐藏波形上的剪辑处标注' : '点击显示波形上的剪辑处标注'}
+            className={`px-2 py-0.5 rounded-md border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition ${
+              showCutMarkers
+                ? 'bg-emerald-500/15 border-emerald-500/45 text-emerald-300 hover:bg-emerald-500/25'
+                : 'bg-zinc-900 border-zinc-700/80 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Scissors className="w-3 h-3" />
+            <span>剪辑标注{timelineZones.cutSeams.length > 0 ? ` (${timelineZones.cutSeams.length})` : ''}</span>
+          </button>
+
           {hasValidRange ? (
             <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-blue-500/15 border border-blue-500/40">
               <span className="text-blue-300 font-mono tabular-nums font-semibold">
@@ -5617,6 +5569,33 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               <FastForward className="w-3 h-3" />
             </button>
           </div>
+
+          {onInsertSilenceAtPlayhead && (
+            <div
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-[11px]"
+              title="在当前播放游标处插入空白静音时长"
+            >
+              <select
+                value={insertSilenceSec}
+                onChange={(e) => setInsertSilenceSec(Number(e.target.value))}
+                className="bg-zinc-900 border border-zinc-700/80 rounded px-1 py-0.5 text-zinc-200 font-mono text-[10.5px] focus:outline-none cursor-pointer"
+              >
+                {[0.5, 1.0, 2.0, 3.0, 5.0].map((sec) => (
+                  <option key={sec} value={sec} className="bg-zinc-900 text-zinc-100">
+                    {sec.toFixed(1)}s
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={!hasLoadedTimeline}
+                onClick={() => onInsertSilenceAtPlayhead(insertSilenceSec)}
+                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 font-medium cursor-pointer disabled:cursor-default transition"
+              >
+                + 插入空白
+              </button>
+            </div>
+          )}
 
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-zinc-400">
             <button
