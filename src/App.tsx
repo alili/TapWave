@@ -803,7 +803,14 @@ export const App: React.FC = () => {
         audioPreview.preloadTracks(state);
       }
     }
-  }, [state.tracks]);
+  }, [
+    state.tracks,
+    state.introBgm,
+    state.outroBgm,
+    state.introVoiceover,
+    state.coldOpenEnabled,
+    state.highlights,
+  ]);
 
   // Subscribe to real-time Tauri backend "load-progress" events
   useEffect(() => {

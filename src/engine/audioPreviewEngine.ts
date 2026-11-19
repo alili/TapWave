@@ -1050,7 +1050,10 @@ class AudioPreviewEngine {
     }
 
     const nextVol = Math.max(0, Math.min(1, holder.smoothedVolume));
-    if (Math.abs(holder.audio.volume - nextVol) > 0.025) {
+    if (
+      Math.abs(holder.audio.volume - nextVol) > 0.004 ||
+      (nextVol === 0 && holder.audio.volume !== 0)
+    ) {
       holder.audio.volume = nextVol;
     }
   }
@@ -1233,14 +1236,15 @@ class AudioPreviewEngine {
       ['intro', state.introBgm, '片头 BGM'],
       ['outro', state.outroBgm, '片尾 BGM'],
     ] as const) {
-      if (asset?.enabled && (asset.audioUrl || asset.filePath)) {
-        const bgmKey = `${asset.audioUrl ?? ''}|${asset.filePath ?? ''}`;
+      const effectivePath = asset?.filePath || (slot === 'intro' ? state.bgmWavPath : undefined);
+      if (asset?.enabled && (asset.audioUrl || effectivePath)) {
+        const bgmKey = `${asset.audioUrl ?? ''}|${effectivePath ?? ''}`;
         const existing = this.bgmTimelineElements[slot];
         if (!existing || existing.sourceKey !== bgmKey || existing.failedFatal) {
           this.disposeHolder(existing);
           this.bgmTimelineElements[slot] = this.createManagedHolder(
             asset.audioUrl,
-            asset.filePath,
+            effectivePath,
             label,
             1.0,
             true
@@ -2043,7 +2047,7 @@ class AudioPreviewEngine {
         inColdOpenQuotesSection ||
         (Boolean(dominantSpeakerId) && !mapped.inIntroOrGapSilence) ||
         inFixedIntroVo;
-      const baseBedVol = 0.45;
+      const baseBedVol = 0.55;
       const duckedBedVol = baseBedVol * Math.pow(10, (state.bgmDuckDb || -18) / 20);
       const targetVol = Math.max(
         0,
@@ -2052,7 +2056,8 @@ class AudioPreviewEngine {
       this.applySlewedVolume(holder, targetVol, !this.wasPlaying);
       if (holder.audio.duration && Number.isFinite(holder.audio.duration)) {
         const modTime = offsetSecInBgm % Math.max(1, holder.audio.duration);
-        this.seekHolderOnSpliceOnly(holder, modTime, crossedCutOrScrub, 0.25, 450);
+        const manualSeekOrStart = this.forceSeekPending || !this.wasPlaying;
+        this.seekHolderOnSpliceOnly(holder, modTime, manualSeekOrStart, 0.35, 600);
       }
       if (holder.audio.paused) {
         void holder.audio.play().catch(() => {});
@@ -2088,7 +2093,7 @@ class AudioPreviewEngine {
     syncBgmBed(
       'intro',
       state.introBgm?.audioUrl,
-      state.introBgm?.filePath,
+      state.introBgm?.filePath || state.bgmWavPath,
       introBgmActive,
       inIntroBed,
       playheadSec,
