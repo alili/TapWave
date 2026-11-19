@@ -2377,14 +2377,16 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     }
 
     // 3b. Fixed Intro Voiceover Region Backdrop & Crisp Pill Badge
+    const voStartSec = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
+    const voStartRatio = voStartSec / totalSec;
     const prefixEndRatio =
-      (timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec) / totalSec;
+      (voStartSec + timeline.introVoiceoverDurationSec) / totalSec;
     if (
       timeline.introVoiceoverDurationSec > 0 &&
       prefixEndRatio > viewStartRatio &&
-      coldEndRatio < viewEndRatio
+      voStartRatio < viewEndRatio
     ) {
-      const vx0 = Math.max(0, ratioToX(coldEndRatio));
+      const vx0 = Math.max(0, ratioToX(voStartRatio));
       const vx1 = Math.min(W, ratioToX(prefixEndRatio));
       const vw = Math.max(0, vx1 - vx0);
       if (vw > 1) {

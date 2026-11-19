@@ -1163,6 +1163,28 @@ class AudioPreviewEngine {
         }
       }
     }
+
+    // Pre-warm fixed intro voiceover element so entering intro voiceover starts with 0ms lag
+    if (
+      state.introVoiceover?.enabled &&
+      (state.introVoiceover.audioUrl || state.introVoiceover.filePath)
+    ) {
+      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}`;
+      if (
+        !this.introVoiceoverTimelineEl ||
+        this.introVoiceoverTimelineEl.sourceKey !== voKey ||
+        this.introVoiceoverTimelineEl.failedFatal
+      ) {
+        this.disposeHolder(this.introVoiceoverTimelineEl);
+        this.introVoiceoverTimelineEl = this.createManagedHolder(
+          state.introVoiceover.audioUrl,
+          state.introVoiceover.filePath,
+          '片头固定口播',
+          rate,
+          false
+        );
+      }
+    }
   }
 
   /**
@@ -1202,6 +1224,22 @@ class AudioPreviewEngine {
         holder.audio.volume = 0;
         holder.lastPlayRetryPerfMs = this.playStartPerfMs;
         void holder.audio.play().catch(() => {});
+      }
+    }
+
+    if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.failedFatal) {
+      const voStart = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
+      const voEnd = voStart + timeline.introVoiceoverDurationSec;
+      const inVoNow =
+        Boolean(state.introVoiceover?.enabled) &&
+        timeline.introVoiceoverDurationSec > 0 &&
+        playheadSec >= voStart &&
+        playheadSec < voEnd;
+      const voTarget = inVoNow ? Math.max(0, playheadSec - voStart) : 0;
+      this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, voTarget, true);
+      if (inVoNow && (this.introVoiceoverTimelineEl.audio.paused || this.introVoiceoverTimelineEl.audio.ended)) {
+        this.introVoiceoverTimelineEl.audio.volume = 0;
+        void this.introVoiceoverTimelineEl.audio.play().catch(() => {});
       }
     }
 
@@ -1332,11 +1370,96 @@ class AudioPreviewEngine {
     const stepSec = dtRealSec * playbackRate;
     let nextPlayheadSec = currentPlayheadSec + stepSec;
 
-    if (!this.forceSeekPending && this.wasPlaying && state.tracks.length > 0) {
-      if (currentPlayheadSec >= prefixSec - 0.002 && timeline.playbackSpans.length > 0) {
+    if (!this.forceSeekPending && this.wasPlaying) {
+      const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const voStartSec = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
+      const voEndSec = voStartSec + timeline.introVoiceoverDurationSec;
+
+      if (currentPlayheadSec < prefixSec - 0.002) {
+        // Prefix region: Cold Open highlights & Fixed Intro Voiceover hardware clock sync
+        const preMapped = resolveEditedPlayheadToSource(state, timeline, currentPlayheadSec);
+
+        if (
+          state.introVoiceover?.enabled &&
+          timeline.introVoiceoverDurationSec > 0 &&
+          currentPlayheadSec >= voStartSec &&
+          currentPlayheadSec < voEndSec
+        ) {
+          const voHolder = this.introVoiceoverTimelineEl;
+          if (voHolder && !voHolder.failedFatal) {
+            const voEl = voHolder.audio;
+            if (
+              nowPerf - Math.max(this.playStartPerfMs, voHolder.lastSeekPerfMs) < 450 &&
+              (voEl.seeking || voEl.readyState < 2)
+            ) {
+              nextPlayheadSec = currentPlayheadSec;
+            } else if (!voEl.paused && !voEl.ended && !voEl.seeking && voEl.readyState >= 2) {
+              const hwEditedSec = voStartSec + voEl.currentTime;
+              if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
+                const drift = hwEditedSec - nextPlayheadSec;
+                if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.35) {
+                  nextPlayheadSec = Math.max(
+                    currentPlayheadSec + stepSec * 0.5,
+                    nextPlayheadSec + drift * 0.25
+                  );
+                } else if (Math.abs(drift) >= 0.35 && Math.abs(drift) < 2.0) {
+                  nextPlayheadSec =
+                    drift > 0
+                      ? Math.min(voEndSec, nextPlayheadSec + drift * 0.45)
+                      : currentPlayheadSec + stepSec * 0.25;
+                }
+              }
+            }
+          }
+        } else if (
+          preMapped.inColdOpen &&
+          !preMapped.inIntroOrGapSilence &&
+          preMapped.activeSpeakerId &&
+          preMapped.activeHighlight &&
+          preMapped.sourceSec !== null
+        ) {
+          const clipHolder = this.trackElements.get(preMapped.activeSpeakerId);
+          const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
+          if (clipHolder && !clipHolder.failedFatal && clipTrack) {
+            const el = clipHolder.audio;
+            if (
+              nowPerf - Math.max(this.playStartPerfMs, clipHolder.lastSeekPerfMs) < 450 &&
+              (el.seeking || el.readyState < 2)
+            ) {
+              nextPlayheadSec = currentPlayheadSec;
+            } else if (!el.paused && !el.ended && !el.seeking && el.readyState >= 2) {
+              const offsetSec =
+                state.recordingMode === 'same_room_sync'
+                  ? 0
+                  : (clipTrack.syncOffsetMs || 0) / 1000;
+              const actualSourceSec = el.currentTime + offsetSec;
+              const hlStartSrc = preMapped.activeHighlight.sourceStartMs / 1000;
+              const hlEndSrc = preMapped.activeHighlight.sourceEndMs / 1000;
+              if (actualSourceSec >= hlStartSrc - 0.02 && actualSourceSec <= hlEndSrc + 0.02) {
+                const hwEditedSec = currentPlayheadSec + (actualSourceSec - preMapped.sourceSec);
+                const drift = hwEditedSec - nextPlayheadSec;
+                if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.35) {
+                  nextPlayheadSec = Math.max(
+                    currentPlayheadSec + stepSec * 0.5,
+                    nextPlayheadSec + drift * 0.25
+                  );
+                } else if (Math.abs(drift) >= 0.35 && Math.abs(drift) < 2.0) {
+                  nextPlayheadSec =
+                    drift > 0
+                      ? Math.min(timeline.coldOpenDurationSec, nextPlayheadSec + drift * 0.45)
+                      : currentPlayheadSec + stepSec * 0.25;
+                }
+              }
+            }
+          }
+        }
+      } else if (
+        state.tracks.length > 0 &&
+        currentPlayheadSec >= prefixSec - 0.002 &&
+        timeline.playbackSpans.length > 0
+      ) {
         const spanHit = findBodyPlaybackSpan(timeline.playbackSpans, currentPlayheadSec);
         const playable = selectPlayableTracks(state);
-        const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
         // 1. 起播前 450ms 内若所有音轨仍在初始解码缓冲，短暂保持游标等待首帧就绪（超时后绝不阻塞推进）
         if (nowPerf - this.playStartPerfMs < 450) {
