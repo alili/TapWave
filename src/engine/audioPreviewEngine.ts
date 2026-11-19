@@ -1062,7 +1062,9 @@ class AudioPreviewEngine {
   private seekHolderOnSpliceOnly(
     holder: ManagedAudioHolder,
     targetSec: number,
-    forceSeek: boolean
+    forceSeek: boolean,
+    maxContinuousDriftSec = 0.9,
+    cooldownMs = 1000
   ): void {
     const clampedTarget = Math.max(0, targetSec);
     const el = holder.audio;
@@ -1092,12 +1094,11 @@ class AudioPreviewEngine {
       return;
     }
 
-    // Continuous uncut playback: avoid interrupting OS audio decoder ring-buffers on minor jitter;
-    // only emergency re-align if a track drifted severely (> 0.9s) and isn't already seeking
-    if (el.seeking || nowPerf - holder.lastSeekPerfMs < 1000) {
+    // Continuous uncut playback: keep primary clock smooth while tightly locking follower tracks (<65ms) to prevent echo
+    if (el.seeking || nowPerf - holder.lastSeekPerfMs < cooldownMs) {
       return;
     }
-    if (drift > 0.9) {
+    if (drift > maxContinuousDriftSec) {
       holder.pendingSeekSec = null;
       holder.lastSeekPerfMs = nowPerf;
       try {
@@ -1185,6 +1186,27 @@ class AudioPreviewEngine {
         );
       }
     }
+
+    // Pre-warm Intro & Outro BGM elements so entering BGM beds starts immediately
+    for (const [slot, asset, label] of [
+      ['intro', state.introBgm, '片头 BGM'],
+      ['outro', state.outroBgm, '片尾 BGM'],
+    ] as const) {
+      if (asset?.enabled && (asset.audioUrl || asset.filePath)) {
+        const bgmKey = `${asset.audioUrl ?? ''}|${asset.filePath ?? ''}`;
+        const existing = this.bgmTimelineElements[slot];
+        if (!existing || existing.sourceKey !== bgmKey || existing.failedFatal) {
+          this.disposeHolder(existing);
+          this.bgmTimelineElements[slot] = this.createManagedHolder(
+            asset.audioUrl,
+            asset.filePath,
+            label,
+            1.0,
+            true
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -1236,10 +1258,30 @@ class AudioPreviewEngine {
         playheadSec >= voStart &&
         playheadSec < voEnd;
       const voTarget = inVoNow ? Math.max(0, playheadSec - voStart) : 0;
+      const voEl = this.introVoiceoverTimelineEl.audio;
       this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, voTarget, true);
-      if (inVoNow && (this.introVoiceoverTimelineEl.audio.paused || this.introVoiceoverTimelineEl.audio.ended)) {
-        this.introVoiceoverTimelineEl.audio.volume = 0;
-        void this.introVoiceoverTimelineEl.audio.play().catch(() => {});
+      if (voEl.paused || voEl.ended) {
+        voEl.volume = 0;
+        void voEl.play().then(() => {
+          if (!inVoNow) {
+            voEl.pause();
+          }
+        }).catch(() => {});
+      }
+    }
+
+    for (const slot of ['intro', 'outro'] as const) {
+      const bgmHolder = this.bgmTimelineElements[slot];
+      if (bgmHolder && !bgmHolder.failedFatal) {
+        const bgmEl = bgmHolder.audio;
+        if (bgmEl.paused || bgmEl.ended) {
+          bgmEl.volume = 0;
+          void bgmEl.play().then(() => {
+            if (!this.wasPlaying) {
+              bgmEl.pause();
+            }
+          }).catch(() => {});
+        }
       }
     }
 
@@ -1755,7 +1797,17 @@ class AudioPreviewEngine {
         }
       }
 
-      this.seekHolderOnSpliceOnly(holder, targetTrackSec, crossedCutOrScrub);
+      // Primary/dominant track uses relaxed 0.9s drift guard (zero audio stutter);
+      // secondary/follower tracks stay tightly phase-locked (<65ms) to eliminate multi-track echo!
+      const isPrimarySyncTrack =
+        dominantSpeakerId ? tr.id === dominantSpeakerId : playableTracks[0]?.id === tr.id;
+      this.seekHolderOnSpliceOnly(
+        holder,
+        targetTrackSec,
+        crossedCutOrScrub,
+        isPrimarySyncTrack ? 0.9 : 0.065,
+        isPrimarySyncTrack ? 1000 : 450
+      );
       this.applySlewedVolume(holder, gain, !this.wasPlaying || this.forceSeekPending);
 
       const decodedDurSec =
@@ -1817,7 +1869,7 @@ class AudioPreviewEngine {
         applyPitchPreservingPlaybackRate(voEl, playbackRate);
         this.applySlewedVolume(voHolder, 0.94, !this.wasPlaying);
         const offsetInVo = Math.max(0, playheadSec - voStartSec);
-        this.seekHolderOnSpliceOnly(voHolder, offsetInVo, crossedCutOrScrub);
+        this.seekHolderOnSpliceOnly(voHolder, offsetInVo, crossedCutOrScrub, 0.25, 450);
         if (voEl.paused && !voEl.ended) {
           void voEl.play().catch(() => {});
         }
@@ -1878,7 +1930,7 @@ class AudioPreviewEngine {
       this.applySlewedVolume(holder, targetVol, !this.wasPlaying);
       if (holder.audio.duration && Number.isFinite(holder.audio.duration)) {
         const modTime = offsetSecInBgm % Math.max(1, holder.audio.duration);
-        this.seekHolderOnSpliceOnly(holder, modTime, crossedCutOrScrub);
+        this.seekHolderOnSpliceOnly(holder, modTime, crossedCutOrScrub, 0.25, 450);
       }
       if (holder.audio.paused) {
         void holder.audio.play().catch(() => {});
