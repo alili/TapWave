@@ -1214,7 +1214,7 @@ class AudioPreviewEngine {
       state.introVoiceover?.enabled &&
       (state.introVoiceover.audioUrl || state.introVoiceover.filePath)
     ) {
-      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}`;
+      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}|`;
       if (
         !this.introVoiceoverTimelineEl ||
         this.introVoiceoverTimelineEl.sourceKey !== voKey ||
@@ -1238,7 +1238,7 @@ class AudioPreviewEngine {
     ] as const) {
       const effectivePath = asset?.filePath || (slot === 'intro' ? state.bgmWavPath : undefined);
       if (asset?.enabled && (asset.audioUrl || effectivePath)) {
-        const bgmKey = `${asset.audioUrl ?? ''}|${effectivePath ?? ''}`;
+        const bgmKey = `${asset.audioUrl ?? ''}|${effectivePath ?? ''}|`;
         const existing = this.bgmTimelineElements[slot];
         if (!existing || existing.sourceKey !== bgmKey || existing.failedFatal) {
           this.disposeHolder(existing);
@@ -1334,7 +1334,7 @@ class AudioPreviewEngine {
       if (voEl.paused || voEl.ended) {
         voEl.volume = 0;
         void voEl.play().then(() => {
-          if (!inVoNow) {
+          if (!this.wasPlaying || playheadSec >= voEnd) {
             voEl.pause();
           }
         }).catch(() => {});
@@ -1978,7 +1978,7 @@ class AudioPreviewEngine {
       playheadSec < voEndSec;
 
     if (inFixedIntroVo && state.introVoiceover) {
-      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}`;
+      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}|`;
       if (!this.introVoiceoverTimelineEl || this.introVoiceoverTimelineEl.sourceKey !== voKey) {
         this.disposeHolder(this.introVoiceoverTimelineEl);
         this.introVoiceoverTimelineEl = this.createManagedHolder(
@@ -2000,8 +2000,13 @@ class AudioPreviewEngine {
           void voEl.play().catch(() => {});
         }
       }
-    } else if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.audio.paused) {
-      this.introVoiceoverTimelineEl.audio.pause();
+    } else if (this.introVoiceoverTimelineEl) {
+      this.applySlewedVolume(this.introVoiceoverTimelineEl, 0, true);
+      if (playheadSec < voStartSec) {
+        this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, 0, false, 0.25, 450);
+      } else if (!this.introVoiceoverTimelineEl.audio.paused) {
+        this.introVoiceoverTimelineEl.audio.pause();
+      }
     }
 
     // Sync imported Intro BGM & Outro BGM with smooth auto-ducking
@@ -2021,7 +2026,7 @@ class AudioPreviewEngine {
         }
         return;
       }
-      const bgmKey = `${bgmUrl ?? ''}|${bgmPath ?? ''}`;
+      const bgmKey = `${bgmUrl ?? ''}|${bgmPath ?? ''}|`;
       if (!holder || holder.sourceKey !== bgmKey) {
         this.disposeHolder(holder);
         holder = this.createManagedHolder(
