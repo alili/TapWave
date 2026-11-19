@@ -15,16 +15,19 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { AuxAudioSlot, HighlightMuteInterval, PodcastProjectState, SpeakerTrack } from '../types/podcast';
+import { AuxAudioSlot, DEFAULT_BGM_FADE_MS, HighlightMuteInterval, PodcastProjectState, SpeakerTrack } from '../types/podcast';
 import {
   computeColdOpenDurationSec,
+  computeIntroBgmDuckMultiplier,
   computeIntroBgmDurationSec,
   formatMmSs,
+  IntroBgmVoiceWindow,
   resolveColdOpenClipWindows,
   resolveEffectiveHighlightGapSec,
   TimelineComputation,
 } from '../engine/timelineEngine';
 import { audioPreview } from '../engine/audioPreviewEngine';
+import { BgmSourceTrimmer } from './BgmSourceTrimmer';
 import {
   computeLegacyPeaksCalibration,
   HiResWaveformEnvelope,
@@ -82,6 +85,17 @@ type DragAction =
       maxDurationSec: number;
     }
   | {
+      kind: 'trim_bgm_left';
+      startClientX: number;
+      origStartSec: number;
+      origDurationSec: number;
+    }
+  | {
+      kind: 'move_bgm';
+      startClientX: number;
+      origStartSec: number;
+    }
+  | {
       kind: 'mute_range';
       trackId: string;
       startSec: number;
@@ -123,11 +137,24 @@ interface HiResClipWaveformCanvasProps {
   sliceEndMs: number;
   color: string;
   dimmed?: boolean;
+  gainLinear?: number;
+  sharedRefCeiling?: number;
   gainFn?: (relSec: number) => number;
 }
 
 const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.memo(
-  ({ hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed = false, gainFn }) => {
+  ({
+    hiRes,
+    legacyPeaks,
+    durationMs,
+    sliceStartMs,
+    sliceEndMs,
+    color,
+    dimmed = false,
+    gainLinear = 1.0,
+    sharedRefCeiling: sharedRefCeilingProp,
+    gainFn,
+  }) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
@@ -168,12 +195,12 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
 
       const safeDurMs = Math.max(1, durationMs || hiRes?.durationMs || sliceEndMs || 1000);
       const calibration = hiRes ?? computeLegacyPeaksCalibration(legacyPeaks);
-      const sharedRefCeiling = calibration.p992Peak || 0.72;
+      const sharedRefCeiling = sharedRefCeilingProp || calibration.p992Peak || 0.72;
       const yMid = H / 2;
       const maxHalfAmp = Math.max(4, H * 0.43);
       const spanMs = Math.max(1, sliceEndMs - sliceStartMs);
-      const stepPx = W <= 160 ? 1.25 : 1.5;
-      const halfWinRatio = Math.max(0.0005, ((spanMs / W) * stepPx * 0.5) / safeDurMs);
+      const stepPx = 1;
+      const halfWinRatio = Math.max(0.0001, ((spanMs / W) * 0.5) / safeDurMs);
 
       // Center 0-crossing axis (matching WaveformEditorBar)
       ctx.strokeStyle = hexToRgba(color, dimmed ? 0.08 : 0.24);
@@ -218,7 +245,7 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
           legacyPeaks,
           ratio,
           halfWinRatio,
-          1.0,
+          gainLinear,
           calibration,
           sharedRefCeiling
         );
@@ -347,7 +374,7 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
       }
 
       ctx.restore();
-    }, [hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed, gainFn, boxSize]);
+    }, [hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed, gainLinear, sharedRefCeilingProp, gainFn, boxSize]);
 
     return <canvas ref={canvasRef} className="w-full h-full block pointer-events-none" />;
   }
@@ -915,13 +942,35 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
         );
       } else if (dragAction.kind === 'trim_bgm_right') {
         const nextDur = Number(
-          Math.max(1.5, Math.min(dragAction.maxDurationSec, snap(dragAction.origDurationSec + deltaSec))).toFixed(2)
+          Math.max(1.0, Math.min(dragAction.maxDurationSec, snap(dragAction.origDurationSec + deltaSec))).toFixed(2)
         );
         onUpdateState((prev) =>
           prev.introBgm
             ? {
                 ...prev,
                 introBgm: { ...prev.introBgm, customDurationSec: nextDur },
+              }
+            : prev
+        );
+      } else if (dragAction.kind === 'trim_bgm_left') {
+        const origEnd = dragAction.origStartSec + dragAction.origDurationSec;
+        const nextStart = Math.max(0, Math.min(origEnd - 1.0, snap(dragAction.origStartSec + deltaSec)));
+        const nextDur = Number(Math.max(1.0, origEnd - nextStart).toFixed(2));
+        onUpdateState((prev) =>
+          prev.introBgm
+            ? {
+                ...prev,
+                introBgm: { ...prev.introBgm, startOffsetSec: nextStart, customDurationSec: nextDur },
+              }
+            : prev
+        );
+      } else if (dragAction.kind === 'move_bgm') {
+        const nextStart = Math.max(0, snap(dragAction.origStartSec + deltaSec));
+        onUpdateState((prev) =>
+          prev.introBgm
+            ? {
+                ...prev,
+                introBgm: { ...prev.introBgm, startOffsetSec: nextStart },
               }
             : prev
         );
@@ -1065,15 +1114,66 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     rulerTicks.push(Number(t.toFixed(2)));
   }
 
+  const introFadeInMs = state.introBgm?.fadeInMs ?? DEFAULT_BGM_FADE_MS;
+  const introFadeOutMs = state.introBgm?.fadeOutMs ?? DEFAULT_BGM_FADE_MS;
+  const introFadeInSec = introFadeInMs / 1000;
+  const introFadeOutSec = introFadeOutMs / 1000;
+
+  const updateIntroBgmFade = (patch: { fadeInMs?: number; fadeOutMs?: number }) => {
+    onUpdateState((prev) => ({
+      ...prev,
+      introBgm: {
+        ...(prev.introBgm ?? { fileName: '片头 BGM', enabled: false }),
+        ...patch,
+      },
+    }));
+  };
+
   const duckPct = Math.max(10, Math.min(85, 100 - Math.abs(state.bgmDuckDb ?? -18) * 2.5));
-  const isSecDucked = (t: number) => {
-    if (state.coldOpenEnabled && clipWindows.some((w) => t >= w.startSec && t <= w.endSec)) {
-      return true;
+
+  const sharedTrackCeiling = useMemo(() => {
+    let maxCeiling = 0;
+    for (const tr of speakerTracks) {
+      const env = hiResEnvelopesRef.current.get(tr.id);
+      const cal = env ?? computeLegacyPeaksCalibration(tr.peaks);
+      const c = cal.p992Peak || 0.72;
+      if (c > maxCeiling) maxCeiling = c;
     }
-    if (state.introVoiceover?.enabled && t >= introVoStartSec && t <= introVoStartSec + introVoDurationSec) {
-      return true;
+    return maxCeiling || 0.72;
+  }, [speakerTracks, hiResRev]);
+
+  const introVoiceWindows = useMemo<IntroBgmVoiceWindow[]>(() => {
+    const wins: IntroBgmVoiceWindow[] = [];
+    if (state.coldOpenEnabled && clipWindows.length > 0) {
+      for (const w of clipWindows) {
+        wins.push({ startSec: w.startSec, endSec: w.endSec });
+      }
     }
-    return false;
+    if (state.introVoiceover?.enabled && introVoDurationSec > 0) {
+      wins.push({
+        startSec: introVoStartSec,
+        endSec: introVoStartSec + introVoDurationSec,
+      });
+    }
+    return wins;
+  }, [state.coldOpenEnabled, clipWindows, state.introVoiceover?.enabled, introVoDurationSec, introVoStartSec]);
+
+  const MAX_INTRO_ZOOM = 16;
+  const zoomToSliderVal = (z: number) =>
+    Math.round((Math.log(Math.max(1, Math.min(MAX_INTRO_ZOOM, z))) / Math.log(MAX_INTRO_ZOOM)) * 1000);
+  const sliderValToZoom = (val: number) =>
+    Number(Math.exp((Math.max(0, Math.min(1000, val)) / 1000) * Math.log(MAX_INTRO_ZOOM)).toFixed(2));
+
+  const applyIntroZoom = (nextZoomRaw: number) => {
+    const nextZoom = Math.max(1, Math.min(MAX_INTRO_ZOOM, Number(nextZoomRaw.toFixed(2))));
+    setZoom(nextZoom);
+    requestAnimationFrame(() => {
+      const vp = scrollViewportRef.current;
+      if (!vp) return;
+      const totalWidth = vp.clientWidth * nextZoom;
+      const anchorX = (playheadRef.current / timelineSpanSec) * totalWidth;
+      vp.scrollLeft = Math.max(0, anchorX - vp.clientWidth * 0.5);
+    });
   };
 
   const playheadPct = Math.max(0, Math.min(100, (playheadSec / timelineSpanSec) * 100));
@@ -1299,23 +1399,100 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               </span>
             </div>
 
-            <div className="flex items-center gap-1 bg-zinc-950/90 border border-zinc-800 rounded-lg px-1.5 py-0.5">
+            <div
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-[11px] text-zinc-300"
+              title="设置片头 BGM 淡入时间（秒）"
+            >
+              <span className="text-cyan-400">淡入</span>
+              <input
+                type="range"
+                min={0.1}
+                max={5.0}
+                step={0.1}
+                value={Number(introFadeInSec.toFixed(1))}
+                onChange={(e) =>
+                  updateIntroBgmFade({ fadeInMs: Math.round(Number(e.target.value) * 1000) })
+                }
+                className="w-14 accent-cyan-500 cursor-pointer"
+              />
+              <span className="font-mono text-cyan-300 w-8 text-right">
+                {introFadeInSec.toFixed(1)}s
+              </span>
+            </div>
+
+            <div
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-[11px] text-zinc-300"
+              title="设置片头 BGM 淡出时间（秒）"
+            >
+              <span className="text-cyan-400">淡出</span>
+              <input
+                type="range"
+                min={0.1}
+                max={5.0}
+                step={0.1}
+                value={Number(introFadeOutSec.toFixed(1))}
+                onChange={(e) =>
+                  updateIntroBgmFade({ fadeOutMs: Math.round(Number(e.target.value) * 1000) })
+                }
+                className="w-14 accent-cyan-500 cursor-pointer"
+              />
+              <span className="font-mono text-cyan-300 w-8 text-right">
+                {introFadeOutSec.toFixed(1)}s
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 bg-zinc-950/90 border border-zinc-800 rounded-lg px-2 py-0.5 text-zinc-400">
               <button
                 type="button"
-                onClick={() => setZoom((z) => Math.max(1, Number((z / 1.5).toFixed(2))))}
-                className="p-0.5 text-zinc-400 hover:text-white cursor-pointer"
+                onClick={() => applyIntroZoom(1)}
+                disabled={zoom <= 1.01}
+                title="还原片头 1x 全览"
+                className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-900 hover:bg-zinc-800 text-zinc-300 disabled:opacity-35 cursor-pointer disabled:cursor-default"
+              >
+                全览
+              </button>
+              <button
+                type="button"
+                onClick={() => applyIntroZoom(zoom / 1.5)}
+                disabled={zoom <= 1}
+                title="缩小片头时间轴"
+                className="p-0.5 hover:text-zinc-100 disabled:opacity-35 cursor-pointer disabled:cursor-default"
               >
                 <Minus className="w-3 h-3" />
               </button>
-              <span className="font-mono text-[11px] text-zinc-200 w-9 text-center">
-                {zoom.toFixed(1)}x
-              </span>
+              <input
+                type="range"
+                min={0}
+                max={1000}
+                step={1}
+                value={zoomToSliderVal(zoom)}
+                onChange={(e) => applyIntroZoom(sliderValToZoom(Number(e.target.value)))}
+                onKeyDown={(e) => {
+                  if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+                    e.preventDefault();
+                    (e.target as HTMLInputElement).blur();
+                    togglePlay();
+                  }
+                }}
+                title={`对数无级标尺缩放（1x ~ ${MAX_INTRO_ZOOM}x，也可 Ctrl/Cmd+滚轮）`}
+                className="w-20 accent-purple-500 cursor-pointer"
+              />
               <button
                 type="button"
-                onClick={() => setZoom((z) => Math.min(16, Number((z * 1.5).toFixed(2))))}
-                className="p-0.5 text-zinc-400 hover:text-white cursor-pointer"
+                onClick={() => applyIntroZoom(zoom * 1.5)}
+                disabled={zoom >= MAX_INTRO_ZOOM}
+                title="放大片头时间轴"
+                className="p-0.5 hover:text-zinc-100 disabled:opacity-35 cursor-pointer disabled:cursor-default"
               >
                 <Plus className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => applyIntroZoom(1)}
+                title="点击重置为 1.0x"
+                className="font-mono text-[10.5px] text-zinc-200 hover:text-white w-9 text-center cursor-pointer"
+              >
+                {zoom.toFixed(1)}x
               </button>
             </div>
 
@@ -1452,7 +1629,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   seekIntroToSec(sec);
                   setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
                 }}
-                title="点击或横向拖动调整试听游标 · Ctrl/Cmd+滚轮缩放时间轴"
+                onDoubleClick={() => applyIntroZoom(1)}
+                title="点击或横向拖动调整试听游标 · 双击重置 1x · Ctrl/Cmd+滚轮缩放时间轴"
                 className="h-[22px] shrink-0 border-b border-white/10 bg-[#12161f] relative cursor-pointer"
               >
                 {rulerTicks.map((t) => (
@@ -1537,12 +1715,10 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                             style={{
                               left: `${leftPct}%`,
                               width: `${widthPct}%`,
-                              borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}66`,
+                              borderColor: isSelected ? '#ffffff' : tr.color,
                               backgroundColor: isClipMuted
                                 ? 'rgba(39,39,42,0.42)'
-                                : isPrimarySpeaker
-                                ? `${tr.color}18`
-                                : `${tr.color}0a`,
+                                : `${tr.color}18`,
                             }}
                             onPointerDown={(e) => {
                               if (toolMode === 'mute_range' || e.shiftKey) return;
@@ -1640,10 +1816,24 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                 hiRes={trEnv}
                                 legacyPeaks={tr.peaks}
                                 durationMs={tr.durationMs || trEnv?.durationMs || hl.sourceEndMs}
-                                sliceStartMs={hl.sourceStartMs}
-                                sliceEndMs={hl.sourceEndMs}
+                                sliceStartMs={Math.max(
+                                  0,
+                                  hl.sourceStartMs -
+                                    (state.recordingMode !== 'same_room_sync' ? tr.syncOffsetMs || 0 : 0)
+                                )}
+                                sliceEndMs={Math.max(
+                                  0,
+                                  hl.sourceEndMs -
+                                    (state.recordingMode !== 'same_room_sync' ? tr.syncOffsetMs || 0 : 0)
+                                )}
                                 color={tr.color}
                                 dimmed={isClipMuted}
+                                gainLinear={
+                                  state.loudnessAligned
+                                    ? Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20)
+                                    : 1.0
+                                }
+                                sharedRefCeiling={sharedTrackCeiling}
                               />
                             </div>
 
@@ -1737,18 +1927,48 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   )}
                 </div>
 
-                {/* 片头 BGM 紧凑轨（与音轨视图 Cyan BGM 轨完全一致：真实连续波形 + 闪避包络） */}
+                {/* 片头 BGM 紧凑轨（支持拖动起止位置、截取长度与闪避包络） */}
                 <div className="h-[44px] shrink-0 relative border-t border-cyan-500/25 bg-cyan-500/[0.02]">
                   {state.introBgm?.enabled && (state.introBgm.filePath || state.introBgm.audioUrl || state.bgmWavPath) ? (
+                    (() => {
+                      const bgmStartSec = Math.max(0, state.introBgm.startOffsetSec ?? 0);
+                      const bgmSrcStartSec = Math.max(0, state.introBgm.sourceStartSec ?? 0);
+                      return (
                     <div
                       style={{
-                        left: '0%',
+                        left: `${Math.min(98, (bgmStartSec / timelineSpanSec) * 100)}%`,
                         width: `${Math.min(100, (introBgmDurationSec / timelineSpanSec) * 100)}%`,
                       }}
-                      title={`片头 BGM · 固定 ${introBgmDurationSec.toFixed(1)}s · 人声发声自动避让 ${state.bgmDuckDb ?? -18}dB`}
-                      className="absolute top-1 bottom-1 rounded border border-cyan-500/45 bg-cyan-500/[0.06] overflow-hidden px-1.5 py-0.5 flex flex-col justify-between"
+                      onPointerDown={(e) => {
+                        if (toolMode !== 'edit') return;
+                        e.stopPropagation();
+                        setDragAction({
+                          kind: 'move_bgm',
+                          startClientX: e.clientX,
+                          origStartSec: bgmStartSec,
+                        });
+                      }}
+                      title={`片头 BGM · ${bgmStartSec.toFixed(1)}s–${(bgmStartSec + introBgmDurationSec).toFixed(1)}s (${introBgmDurationSec.toFixed(1)}s) · 拖动平移或调整左右边缘`}
+                      className={`absolute top-1 bottom-1 rounded border border-cyan-500/45 bg-cyan-500/[0.06] overflow-hidden px-1.5 py-0.5 flex flex-col justify-between ${
+                        toolMode === 'edit' ? 'cursor-grab active:cursor-grabbing' : ''
+                      }`}
                     >
                       <div className="absolute top-0 left-0 right-0 h-[1.5px] bg-cyan-400/60 pointer-events-none" />
+                      {toolMode === 'edit' && (
+                        <div
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            setDragAction({
+                              kind: 'trim_bgm_left',
+                              startClientX: e.clientX,
+                              origStartSec: bgmStartSec,
+                              origDurationSec: introBgmDurationSec,
+                            });
+                          }}
+                          title="左右拖动调整片头 BGM 开始位置"
+                          className="absolute left-0 top-0 bottom-0 w-1.5 bg-cyan-300/30 hover:bg-cyan-300/80 cursor-ew-resize z-10"
+                        />
+                      )}
                       {toolMode === 'edit' && (
                         <div
                           onPointerDown={(e) => {
@@ -1763,25 +1983,47 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                               ),
                             });
                           }}
-                          title="左右拖动调整片头 BGM 时长"
+                          title="左右拖动调整片头 BGM 结束位置与时长"
                           className="absolute right-0 top-0 bottom-0 w-1.5 bg-cyan-300/30 hover:bg-cyan-300/80 cursor-ew-resize z-10"
                         />
                       )}
                       <span className="text-[9.5px] font-semibold text-cyan-300 truncate pointer-events-none z-10 leading-none">
-                        🎬 片头 BGM · 固定 {introBgmDurationSec.toFixed(1)}s (智能避让 {state.bgmDuckDb ?? -18}dB)
+                        🎬 片头 BGM · {bgmStartSec.toFixed(1)}s–{(bgmStartSec + introBgmDurationSec).toFixed(1)}s (避让 {state.bgmDuckDb ?? -18}dB)
                       </span>
                       <div className="flex-1 min-h-0 w-full pointer-events-none">
                         <HiResClipWaveformCanvas
                           hiRes={hiResEnvelopesRef.current.get('__intro_bgm__')}
                           legacyPeaks={state.introBgm.peaks ?? []}
                           durationMs={(state.introBgm.durationSec ?? introBgmDurationSec) * 1000}
-                          sliceStartMs={0}
-                          sliceEndMs={introBgmDurationSec * 1000}
+                          sliceStartMs={bgmSrcStartSec * 1000}
+                          sliceEndMs={(bgmSrcStartSec + introBgmDurationSec) * 1000}
                           color="#06b6d4"
-                          gainFn={(t) => (isSecDucked(t) ? duckPct / 100 : 1.0)}
+                          gainFn={(relT) => {
+                            const t = bgmStartSec + relT;
+                            const duck = computeIntroBgmDuckMultiplier(
+                              t,
+                              introVoiceWindows,
+                              introFadeInSec,
+                              introFadeOutSec,
+                              duckPct / 100
+                            );
+                            let fade = 1.0;
+                            if (introFadeInSec > 0 && relT < introFadeInSec) {
+                              fade = Math.min(1.0, Math.max(0, relT / introFadeInSec));
+                            }
+                            if (introFadeOutSec > 0 && relT > introBgmDurationSec - introFadeOutSec) {
+                              fade = Math.min(
+                                fade,
+                                Math.max(0, (introBgmDurationSec - relT) / introFadeOutSec)
+                              );
+                            }
+                            return duck * fade;
+                          }}
                         />
                       </div>
                     </div>
+                      );
+                    })()
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
                       未开启片头 BGM（点击左侧上传按钮导入）
@@ -1801,6 +2043,30 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
             </div>
           </div>
         </div>
+
+        {/* 片头 BGM 文件拖拽截取条 */}
+        <BgmSourceTrimmer
+          label="片头 BGM"
+          accentColor="cyan"
+          asset={state.introBgm}
+          resolvedDurationSec={
+            hiResEnvelopesRef.current.get('__intro_bgm__')?.durationMs
+              ? hiResEnvelopesRef.current.get('__intro_bgm__')!.durationMs / 1000
+              : undefined
+          }
+          onChangeSlice={(patch) =>
+            onUpdateState((prev) =>
+              prev.introBgm ? { ...prev, introBgm: { ...prev.introBgm, ...patch } } : prev
+            )
+          }
+          onApplyDuration={(sliceDur) =>
+            onUpdateState((prev) =>
+              prev.introBgm
+                ? { ...prev, introBgm: { ...prev.introBgm, customDurationSec: sliceDur } }
+                : prev
+            )
+          }
+        />
       </div>
     </div>
   );

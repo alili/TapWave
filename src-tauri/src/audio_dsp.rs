@@ -801,6 +801,25 @@ pub fn inspect_and_align_project(
     inspect_and_align_project_with_progress(req, |_| {})
 }
 
+fn slice_bgm_samples(samples: Vec<f32>, source_start_ms: Option<i64>, source_end_ms: Option<i64>) -> Vec<f32> {
+    if samples.is_empty() {
+        return samples;
+    }
+    let s_idx = source_start_ms
+        .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
+        .unwrap_or(0)
+        .min(samples.len().saturating_sub(1));
+    let e_idx = source_end_ms
+        .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
+        .unwrap_or(samples.len())
+        .min(samples.len());
+    if e_idx > s_idx + 480 {
+        samples[s_idx..e_idx].to_vec()
+    } else {
+        samples
+    }
+}
+
 fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -> Vec<f32> {
     let has_clips = spec.enabled && !spec.clips.is_empty();
     let has_intro_vo = spec.intro_vo_wav_path.as_ref().map_or(false, |p| !p.trim().is_empty());
@@ -813,7 +832,7 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
     if !has_clips && !has_intro_vo {
         let bgm_total_samples = ((spec.intro_bgm_duration_ms.unwrap_or(10_000).max(500) as usize) * (SAMPLE_RATE as usize)) / 1000;
         let mut voice_track = vec![0.0_f32; bgm_total_samples];
-        let bgm_samples = spec
+        let mut bgm_samples = spec
             .bgm_wav_path
             .as_ref()
             .and_then(|p| {
@@ -825,6 +844,8 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
             .unwrap_or_default();
 
         if !bgm_samples.is_empty() {
+            let _ = normalize_master_mix_loudness(&mut bgm_samples, -16.0, -1.0);
+            bgm_samples = slice_bgm_samples(bgm_samples, spec.intro_bgm_source_start_ms, spec.intro_bgm_source_end_ms);
             let normal_g = db_to_linear(spec.normal_gain_db);
             let fade_in_len = ((spec.intro_bgm_fade_in_ms.unwrap_or(800).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
             let fade_out_len = ((spec.intro_bgm_fade_out_ms.unwrap_or(800).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
@@ -878,8 +899,9 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
             normalize_to_wav48k(vo_path, &tmp_str).ok()?;
             read_wav_f32(&tmp_str).ok()
         })();
-        if let Some(vo_buf) = vo_samples {
+        if let Some(mut vo_buf) = vo_samples {
             if !vo_buf.is_empty() {
+                let _ = normalize_master_mix_loudness(&mut vo_buf, -16.0, -1.0);
                 // Short breath gap before fixed voiceover
                 let vo_lead_gap = (350usize * (SAMPLE_RATE as usize)) / 1000;
                 voice_track.extend(std::iter::repeat(0.0).take(vo_lead_gap));
@@ -907,21 +929,7 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
         voice_active_mask.extend(std::iter::repeat(false).take(diff));
     }
 
-    // 片头金句整段闪避（不考虑段内的音量连续）：
-    // 将整个金句序列从前导垫乐后到金句序列结束区间保持连续避让状态，避免段内停顿气口回弹抽吸
-    let quotes_start_idx = lead_samples;
-    let quotes_end_idx = if !spec.clips.is_empty() {
-        voice_track.len().saturating_sub(tail_samples)
-    } else {
-        0
-    };
-    if quotes_end_idx > quotes_start_idx && quotes_end_idx <= voice_active_mask.len() {
-        for flag in &mut voice_active_mask[quotes_start_idx..quotes_end_idx] {
-            *flag = true;
-        }
-    }
-
-    let bgm_samples = spec
+    let mut bgm_samples = spec
         .bgm_wav_path
         .as_ref()
         .and_then(|p| {
@@ -933,14 +941,30 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
         .unwrap_or_default();
 
     if !bgm_samples.is_empty() {
+        let _ = normalize_master_mix_loudness(&mut bgm_samples, -16.0, -1.0);
+        bgm_samples = slice_bgm_samples(bgm_samples, spec.intro_bgm_source_start_ms, spec.intro_bgm_source_end_ms);
         let normal_g = db_to_linear(spec.normal_gain_db);
         let ducked_g = db_to_linear(spec.ducked_gain_db);
-        let lookahead = (300usize * (SAMPLE_RATE as usize)) / 1000;
-        let coeff_attack = 1.0 - (-1.0 / (0.25 * SAMPLE_RATE as f32)).exp();
-        let coeff_release = 1.0 - (-1.0 / (0.55 * SAMPLE_RATE as f32)).exp();
-        let mut current_g = normal_g;
         let fade_in_len = ((spec.intro_bgm_fade_in_ms.unwrap_or(800).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
         let fade_out_len = ((spec.intro_bgm_fade_out_ms.unwrap_or(800).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
+        // 金句之前按设置的淡出时间提前开始 ducking，金句后按淡入时间恢复
+        let lookahead = fade_out_len;
+        let attack_tau = ((fade_out_len as f32) / (SAMPLE_RATE as f32) / 3.0).max(0.02);
+        let release_tau = ((fade_in_len as f32) / (SAMPLE_RATE as f32) / 3.0).max(0.02);
+        let coeff_attack = 1.0 - (-1.0 / (attack_tau * SAMPLE_RATE as f32)).exp();
+        let coeff_release = 1.0 - (-1.0 / (release_tau * SAMPLE_RATE as f32)).exp();
+        let mut current_g = normal_g;
+
+        let active_bgm_start = spec
+            .intro_bgm_start_offset_ms
+            .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
+            .unwrap_or(0)
+            .min(voice_track.len());
+        let bgm_target_len = spec.intro_bgm_duration_ms
+            .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
+            .unwrap_or_else(|| voice_track.len().saturating_sub(active_bgm_start));
+        let active_bgm_end = (active_bgm_start + bgm_target_len).min(voice_track.len());
+        let active_bgm_span = active_bgm_end.saturating_sub(active_bgm_start);
 
         for i in 0..voice_track.len() {
             let upcoming_end = (i + lookahead).min(voice_active_mask.len());
@@ -953,25 +977,27 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
             };
             current_g += coeff * (target_g - current_g);
 
-            let bgm_target_len = spec.intro_bgm_duration_ms
-                .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
-                .unwrap_or(voice_track.len());
-            let active_bgm_end = bgm_target_len.min(voice_track.len());
-            if i >= active_bgm_end {
+            if i < active_bgm_start || i >= active_bgm_end {
                 continue;
             }
 
+            let rel_i = i - active_bgm_start;
             let mut edge_fade = 1.0_f32;
-            if i < fade_in_len {
-                edge_fade = (i as f32) / (fade_in_len as f32);
-            } else if active_bgm_end > fade_out_len && i >= active_bgm_end - fade_out_len {
-                let rem = active_bgm_end - i;
+            if rel_i < fade_in_len {
+                edge_fade = (rel_i as f32) / (fade_in_len as f32);
+            } else if active_bgm_span > fade_out_len && rel_i >= active_bgm_span - fade_out_len {
+                let rem = active_bgm_span - rel_i;
                 edge_fade = (rem as f32) / (fade_out_len as f32);
             }
 
-            let bgm_val = bgm_samples[i % bgm_samples.len()];
+            let bgm_val = bgm_samples[rel_i % bgm_samples.len()];
             voice_track[i] += bgm_val * current_g * edge_fade;
         }
+    }
+
+    // 合并后的片头区块整体对齐至 -16.0 LUFS / -1.0 dBTP 广播标准，避免叠加过冲
+    if !voice_track.is_empty() && voice_track.iter().any(|&s| s.abs() > 1e-6) {
+        let _ = normalize_master_mix_loudness(&mut voice_track, -16.0, -1.0);
     }
 
     voice_track
@@ -1462,6 +1488,103 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
     let mut final_mix = cold_open_pcm;
     if !edited_body.is_empty() {
         append_with_equal_power_crossfade(&mut final_mix, &edited_body, 1200);
+    }
+
+    // =========================================================================
+    // 片尾 BGM 混音叠加（支持截取区间、起止位置、广播级 -16 LUFS 对齐与自动人声避让）
+    // =========================================================================
+    if let Some(ref outro) = req.outro_bgm {
+        if outro.enabled && !final_mix.is_empty() {
+            if let Some(ref p) = outro.bgm_wav_path {
+                let tmp_outro = std::env::temp_dir().join(format!("podcraft_outro_bgm_{}.wav", std::process::id()));
+                let tmp_str = tmp_outro.to_string_lossy().to_string();
+                if normalize_to_wav48k(p, &tmp_str).is_ok() {
+                    if let Ok(mut outro_samples) = read_wav_f32(&tmp_str) {
+                        if !outro_samples.is_empty() {
+                            let _ = normalize_master_mix_loudness(&mut outro_samples, -16.0, -1.0);
+                            outro_samples = slice_bgm_samples(outro_samples, outro.source_start_ms, outro.source_end_ms);
+
+                            let default_win_ms = ((final_mix.len() as f64 / SAMPLE_RATE as f64) * 0.18)
+                                .clamp(6.0, 20.0) * 1000.0;
+                            let outro_dur_samples = ((outro.duration_ms.unwrap_or(default_win_ms as i64).max(500) as usize)
+                                * (SAMPLE_RATE as usize))
+                                / 1000;
+                            let speech_end_idx = final_mix.len();
+                            let start_idx = if let Some(from_end_ms) = outro.offset_from_end_ms {
+                                if from_end_ms >= 0 {
+                                    let back_samples = ((from_end_ms as usize) * (SAMPLE_RATE as usize)) / 1000;
+                                    speech_end_idx.saturating_sub(back_samples)
+                                } else {
+                                    let fwd_samples = (((-from_end_ms) as usize) * (SAMPLE_RATE as usize)) / 1000;
+                                    speech_end_idx + fwd_samples
+                                }
+                            } else {
+                                outro
+                                    .start_offset_ms
+                                    .map(|ms| ((ms.max(0) as usize) * (SAMPLE_RATE as usize)) / 1000)
+                                    .unwrap_or_else(|| speech_end_idx.saturating_sub(outro_dur_samples))
+                                    .min(speech_end_idx)
+                            };
+                            let end_idx = start_idx + outro_dur_samples;
+                            if end_idx > final_mix.len() {
+                                final_mix.resize(end_idx, 0.0);
+                            }
+                            let span = end_idx.saturating_sub(start_idx);
+
+                            if span > 0 {
+                                let normal_g = db_to_linear(outro.normal_gain_db);
+                                let ducked_g = db_to_linear(outro.ducked_gain_db);
+                                let fade_in_len = ((outro.fade_in_ms.unwrap_or(1000).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
+                                let fade_out_len = ((outro.fade_out_ms.unwrap_or(2000).max(50) as usize) * (SAMPLE_RATE as usize)) / 1000;
+                                let win = (50usize * (SAMPLE_RATE as usize)) / 1000;
+                                let lookahead = fade_out_len.min(span);
+                                let attack_tau = ((fade_out_len as f32) / (SAMPLE_RATE as f32) / 3.0).max(0.02);
+                                let release_tau = ((fade_in_len as f32) / (SAMPLE_RATE as f32) / 3.0).max(0.02);
+                                let coeff_attack = 1.0 - (-1.0 / (attack_tau * SAMPLE_RATE as f32)).exp();
+                                let coeff_release = 1.0 - (-1.0 / (release_tau * SAMPLE_RATE as f32)).exp();
+
+                                // 检测片尾区间的人声能量活跃度
+                                let mut voice_mask = vec![false; span];
+                                let mut c = 0usize;
+                                while c < span {
+                                    let c_end = (c + win).min(span);
+                                    let mut sum_sq = 0.0_f64;
+                                    for s in &final_mix[start_idx + c..start_idx + c_end] {
+                                        sum_sq += (*s as f64) * (*s as f64);
+                                    }
+                                    let rms = (sum_sq / ((c_end - c).max(1) as f64)).sqrt();
+                                    let active = rms > 0.015;
+                                    for f in &mut voice_mask[c..c_end] {
+                                        *f = active;
+                                    }
+                                    c = c_end;
+                                }
+
+                                let mut current_g = normal_g;
+                                for rel_i in 0..span {
+                                    let upcoming = (rel_i + lookahead).min(span);
+                                    let voice_soon = voice_mask[rel_i..upcoming].iter().any(|&v| v);
+                                    let target_g = if voice_soon { ducked_g } else { normal_g };
+                                    let coeff = if target_g < current_g { coeff_attack } else { coeff_release };
+                                    current_g += coeff * (target_g - current_g);
+
+                                    let mut edge_fade = 1.0_f32;
+                                    if rel_i < fade_in_len {
+                                        edge_fade = (rel_i as f32) / (fade_in_len as f32);
+                                    } else if span > fade_out_len && rel_i >= span - fade_out_len {
+                                        edge_fade = ((span - rel_i) as f32) / (fade_out_len as f32);
+                                    }
+                                    if rel_i < outro_samples.len() {
+                                        let bgm_val = outro_samples[rel_i];
+                                        final_mix[start_idx + rel_i] += bgm_val * current_g * edge_fade;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // =========================================================================

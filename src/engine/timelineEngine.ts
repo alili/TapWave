@@ -224,6 +224,29 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
         continue;
       }
 
+      // 手动插入的空白时长（sourceStartMs === sourceEndMs）：断开硬件连续播放跨度，形成纯静音区间
+      if (tok.insertedSilence || (tok.type === 'silence' && tok.sourceEndMs <= tok.sourceStartMs && tok.durationSec > 0)) {
+        if (activeSpan) {
+          activeSpan = null;
+          currentSpanIndex++;
+        }
+        const silStartSec = prefixDurationSec + editedBodyDurationSec;
+        const silDur = Math.max(0.05, tok.durationSec);
+        editedBodyDurationSec += silDur;
+        mappedTokens.push({
+          tokenId: tok.id,
+          blockId: block.blockId,
+          speakerId: block.speakerId,
+          editedStartSec: Number(silStartSec.toFixed(3)),
+          editedEndSec: Number((silStartSec + silDur).toFixed(3)),
+          effectiveSourceStartSec: Number((tok.sourceStartMs / 1000).toFixed(3)),
+          spanIndex: -1,
+          token: tok,
+        });
+        lastKeptWasCompressed = true;
+        continue;
+      }
+
       const rawTokSrcStartSec = tok.sourceStartMs / 1000;
       const rawSpanSec = Math.max(0, (tok.sourceEndMs - tok.sourceStartMs) / 1000);
       const isCompressed =
@@ -727,6 +750,19 @@ export function buildEdlKeepSegments(state: PodcastProjectState): EdlKeepSegment
           segments.push(current);
           current = null;
         }
+        continue;
+      }
+
+      if (tok.insertedSilence || (tok.type === 'silence' && tok.sourceEndMs <= tok.sourceStartMs && tok.durationSec > 0)) {
+        const extraPauseMs = Math.max(50, Math.round(tok.durationSec * 1000));
+        if (current) {
+          current.pauseAfterMs += extraPauseMs;
+          segments.push(current);
+          current = null;
+        } else if (segments.length > 0) {
+          segments[segments.length - 1].pauseAfterMs += extraPauseMs;
+        }
+        sawCutSinceCurrent = true;
         continue;
       }
 
@@ -2448,4 +2484,163 @@ export function repairMisalignedHighlights(
       durationSec: Math.max(0.1, Number(((matched.sourceEndMs - matched.sourceStartMs) / 1000).toFixed(2))),
     };
   });
+}
+
+export interface IntroBgmVoiceWindow {
+  startSec: number;
+  endSec: number;
+}
+
+/**
+ * Computes the intro BGM ducking multiplier (between `duckRatio` and `1.0`) at `tSec`.
+ * Ducks BEFORE each voice window begins over `fadeOutSec`, holds at `duckRatio` during the window,
+ * and recovers AFTER the window ends over `fadeInSec`.
+ */
+export function computeIntroBgmDuckMultiplier(
+  tSec: number,
+  voiceWindows: IntroBgmVoiceWindow[],
+  fadeInSec: number,
+  fadeOutSec: number,
+  duckRatio: number
+): number {
+  if (voiceWindows.length === 0) return 1.0;
+  const safeFadeOut = Math.max(0.05, fadeOutSec);
+  const safeFadeIn = Math.max(0.05, fadeInSec);
+  const clampedDuck = Math.max(0, Math.min(1, duckRatio));
+  let multiplier = 1.0;
+
+  for (const w of voiceWindows) {
+    if (w.endSec <= w.startSec) continue;
+    let wMult = 1.0;
+    if (tSec >= w.startSec && tSec <= w.endSec) {
+      wMult = clampedDuck;
+    } else if (tSec >= w.startSec - safeFadeOut && tSec < w.startSec) {
+      const progress = (tSec - (w.startSec - safeFadeOut)) / safeFadeOut;
+      wMult = 1.0 - progress * (1.0 - clampedDuck);
+    } else if (tSec > w.endSec && tSec <= w.endSec + safeFadeIn) {
+      const progress = (tSec - w.endSec) / safeFadeIn;
+      wMult = clampedDuck + progress * (1.0 - clampedDuck);
+    }
+    if (wMult < multiplier) {
+      multiplier = wMult;
+    }
+  }
+
+  return multiplier;
+}
+
+/**
+ * Inserts a synthetic silence/blank pause of `durationSec` at `playheadSec` on the edited timeline.
+ * If `playheadSec` falls inside a kept word token, splits that token cleanly around the inserted silence.
+ */
+export function insertSilenceAtPlayhead(
+  state: PodcastProjectState,
+  playheadSec: number,
+  durationSec: number
+): PodcastProjectState {
+  const safeDur = Number(Math.max(0.1, Math.min(60, durationSec)).toFixed(2));
+  if (state.blocks.length === 0) return state;
+
+  const timeline = computeEditedTimeline(state);
+  const clampedPlayhead = Math.max(
+    timeline.prefixDurationSec,
+    Math.min(timeline.totalEditedDurationSec, playheadSec)
+  );
+
+  // 1. 查找游标所在的目标位置
+  let targetBlockId: string | null = null;
+  let targetTokenId: string | null = null;
+  let splitInsideToken = false;
+  let splitSourceMs = 0;
+
+  for (const mt of timeline.mappedTokens) {
+    if (mt.token.deleted) continue;
+    if (
+      mt.token.type === 'word' &&
+      clampedPlayhead > mt.editedStartSec + 0.025 &&
+      clampedPlayhead < mt.editedEndSec - 0.025
+    ) {
+      targetBlockId = mt.blockId;
+      targetTokenId = mt.token.id;
+      splitInsideToken = true;
+      const offsetRatio =
+        (clampedPlayhead - mt.editedStartSec) /
+        Math.max(0.01, mt.editedEndSec - mt.editedStartSec);
+      const tokSpanMs = Math.max(20, mt.token.sourceEndMs - mt.token.sourceStartMs);
+      splitSourceMs = Math.round(mt.token.sourceStartMs + offsetRatio * tokSpanMs);
+      break;
+    }
+    if (mt.editedStartSec >= clampedPlayhead - 0.02) {
+      targetBlockId = mt.blockId;
+      targetTokenId = mt.token.id;
+      splitSourceMs = mt.token.sourceStartMs;
+      break;
+    }
+  }
+
+  const silenceTok: TranscriptToken = {
+    id: `silence_ins_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'silence',
+    text: `[空白 ${safeDur.toFixed(1)}s]`,
+    sourceStartMs: splitSourceMs,
+    sourceEndMs: splitSourceMs,
+    durationSec: safeDur,
+    origDurationSec: safeDur,
+    insertedSilence: true,
+  };
+
+  if (!targetBlockId || !targetTokenId) {
+    // 游标在末尾：追加到最后一个 block 的末尾
+    const lastIdx = state.blocks.length - 1;
+    const lastBlock = state.blocks[lastIdx];
+    const lastTok = lastBlock.tokens[lastBlock.tokens.length - 1];
+    const tailMs = lastTok ? lastTok.sourceEndMs : 0;
+    const tailSilence: TranscriptToken = {
+      ...silenceTok,
+      sourceStartMs: tailMs,
+      sourceEndMs: tailMs,
+    };
+    const nextBlocks = state.blocks.map((b, idx) =>
+      idx === lastIdx ? { ...b, tokens: [...b.tokens, tailSilence] } : b
+    );
+    return { ...state, blocks: nextBlocks };
+  }
+
+  const nextBlocks = state.blocks.map((b) => {
+    if (b.blockId !== targetBlockId) return b;
+    const nextTokens: TranscriptToken[] = [];
+    for (const tok of b.tokens) {
+      if (tok.id !== targetTokenId) {
+        nextTokens.push(tok);
+        continue;
+      }
+      if (splitInsideToken) {
+        const leftDur = Number(Math.max(0.02, (splitSourceMs - tok.sourceStartMs) / 1000).toFixed(3));
+        const rightDur = Number(Math.max(0.02, (tok.sourceEndMs - splitSourceMs) / 1000).toFixed(3));
+        nextTokens.push({
+          ...tok,
+          id: `${tok.id}_L`,
+          sourceEndMs: splitSourceMs,
+          durationSec: leftDur,
+          origDurationSec: leftDur,
+          subwordTrimmed: true,
+        });
+        nextTokens.push(silenceTok);
+        nextTokens.push({
+          ...tok,
+          id: `${tok.id}_R`,
+          sourceStartMs: splitSourceMs,
+          durationSec: rightDur,
+          origDurationSec: rightDur,
+          subwordTrimmed: true,
+        });
+      } else {
+        nextTokens.push(silenceTok);
+        nextTokens.push(tok);
+      }
+    }
+    return { ...b, tokens: nextTokens };
+  });
+
+  return { ...state, blocks: nextBlocks };
 }

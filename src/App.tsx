@@ -47,6 +47,7 @@ import {
   mapEditedSecToSourceMs,
   remapPlayheadAfterTimelineEdit,
   TimelineComputation,
+  insertSilenceAtPlayhead,
 } from './engine/timelineEngine';
 import {
   buildTranscriptBlocksFromImportedTracks,
@@ -65,6 +66,9 @@ const LazyShownotesModal = React.lazy(() =>
 );
 const LazyIntroEditorModal = React.lazy(() =>
   import('./components/IntroEditorModal').then((m) => ({ default: m.IntroEditorModal }))
+);
+const LazyOutroEditorView = React.lazy(() =>
+  import('./components/OutroEditorView').then((m) => ({ default: m.OutroEditorView }))
 );
 import {
   ensureNativeAudioServerPort,
@@ -1019,6 +1023,11 @@ export const App: React.FC = () => {
         mutateProject((p) => ({ ...p, workspaceLayout: 'intro' }));
         return;
       }
+      if (e.key === '4') {
+        e.preventDefault();
+        mutateProject((p) => ({ ...p, workspaceLayout: 'outro' }));
+        return;
+      }
     }
 
     // 折叠区域快捷键: ⌘ [ (折叠/展开左侧音轨栏) / ⌘ ] (折叠/展开右侧AI栏)
@@ -1065,7 +1074,8 @@ export const App: React.FC = () => {
       isSpaceKey || (!e.metaKey && !e.ctrlKey && !e.altKey && lower === 'k');
 
     if (isPlayToggleKey) {
-      if ((stateRef.current.workspaceLayout ?? 'multitrack') === 'intro' || introEditorOpen) {
+      const curLayout = stateRef.current.workspaceLayout ?? 'multitrack';
+      if (curLayout === 'intro' || curLayout === 'outro' || introEditorOpen) {
         return;
       }
       e.preventDefault();
@@ -3657,7 +3667,7 @@ export const App: React.FC = () => {
   );
   const stableStepPlayhead = useLatestCallback(stepPlayhead);
   const stableWaveformCutAction = useLatestCallback(handleWaveformCutAction);
-  const stableSetWorkspaceLayout = useLatestCallback((mode: 'multitrack' | 'transcript' | 'intro') =>
+  const stableSetWorkspaceLayout = useLatestCallback((mode: 'multitrack' | 'transcript' | 'intro' | 'outro') =>
     mutateProject((p) => ({ ...p, workspaceLayout: mode }))
   );
   const stableSwitchToIntroView = useLatestCallback(() =>
@@ -4162,9 +4172,25 @@ export const App: React.FC = () => {
               onNotify={notify}
             />
           </Suspense>
+        ) : (state.workspaceLayout ?? 'multitrack') === 'outro' ? (
+          <Suspense fallback={null}>
+            <LazyOutroEditorView
+              state={state}
+              timeline={timeline}
+              onClose={() => stableSetWorkspaceLayout('multitrack')}
+              onUpdateState={mutateProject}
+              onImportBgm={(slot) => void handleImportBgm(slot)}
+              onSeekMainPlayhead={stableSeekToSec}
+            />
+          </Suspense>
         ) : (
           <WaveformEditorBar
             isMainStage
+            onInsertSilenceAtPlayhead={(durSec) => {
+              const atSec = playheadRef.current;
+              mutateProject((prev) => insertSilenceAtPlayhead(prev, atSec, durSec));
+              notify(`⏸ 已在 ${atSec.toFixed(1)}s 游标处插入 ${durSec.toFixed(1)}s 空白时长`);
+            }}
             state={state}
             timeline={timeline}
             playheadSec={playheadSec}

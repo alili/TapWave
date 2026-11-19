@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { buildEdlKeepSegments, resolveEffectiveHighlightGapSec } from './timelineEngine';
+import { buildEdlKeepSegments, computeEditedTimeline, resolveEffectiveHighlightGapSec } from './timelineEngine';
 import {
   AsrConfig,
   DetectedSpeechSegmentDto,
@@ -851,7 +851,48 @@ export async function exportMasteredPodcastAudio(
             : null,
           introBgmFadeInMs: state.introBgm?.fadeInMs ?? 800,
           introBgmFadeOutMs: state.introBgm?.fadeOutMs ?? 800,
+          introBgmStartOffsetMs:
+            typeof state.introBgm?.startOffsetSec === 'number'
+              ? Math.round(state.introBgm.startOffsetSec * 1000)
+              : null,
+          introBgmSourceStartMs:
+            typeof state.introBgm?.sourceStartSec === 'number'
+              ? Math.round(state.introBgm.sourceStartSec * 1000)
+              : null,
+          introBgmSourceEndMs:
+            typeof state.introBgm?.sourceEndSec === 'number'
+              ? Math.round(state.introBgm.sourceEndSec * 1000)
+              : null,
         },
+        outroBgm: (() => {
+          if (!state.outroBgm?.enabled || !state.outroBgm.filePath) return null;
+          const timeline = computeEditedTimeline(state);
+          const totalDur = Math.max(1, state.outroBgm.durationSec ?? 15);
+          const srcStart = Math.max(0, Math.min(totalDur - 0.5, state.outroBgm.sourceStartSec ?? 0));
+          const srcEnd = Math.max(srcStart + 0.5, Math.min(totalDur, state.outroBgm.sourceEndSec ?? totalDur));
+          const effDurSec =
+            typeof state.outroBgm.customDurationSec === 'number' && state.outroBgm.customDurationSec > 0
+              ? state.outroBgm.customDurationSec
+              : Number(((srcEnd - srcStart) * 1.2).toFixed(1));
+          const totalEditedSec = Math.max(0, timeline.totalEditedDurationSec);
+          const effStartSec =
+            typeof state.outroBgm.startOffsetSec === 'number' && state.outroBgm.startOffsetSec >= 0
+              ? Math.min(Math.max(0, totalEditedSec - 0.5), state.outroBgm.startOffsetSec)
+              : Math.max(0, totalEditedSec - effDurSec);
+          return {
+            enabled: true,
+            bgmWavPath: state.outroBgm.filePath,
+            durationMs: Math.round(effDurSec * 1000),
+            startOffsetMs: Math.round(effStartSec * 1000),
+            offsetFromEndMs: Math.round((totalEditedSec - effStartSec) * 1000),
+            sourceStartMs: Math.round(srcStart * 1000),
+            sourceEndMs: Math.round(srcEnd * 1000),
+            fadeInMs: state.outroBgm.fadeInMs ?? 1000,
+            fadeOutMs: state.outroBgm.fadeOutMs ?? 2000,
+            normalGainDb: -6.0,
+            duckedGainDb: state.bgmDuckDb,
+          };
+        })(),
       },
     });
     return res.outputPath;

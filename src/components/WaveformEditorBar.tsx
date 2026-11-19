@@ -5340,19 +5340,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       {/* Single-line fixed-height top bar — prevents vertical height jumps when selecting ranges */}
       <div className="h-7 mb-1.5 flex items-center justify-between gap-2 text-xs overflow-x-auto shrink-0">
         <div className="flex items-center gap-2.5 shrink-0">
-          <div className="flex items-center gap-1.5">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isMainStage
-                  ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.75)]'
-                  : 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.7)]'
-              }`}
-            />
-            <span className="font-semibold text-zinc-100 tracking-tight">
-              {isMainStage ? 'Audition 多轨波形精剪台' : '多轨波形精剪台'}
-            </span>
-          </div>
-
           {onSetWaveformSelectionMode && (
             <div
               className="inline-flex items-center rounded-md border border-zinc-700/90 bg-zinc-950 p-0.5 shrink-0"
@@ -5475,52 +5462,12 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                   高度 {dockHeight}px
                 </span>
               )}
-              {state.autoSoloMode !== 'off' && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-300">
-                  <span className="w-2 h-0.5 bg-emerald-400 rounded-full inline-block" />
-                  {state.autoSoloMode === 'hard_mute'
-                    ? '非主讲强力静音'
-                    : `非主讲自动降音 (${state.duckAttenuationDb}dB)`}
-                </span>
-              )}
-              {(timeline.overlapRegions?.length ?? 0) > 0 && (
-                <button
-                  onClick={() => {
-                    const regions = timeline.overlapRegions ?? [];
-                    if (regions.length === 0) return;
-                    const idx = overlapJumpIdx % regions.length;
-                    const target = regions[idx];
-                    setOverlapJumpIdx((idx + 1) % regions.length);
-                    onSeekToSec(target.editedStartSec);
-                  }}
-                  title="点击依次跳转到多轨语音重合位置，查看主/副发言人重合波形与自动降音曲线"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/35 text-[11px] text-purple-200 cursor-pointer transition"
-                >
-                  <span>🔀 重合 {timeline.overlapRegions.length} 处</span>
-                </button>
-              )}
             </div>
           )}
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {onOpenIntroEditor && (
-            <button
-              type="button"
-              onClick={onOpenIntroEditor}
-              title="打开独立片头多轨编辑器（移动/缩放金句、拖动口播、段落静音、预览BGM避让）"
-              className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-600/35 to-blue-600/35 hover:from-purple-600/55 hover:to-blue-600/55 border border-purple-400/50 text-purple-100 font-semibold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs transition"
-            >
-              <Sparkles className="w-3 h-3 text-purple-300" />
-              <span>片头编辑器</span>
-              {rawTimeline.prefixDurationSec > 0 && (
-                <span className="px-1 py-0.2 rounded bg-purple-500/30 text-[10px] font-mono text-purple-200">
-                  {rawTimeline.prefixDurationSec.toFixed(1)}s
-                </span>
-              )}
-            </button>
-          )}
-          {/* 快捷播放控制条 + 倍速切换 */}
+          {/* 快捷播放控制条 */}
           <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800">
             <button
               onClick={() => onSeekToSec(0)}

@@ -132,6 +132,29 @@ pub struct ColdOpenRenderSpec {
     pub intro_bgm_fade_in_ms: Option<i64>,
     #[serde(default)]
     pub intro_bgm_fade_out_ms: Option<i64>,
+    #[serde(default)]
+    pub intro_bgm_start_offset_ms: Option<i64>,
+    #[serde(default)]
+    pub intro_bgm_source_start_ms: Option<i64>,
+    #[serde(default)]
+    pub intro_bgm_source_end_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutroBgmRenderSpec {
+    pub enabled: bool,
+    pub bgm_wav_path: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub start_offset_ms: Option<i64>,
+    #[serde(default)]
+    pub offset_from_end_ms: Option<i64>,
+    pub source_start_ms: Option<i64>,
+    pub source_end_ms: Option<i64>,
+    pub fade_in_ms: Option<i64>,
+    pub fade_out_ms: Option<i64>,
+    pub normal_gain_db: f64,
+    pub ducked_gain_db: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +177,8 @@ pub struct RenderMixRequest {
     pub redactions: Vec<RedactionSpanSpec>,
     pub keep_segments: Vec<EdlKeepSegment>,
     pub cold_open: ColdOpenRenderSpec,
+    #[serde(default)]
+    pub outro_bgm: Option<OutroBgmRenderSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

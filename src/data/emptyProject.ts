@@ -456,6 +456,8 @@ export function parsePodcraftProjectJson(
         ? 'transcript'
         : rawProject.workspaceLayout === 'intro'
         ? 'intro'
+        : rawProject.workspaceLayout === 'outro'
+        ? 'outro'
         : 'multitrack',
     waveformSelectionMode:
       rawProject.waveformSelectionMode === 'free' ? 'free' : 'snap',

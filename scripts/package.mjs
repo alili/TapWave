@@ -147,7 +147,24 @@ function syncVersions(newVersion) {
   log(`✔ 已更新 src-tauri/Cargo.toml 版本号: ${newVersion}`, colors.green);
 }
 
-// 更新 README.md 中的版本号和迭代记录
+// 获取本地日期 YYYY-MM-DD
+function getLocalDateString(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// 检查 README.md 中指定日期是否已产生过版本记录（每天至多产生一个版本号）
+function hasReleaseForDate(dateStr) {
+  const readmePath = path.join(ROOT_DIR, 'README.md');
+  if (!fs.existsSync(readmePath)) return false;
+  const content = fs.readFileSync(readmePath, 'utf8');
+  const dateRegex = new RegExp(`^### \\[[^\\]]+\\] - ${dateStr}\\b`, 'm');
+  return dateRegex.test(content);
+}
+
+// 更新 README.md 中的版本号和迭代记录（同版本号合并并去重）
 function updateReadme(newVersion, summaryText) {
   const readmePath = path.join(ROOT_DIR, 'README.md');
   let content = fs.readFileSync(readmePath, 'utf8');
@@ -158,26 +175,46 @@ function updateReadme(newVersion, summaryText) {
     `# PodCraft Studio Pro (v${newVersion})`
   );
 
-  // 2. 格式化概要条目
-  const today = new Date().toISOString().slice(0, 10);
-  const lines = summaryText
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => (l.startsWith('-') ? l : `- ${l}`))
-    .join('\n');
+  // 2. 格式化概要条目并去重
+  const today = getLocalDateString();
+  const newLines = Array.from(
+    new Set(
+      summaryText
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((l) => (l.startsWith('-') ? l : `- ${l}`))
+    )
+  );
 
-  const newReleaseEntry = `### [v${newVersion}] - ${today}\n${lines}\n`;
+  const escapedVersion = newVersion.replace(/\./g, '\\.');
+  const existingVersionRegex = new RegExp(
+    `(### \\[v${escapedVersion}\\] - )\\d{4}-\\d{2}-\\d{2}\\n([\\s\\S]*?)(?=\\n### \\[|$)`
+  );
 
   const headerRegex = /## 版本迭代记录 \(Release Notes\)/;
-  if (headerRegex.test(content)) {
+  if (existingVersionRegex.test(content)) {
+    // 合并到已存在的同版本号记录中，更新日期并去重条目
+    content = content.replace(existingVersionRegex, (_match, prefix, existingBody) => {
+      const existingLines = existingBody
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const mergedLines = [...newLines, ...existingLines].filter(
+        (line, idx, arr) => arr.indexOf(line) === idx
+      );
+      return `${prefix}${today}\n${mergedLines.join('\n')}\n`;
+    });
+  } else if (headerRegex.test(content)) {
     // 插入到已有标题正下方
+    const newReleaseEntry = `### [v${newVersion}] - ${today}\n${newLines.join('\n')}\n`;
     content = content.replace(
       /## 版本迭代记录 \(Release Notes\)\n+/,
       `## 版本迭代记录 (Release Notes)\n\n${newReleaseEntry}\n`
     );
   } else {
     // 在最后添加迭代记录区块
+    const newReleaseEntry = `### [v${newVersion}] - ${today}\n${newLines.join('\n')}\n`;
     content = content.trimEnd() + `\n\n## 版本迭代记录 (Release Notes)\n\n${newReleaseEntry}\n`;
   }
 
@@ -217,10 +254,11 @@ async function main() {
   log(`   点波 TapWave — 自动化打包与版本发布引擎`, colors.bold);
   log(`======================================================\n`, colors.bold);
 
-  // 1. 读取当前版本号
+  // 1. 读取当前版本号（每天至多产生一个版本号）
   const pkgPath = path.join(ROOT_DIR, 'package.json');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   const currentVersion = pkg.version || '2.1.0';
+  const today = getLocalDateString();
   let targetVersion = currentVersion;
 
   if (options.noBump) {
@@ -228,6 +266,8 @@ async function main() {
   } else if (options.targetVersion) {
     targetVersion = options.targetVersion;
     log(`[1/6] 指定新版本: v${currentVersion} -> v${targetVersion}`, colors.blue);
+  } else if (hasReleaseForDate(today)) {
+    log(`[1/6] 今日 (${today}) 已产生过版本号，沿用当前版本: v${currentVersion}`, colors.blue);
   } else {
     targetVersion = bumpVersion(currentVersion, options.type);
     log(`[1/6] 自动升级版本 (${options.type}): v${currentVersion} -> v${targetVersion}`, colors.blue);

@@ -3,6 +3,7 @@ import { createEmptyProjectState } from '../data/emptyProject';
 import {
   computeColdOpenDurationSec,
   computeEditedTimeline,
+  computeIntroBgmDuckMultiplier,
   resolveEffectiveHighlightGapSec,
 } from '../engine/timelineEngine';
 import { resolveEditedPlayheadToSource } from '../engine/audioPreviewEngine';
@@ -435,5 +436,34 @@ describe('金句起止时间段、自动间隔、固定口播与片头 BGM 人�
     const targetAt4s = resolveEditedPlayheadToSource(state, timeline, 4.0);
     expect(targetAt4s.inIntroOrGapSilence).toBe(true);
     expect(targetAt4s.sourceSec).toBeNull();
+  });
+
+  it('片头 BGM 在金句之前按设置的淡出时间提前 ducking，金句结束后按淡入时间恢复', () => {
+    const windows = [{ startSec: 2.0, endSec: 6.0 }];
+    const fadeInSec = 1.2;
+    const fadeOutSec = 0.8;
+    const duckRatio = 0.2;
+
+    // 金句开始前 0.8s 之前：保持原音量 1.0
+    expect(computeIntroBgmDuckMultiplier(1.0, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(1.0, 4);
+    // 金句开始前 0.4s（恰好在淡出区间中点）：平滑降至 0.6
+    expect(computeIntroBgmDuckMultiplier(1.6, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.6, 4);
+    // 金句开始瞬间及播放期间：已降至 duckRatio (0.2)
+    expect(computeIntroBgmDuckMultiplier(2.0, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.2, 4);
+    expect(computeIntroBgmDuckMultiplier(4.0, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.2, 4);
+    // 金句结束后 0.6s（淡入恢复区间中点）：平滑回升至 0.6
+    expect(computeIntroBgmDuckMultiplier(6.6, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.6, 4);
+    // 金句结束后 1.2s 之后：完全恢复至 1.0
+    expect(computeIntroBgmDuckMultiplier(7.2, windows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(1.0, 4);
+
+    // 多段金句 + 固定口播：金句之间间隔足够时恢复音量，固定口播同样提前 ducking 并避让
+    const multiWindows = [
+      { startSec: 2.0, endSec: 5.0 },
+      { startSec: 8.0, endSec: 11.0 },
+      { startSec: 14.0, endSec: 18.0 }, // 固定口播
+    ];
+    expect(computeIntroBgmDuckMultiplier(6.5, multiWindows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(1.0, 4);
+    expect(computeIntroBgmDuckMultiplier(13.6, multiWindows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.6, 4);
+    expect(computeIntroBgmDuckMultiplier(15.5, multiWindows, fadeInSec, fadeOutSec, duckRatio)).toBeCloseTo(0.2, 4);
   });
 });

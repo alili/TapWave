@@ -3,7 +3,7 @@ export type AutoSoloMode = 'natural_ducking' | 'hard_mute' | 'off';
 export type DeClickStrength = 'medium' | 'strong';
 export type TranscriptGroupingMode = 'text_editor' | 'chronological' | 'by_speaker' | 'outline';
 export type EditInteractionMode = 'audio_cut' | 'text_proofread';
-export type WorkspaceLayoutMode = 'multitrack' | 'transcript' | 'intro';
+export type WorkspaceLayoutMode = 'multitrack' | 'transcript' | 'intro' | 'outro';
 export type WaveformSelectionMode = 'snap' | 'free';
 export type SpeakerRole = 'host' | 'co_host' | 'guest' | 'ref' | 'bgm';
 
@@ -70,6 +70,8 @@ export interface TranscriptToken {
   gapBeforeSec?: number;
   bleeped?: boolean;
   bleepStyle?: 'sine_1khz_bleep' | 'reverse_blur' | 'room_tone_mute';
+  /** 是否为用户在音轨视图游标处手动插入的空白时长 */
+  insertedSilence?: boolean;
 }
 
 export interface OverlapSideNote {
@@ -210,10 +212,14 @@ export interface BgmTrackAsset {
   audioUrl?: string;
   durationSec?: number;
   enabled: boolean;
-  /** 自定义/指定播放时长（秒，用于片头 BGM 等） */
+  /** 自定义/指定播放时长（秒，用于片头/片尾 BGM 等） */
   customDurationSec?: number;
-  /** 自定义/指定开始播放时间（秒，用于片头固定口播等） */
+  /** 自定义/指定开始播放时间（秒，用于片头固定口播及片头/片尾 BGM 时间轴起止偏移） */
   startOffsetSec?: number;
+  /** 从 BGM 音频文件内部截取的起始时间（秒，默认 0） */
+  sourceStartSec?: number;
+  /** 从 BGM 音频文件内部截取的结束时间（秒，默认等于文件总时长） */
+  sourceEndSec?: number;
   /** 默认淡入时间（毫秒，默认 800ms） */
   fadeInMs?: number;
   /** 默认淡出时间（毫秒，默认 800ms） */

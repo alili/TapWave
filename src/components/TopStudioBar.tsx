@@ -996,19 +996,51 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
         {/* 顶部展开的视图控制工具组：音轨主视图 / 文稿视图直接切换与侧边栏开关 */}
         <div className="flex items-center gap-1.5 bg-zinc-950/80 p-0.5 rounded-lg border border-zinc-800 shadow-xs">
           <div className="flex items-center p-0.5 rounded-md bg-zinc-900 border border-zinc-700/60 shadow-inner">
-            <button
-              type="button"
-              onClick={() => onSetWorkspaceLayout('multitrack')}
-              className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
-                layoutMode === 'multitrack'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
-              }`}
-              title="音轨主视图 (快捷键: ⌥1)"
-            >
-              <span>🎛️</span>
-              <span>音轨视图</span>
-            </button>
+            <div className="inline-flex items-center rounded bg-zinc-950/60 border border-zinc-800/70 p-0.5 gap-0.5">
+              <button
+                type="button"
+                onClick={() => onSetWorkspaceLayout('intro')}
+                className={`relative px-1.5 py-1 rounded text-xs font-semibold flex items-center justify-center transition cursor-pointer ${
+                  layoutMode === 'intro'
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                }`}
+                title="片头视图：独立多轨编辑金句高光、固定口播与片头BGM (快捷键: ⌥3)"
+              >
+                <span>🎬</span>
+                {(state.coldOpenEnabled || state.introVoiceover?.enabled || state.introBgm?.enabled) && (
+                  <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetWorkspaceLayout('multitrack')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                  layoutMode === 'multitrack'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                }`}
+                title="音轨主视图 (快捷键: ⌥1)"
+              >
+                <span>🎛️</span>
+                <span>音轨视图</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetWorkspaceLayout('outro')}
+                className={`relative px-1.5 py-1 rounded text-xs font-semibold flex items-center justify-center transition cursor-pointer ${
+                  layoutMode === 'outro'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                }`}
+                title="片尾视图：独立编辑片尾 BGM 起止位置、文件截取与自动音量控制 (快捷键: ⌥4)"
+              >
+                <span>🎵</span>
+                {state.outroBgm?.enabled && (
+                  <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                )}
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => onSetWorkspaceLayout('transcript')}
@@ -1021,22 +1053,6 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
             >
               <span>📝</span>
               <span>文稿视图</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onSetWorkspaceLayout('intro')}
-              className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
-                layoutMode === 'intro'
-                  ? 'bg-purple-600 text-white shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
-              }`}
-              title="片头视图：独立多轨编辑金句高光、固定口播与片头BGM (快捷键: ⌥3)"
-            >
-              <span>🎬</span>
-              <span>片头视图</span>
-              {(state.coldOpenEnabled || state.introVoiceover?.enabled || state.introBgm?.enabled) && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 inline-block" />
-              )}
             </button>
           </div>
 
