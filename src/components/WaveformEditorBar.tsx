@@ -1376,13 +1376,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         : state.tracks,
     [state.tracks]
   );
-  const hasOutroBgm = Boolean(
-    state.outroBgm?.enabled !== false &&
-    (state.outroBgm?.filePath || state.outroBgm?.audioUrl || state.outroBgm?.fileName)
-  );
-  // 片头已分离至独立片头编辑器，主音轨仅展示片尾 BGM
+  // 片头与片尾均已分离至独立片头/片尾视图，音轨视图仅展示人声轨
+  const hasOutroBgm = false;
   const hasIntroBgm = false;
-  const hasBgmTrack = hasOutroBgm;
+  const hasBgmTrack = false;
 
   const anySolo = useMemo(
     () =>
@@ -1446,18 +1443,29 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           : 15.0);
   const introBgmEndSec = Math.min(totalSec, introFixedDurationSec);
 
-  // 片尾 BGM 没有固定长度，可拖动截取
-  const defaultOutroDurationSec = Math.min(25, Math.max(6, totalSec * 0.18));
+  // 片尾 BGM：优先保留片尾视图设置的起始时间与截取时长，支持提前人声结束
+  const outroSliceStart = Math.max(0, state.outroBgm?.sourceStartSec ?? 0);
+  const outroSliceEnd = Math.max(
+    outroSliceStart + 0.5,
+    state.outroBgm?.sourceEndSec ?? state.outroBgm?.durationSec ?? 0
+  );
+  const defaultOutroDurationSec =
+    state.outroBgm?.enabled && (state.outroBgm?.durationSec || state.outroBgm?.sourceEndSec)
+      ? Number(((outroSliceEnd - outroSliceStart) * 1.2).toFixed(1))
+      : Math.min(25, Math.max(6, totalSec * 0.18));
   const effectiveOutroDurationSec =
     draftOutroDurationSec ??
     (typeof state.outroBgm?.customDurationSec === 'number' && state.outroBgm.customDurationSec > 0
       ? state.outroBgm.customDurationSec
       : defaultOutroDurationSec);
-  const outroStartSec = Math.max(
-    hasIntroBgm ? introBgmEndSec + 0.5 : 0,
-    totalSec - effectiveOutroDurationSec
-  );
-  const outroEndSec = totalSec;
+  const outroStartSec =
+    typeof state.outroBgm?.startOffsetSec === 'number' && state.outroBgm.startOffsetSec >= 0
+      ? Math.min(Math.max(0, totalSec - 0.5), state.outroBgm.startOffsetSec)
+      : Math.max(
+          hasIntroBgm ? introBgmEndSec + 0.5 : 0,
+          totalSec - effectiveOutroDurationSec
+        );
+  const outroEndSec = Math.min(totalSec, outroStartSec + effectiveOutroDurationSec);
 
   const maxZoom = useMemo(
     () => Math.max(200, Math.min(2400, Math.ceil(totalSec / MIN_VISIBLE_SEC))),
@@ -3206,15 +3214,16 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       }
 
       // ----------------------------------------------------
-      // B. 片尾 BGM（没有固定长度，可拖动截取，自动适应音量）
+      // B. 片尾 BGM（保留片尾视图设置的起止位置，支持提前人声结束或延后收尾）
       // ----------------------------------------------------
-      if (hasOutroBgm && outroStartSec < totalSec) {
+      if (hasOutroBgm && outroStartSec < outroEndSec) {
         const outroStartRatio = totalSec > 0 ? outroStartSec / totalSec : 0;
+        const outroEndRatio = totalSec > 0 ? Math.min(1.0, outroEndSec / totalSec) : 1.0;
         const outroX0 = Math.max(0, ratioToX(outroStartRatio));
-        const outroX1 = Math.min(W, ratioToX(1.0));
+        const outroX1 = Math.min(W, ratioToX(outroEndRatio));
         const outroClipW = outroX1 - outroX0;
 
-        if (outroClipW > 2 && viewEndRatio >= outroStartRatio) {
+        if (outroClipW > 2 && viewEndRatio >= outroStartRatio && viewStartRatio <= outroEndRatio) {
           ctx.save();
           // Clip background with Emerald/Cyan glow
           ctx.fillStyle = hexToRgba(outroColor, isOutroDimmed ? 0.02 : 0.07);
@@ -3246,17 +3255,17 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           for (let x = Math.max(0, outroX0); x <= Math.min(W, outroX1); x += stepPx) {
             const normR = Math.max(0, Math.min(1, xToRatio(x)));
             const tSec = normR * totalSec;
-            if (tSec < outroStartSec || tSec > totalSec) continue;
+            if (tSec < outroStartSec || tSec > outroEndSec) continue;
 
             // 淡入淡出包络
             let fadeFactor = 1.0;
             if (tSec - outroStartSec < outroFadeInSec) {
               fadeFactor = Math.sin((Math.max(0, (tSec - outroStartSec) / Math.max(0.05, outroFadeInSec)) * Math.PI) / 2);
             }
-            if (tSec > totalSec - outroFadeOutSec) {
+            if (outroEndSec - outroStartSec > outroFadeOutSec && tSec > outroEndSec - outroFadeOutSec) {
               fadeFactor = Math.min(
                 fadeFactor,
-                Math.sin((Math.max(0, (totalSec - tSec) / Math.max(0.05, outroFadeOutSec)) * Math.PI) / 2)
+                Math.sin((Math.max(0, (outroEndSec - tSec) / Math.max(0.05, outroFadeOutSec)) * Math.PI) / 2)
               );
             }
 
@@ -5607,18 +5616,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               <span>5s</span>
               <FastForward className="w-3 h-3" />
             </button>
-            <select
-              value={state.playbackRate || 1.0}
-              onChange={(e) => onChangePlaybackRate(Number(e.target.value))}
-              title="倍速播放且不变调 (快捷键: [ 减速 / ] 加速)"
-              className="ml-0.5 px-1 py-0.5 rounded bg-zinc-900 border border-zinc-700/80 text-blue-300 font-mono font-semibold text-[11px] focus:outline-none cursor-pointer"
-            >
-              {PLAYBACK_RATES.map((r) => (
-                <option key={r} value={r} className="bg-zinc-900 text-zinc-100">
-                  {r}x
-                </option>
-              ))}
-            </select>
           </div>
 
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 text-zinc-400">

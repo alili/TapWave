@@ -11,6 +11,8 @@ import {
   SpeakerTrack,
 } from '../types/podcast';
 import {
+  computeIntroBgmDuckMultiplier,
+  IntroBgmVoiceWindow,
   MappedTokenTimeline,
   PlaybackSpan,
   resolveColdOpenClipWindows,
@@ -962,7 +964,9 @@ class AudioPreviewEngine {
     playbackRate: number,
     targetGain: number,
     loop: boolean,
-    forceRestart: boolean
+    forceRestart: boolean,
+    loopStartSec?: number,
+    loopEndSec?: number
   ): boolean {
     if (!activeWindow) {
       this.stopWebAudioAux(slot);
@@ -985,7 +989,18 @@ class AudioPreviewEngine {
     }
 
     const dur = Math.max(0.05, buffer.duration);
-    const desiredOffset = loop ? ((offsetSec % dur) + dur) % dur : Math.max(0, offsetSec);
+    const hasCustomLoop =
+      loop &&
+      typeof loopStartSec === 'number' &&
+      typeof loopEndSec === 'number' &&
+      loopEndSec > loopStartSec + 0.05;
+    const effLoopStart = hasCustomLoop ? Math.max(0, Math.min(dur - 0.05, loopStartSec!)) : 0;
+    const effLoopEnd = hasCustomLoop ? Math.max(effLoopStart + 0.05, Math.min(dur, loopEndSec!)) : dur;
+    const effSpan = Math.max(0.05, effLoopEnd - effLoopStart);
+
+    const desiredOffset = loop
+      ? effLoopStart + ((((offsetSec - effLoopStart) % effSpan) + effSpan) % effSpan)
+      : Math.max(0, offsetSec);
     if (!loop && desiredOffset >= dur - 0.02) {
       this.stopWebAudioAux(slot);
       return true;
@@ -996,10 +1011,10 @@ class AudioPreviewEngine {
     if (existing && existing.url === resolvedUrl && !forceRestart) {
       const elapsed = Math.max(0, now - existing.startedCtxTime) * existing.playbackRate;
       const curPos = loop
-        ? (existing.startOffsetSec + elapsed) % dur
+        ? effLoopStart + (((existing.startOffsetSec - effLoopStart + elapsed) % effSpan + effSpan) % effSpan)
         : existing.startOffsetSec + elapsed;
       const drift = Math.abs(curPos - desiredOffset);
-      const wrapDrift = loop ? Math.min(drift, dur - drift) : drift;
+      const wrapDrift = loop ? Math.min(drift, effSpan - drift) : drift;
       if (wrapDrift <= 1.2) {
         if (Math.abs(existing.playbackRate - playbackRate) > 0.005) {
           existing.startOffsetSec = curPos;
@@ -1016,6 +1031,10 @@ class AudioPreviewEngine {
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.loop = loop;
+    if (hasCustomLoop) {
+      source.loopStart = effLoopStart;
+      source.loopEnd = effLoopEnd;
+    }
     source.playbackRate.value = playbackRate;
     const gainNode = ctx.createGain();
     gainNode.gain.setValueAtTime(Math.max(0, Math.min(1, targetGain)), now);
@@ -1516,14 +1535,25 @@ class AudioPreviewEngine {
         ? Math.min(rawIntroBgmSec, voiceEndForBgm)
         : rawIntroBgmSec;
     const customOutroSec = state.outroBgm?.customDurationSec;
+    const outroSliceDur =
+      state.outroBgm?.enabled && (state.outroBgm?.durationSec || state.outroBgm?.sourceEndSec)
+        ? Math.max(
+            0.5,
+            (state.outroBgm.sourceEndSec ?? state.outroBgm.durationSec ?? 15) -
+              (state.outroBgm.sourceStartSec ?? 0)
+          ) * 1.2
+        : 0;
     const outroWindowSec =
       typeof customOutroSec === 'number' && customOutroSec > 0
         ? customOutroSec
+        : outroSliceDur > 0
+        ? Number(outroSliceDur.toFixed(1))
         : Math.min(20, Math.max(6, timeline.totalEditedDurationSec * 0.18));
-    const outroStartSec = Math.max(
-      introEndSec + 0.5,
-      timeline.totalEditedDurationSec - outroWindowSec
-    );
+    const outroStartSec =
+      typeof state.outroBgm?.startOffsetSec === 'number' && state.outroBgm.startOffsetSec >= 0
+        ? Math.min(timeline.totalEditedDurationSec, state.outroBgm.startOffsetSec)
+        : Math.max(introEndSec + 0.5, timeline.totalEditedDurationSec - outroWindowSec);
+    const outroEndSec = Math.min(timeline.totalEditedDurationSec, outroStartSec + outroWindowSec);
 
     for (const slot of ['intro', 'outro'] as const) {
       const asset = slot === 'intro' ? state.introBgm : state.outroBgm;
@@ -1539,7 +1569,8 @@ class AudioPreviewEngine {
             ? Boolean(state.introBgm?.enabled) && playheadSec <= introEndSec
             : Boolean(state.outroBgm?.enabled) &&
               timeline.totalEditedDurationSec > 3 &&
-              playheadSec >= outroStartSec;
+              playheadSec >= outroStartSec &&
+              playheadSec <= outroEndSec;
         const rawOffsetSec =
           slot === 'intro'
             ? Math.max(0, playheadSec)
@@ -2043,10 +2074,25 @@ class AudioPreviewEngine {
         } else {
           clipGain *= 0.92;
         }
-        if (
+
+        // 与音轨模式保持一致的避让策略：减轻非发言时段音量，但保留他人对话音量
+        const dominantColdSpeakerId = mapped.activeSpeakerId ?? activeColdHighlight.speakerId;
+        const trackRecentlyOrSoonSpeaking =
+          (this.speakerHoldUntilPerfMs.get(trackId) ?? 0) > nowPerf;
+        const activeOvForTrack = timeline.overlapRegions.find(
+          (ov) =>
+            ov.secondarySpeakerId === trackId &&
+            playheadSec >= ov.editedStartSec - 0.04 &&
+            playheadSec <= ov.editedEndSec + 0.08
+        );
+        if (activeOvForTrack?.muted) {
+          clipGain = 0.0;
+        } else if (
           playableTracks.length > 1 &&
           state.autoSoloMode !== 'off' &&
-          trackId !== activeColdHighlight.speakerId
+          trackId !== dominantColdSpeakerId &&
+          !trackRecentlyOrSoonSpeaking &&
+          !activeOvForTrack
         ) {
           if (state.autoSoloMode === 'hard_mute') {
             clipGain *= 0.06;
@@ -2243,7 +2289,7 @@ class AudioPreviewEngine {
         true,
         offsetInVo,
         playbackRate,
-        0.94,
+        0.90,
         false,
         this.forceSeekPending || !this.wasPlaying
       );
@@ -2298,7 +2344,9 @@ class AudioPreviewEngine {
       enabled: boolean,
       activeWindow: boolean,
       offsetSecInBgm: number,
-      fadeFactor: number
+      fadeFactor: number,
+      customDuckMultiplier?: number,
+      sourceSlice?: { startSec?: number; endSec?: number }
     ) => {
       const webAudioSlot = slot === 'intro' ? 'intro_bgm' : 'outro_bgm';
       let holder = this.bgmTimelineElements[slot];
@@ -2310,24 +2358,35 @@ class AudioPreviewEngine {
         return;
       }
 
-      // 片头金句整段闪避（不考虑段内的音量连续）：
-      // 在片头金句发声段（从 2.0s 前奏垫音结束，直到金句全部播放完成），全程持续闪避，不因句内停顿或句间 gap 回弹！
-      const coldQuotesEndSec = Math.max(2.0, timeline.coldOpenDurationSec - 2.0);
-      const inColdOpenQuotesSection =
-        Boolean(mapped.inColdOpen) &&
-        playheadSec >= 2.0 &&
-        playheadSec <= coldQuotesEndSec;
+      const baseBedVol = 0.50; // -6.0 dB 广播垫乐基准，与导出 normalGainDb=-6.0 一致
+      let targetVol: number;
+      if (typeof customDuckMultiplier === 'number') {
+        targetVol = Math.max(0, Math.min(1, baseBedVol * customDuckMultiplier * fadeFactor));
+      } else {
+        const voiceSpeaking =
+          (Boolean(dominantSpeakerId) && !mapped.inIntroOrGapSilence) ||
+          inFixedIntroVo;
+        const duckedBedVol = baseBedVol * Math.pow(10, (state.bgmDuckDb || -18) / 20);
+        targetVol = Math.max(
+          0,
+          Math.min(1, (voiceSpeaking ? duckedBedVol : baseBedVol) * fadeFactor)
+        );
+      }
 
-      const voiceSpeaking =
-        inColdOpenQuotesSection ||
-        (Boolean(dominantSpeakerId) && !mapped.inIntroOrGapSilence) ||
-        inFixedIntroVo;
-      const baseBedVol = 0.55;
-      const duckedBedVol = baseBedVol * Math.pow(10, (state.bgmDuckDb || -18) / 20);
-      const targetVol = Math.max(
-        0,
-        Math.min(1, (voiceSpeaking ? duckedBedVol : baseBedVol) * fadeFactor)
-      );
+      const sliceStart = Math.max(0, sourceSlice?.startSec ?? 0);
+      const sliceEnd =
+        typeof sourceSlice?.endSec === 'number' && sourceSlice.endSec > sliceStart + 0.05
+          ? sourceSlice.endSec
+          : undefined;
+      const shouldLoop = slot === 'intro';
+      const effectiveOffsetInBgm = sliceStart + offsetSecInBgm;
+      if (!shouldLoop && sliceEnd !== undefined && effectiveOffsetInBgm >= sliceEnd - 0.02) {
+        this.stopWebAudioAux(webAudioSlot);
+        if (holder && !holder.audio.paused) {
+          holder.audio.pause();
+        }
+        return;
+      }
 
       // Primary: glitch-free Web Audio AudioBufferSourceNode + GainNode
       const handledByWebAudio = this.syncWebAudioAux(
@@ -2335,11 +2394,13 @@ class AudioPreviewEngine {
         bgmUrl,
         bgmPath,
         true,
-        offsetSecInBgm,
+        effectiveOffsetInBgm,
         playbackRate,
         targetVol,
-        true,
-        this.forceSeekPending || !this.wasPlaying
+        shouldLoop,
+        this.forceSeekPending || !this.wasPlaying,
+        sliceStart,
+        sliceEnd
       );
       if (handledByWebAudio) {
         if (holder && !holder.audio.paused) {
@@ -2393,21 +2454,24 @@ class AudioPreviewEngine {
         : voiceEndForBgm > 0
         ? voiceEndForBgm
         : Math.min(10, timeline.totalEditedDurationSec * 0.35);
-    const introEndSec =
+    const introBgmStartSec = Math.max(0, state.introBgm?.startOffsetSec ?? 0);
+    const introBgmDurSec =
       customIntroBgmSec && customIntroBgmSec > 0
         ? customIntroBgmSec
         : voiceEndForBgm > 0
         ? Math.min(rawIntroBgmSec, voiceEndForBgm)
         : rawIntroBgmSec;
-    const inIntroBed = playheadSec <= introEndSec;
+    const introEndSec = introBgmStartSec + introBgmDurSec;
+    const inIntroBed = playheadSec >= introBgmStartSec && playheadSec <= introEndSec;
 
     // 默认淡入淡出时间 800ms (0.8s)
     const introFadeInSec = (state.introBgm?.fadeInMs ?? 800) / 1000;
     const introFadeOutSec = (state.introBgm?.fadeOutMs ?? 800) / 1000;
     let introFade = 1.0;
-    if (playheadSec < introFadeInSec) {
-      introFade = Math.min(1.0, Math.max(0, playheadSec / Math.max(0.05, introFadeInSec)));
-    } else if (introEndSec > introFadeOutSec && playheadSec > introEndSec - introFadeOutSec) {
+    const introElapsed = playheadSec - introBgmStartSec;
+    if (introElapsed < introFadeInSec) {
+      introFade = Math.min(1.0, Math.max(0, introElapsed / Math.max(0.05, introFadeInSec)));
+    } else if (introEndSec - introBgmStartSec > introFadeOutSec && playheadSec > introEndSec - introFadeOutSec) {
       introFade = Math.max(0, (introEndSec - playheadSec) / Math.max(0.05, introFadeOutSec));
     }
 
@@ -2415,14 +2479,55 @@ class AudioPreviewEngine {
     const isIntroBgmSolo = Boolean(state.introBgm?.solo);
     const introBgmActive = Boolean(state.introBgm?.enabled) && !isIntroBgmMuted && (!anySolo || isIntroBgmSolo);
 
+    // 金句之间恢复 ducking 音量，金句与固定口播之前均按设置的淡入淡出值进行 ducking
+    const introVoiceWindows: IntroBgmVoiceWindow[] = [];
+    if (state.coldOpenEnabled && coldClipWindows.length > 0) {
+      for (const w of coldClipWindows) {
+        introVoiceWindows.push({ startSec: w.startSec, endSec: w.endSec });
+      }
+    }
+    if (
+      Boolean(state.introVoiceover?.enabled) &&
+      Boolean(state.introVoiceover?.audioUrl || state.introVoiceover?.filePath) &&
+      timeline.introVoiceoverDurationSec > 0
+    ) {
+      introVoiceWindows.push({
+        startSec: voStartSec,
+        endSec: voEndSec,
+      });
+    }
+    if (
+      playheadSec >= timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec &&
+      Boolean(dominantSpeakerId) &&
+      !mapped.inIntroOrGapSilence
+    ) {
+      introVoiceWindows.push({
+        startSec: playheadSec,
+        endSec: playheadSec + 0.1,
+      });
+    }
+    const introDuckRatio = Math.pow(10, (state.bgmDuckDb || -18) / 20);
+    const introDuckMultiplier = computeIntroBgmDuckMultiplier(
+      playheadSec,
+      introVoiceWindows,
+      introFadeInSec,
+      introFadeOutSec,
+      introDuckRatio
+    );
+
     syncBgmBed(
       'intro',
       state.introBgm?.audioUrl,
       state.introBgm?.filePath || state.bgmWavPath,
       introBgmActive,
       inIntroBed,
-      playheadSec,
-      introFade
+      Math.max(0, playheadSec - introBgmStartSec),
+      introFade,
+      introDuckMultiplier,
+      {
+        startSec: state.introBgm?.sourceStartSec,
+        endSec: state.introBgm?.sourceEndSec,
+      }
     );
 
     const isOutroBgmMuted = Boolean(state.outroBgm?.muted);
@@ -2431,15 +2536,29 @@ class AudioPreviewEngine {
       Boolean(state.outroBgm?.enabled) && !isOutroBgmMuted && (!anySolo || isOutroBgmSolo);
 
     const customOutroSec = state.outroBgm?.customDurationSec;
+    const outroSliceDur =
+      state.outroBgm?.enabled && (state.outroBgm?.durationSec || state.outroBgm?.sourceEndSec)
+        ? Math.max(
+            0.5,
+            (state.outroBgm.sourceEndSec ?? state.outroBgm.durationSec ?? 15) -
+              (state.outroBgm.sourceStartSec ?? 0)
+          ) * 1.2
+        : 0;
     const outroWindowSec =
       typeof customOutroSec === 'number' && customOutroSec > 0
         ? customOutroSec
+        : outroSliceDur > 0
+        ? Number(outroSliceDur.toFixed(1))
         : Math.min(20, Math.max(6, timeline.totalEditedDurationSec * 0.18));
-    const outroStartSec = Math.max(
-      introEndSec + 0.5,
-      timeline.totalEditedDurationSec - outroWindowSec
-    );
-    const inOutroBed = timeline.totalEditedDurationSec > 3 && playheadSec >= outroStartSec;
+    const outroStartSec =
+      typeof state.outroBgm?.startOffsetSec === 'number' && state.outroBgm.startOffsetSec >= 0
+        ? Math.min(timeline.totalEditedDurationSec, state.outroBgm.startOffsetSec)
+        : Math.max(introEndSec + 0.5, timeline.totalEditedDurationSec - outroWindowSec);
+    const outroEndSec = Math.min(timeline.totalEditedDurationSec, outroStartSec + outroWindowSec);
+    const inOutroBed =
+      timeline.totalEditedDurationSec > 3 &&
+      playheadSec >= outroStartSec &&
+      playheadSec <= outroEndSec;
 
     // 片尾 BGM 淡入与淡出平滑包络（自动适应音量）
     const outroFadeInSec = (state.outroBgm?.fadeInMs ?? 1000) / 1000;
@@ -2447,8 +2566,8 @@ class AudioPreviewEngine {
     let outroFade = 1.0;
     if (playheadSec - outroStartSec < outroFadeInSec) {
       outroFade = Math.min(1.0, Math.max(0, (playheadSec - outroStartSec) / Math.max(0.05, outroFadeInSec)));
-    } else if (playheadSec > timeline.totalEditedDurationSec - outroFadeOutSec) {
-      outroFade = Math.max(0, (timeline.totalEditedDurationSec - playheadSec) / Math.max(0.05, outroFadeOutSec));
+    } else if (outroEndSec - outroStartSec > outroFadeOutSec && playheadSec > outroEndSec - outroFadeOutSec) {
+      outroFade = Math.max(0, (outroEndSec - playheadSec) / Math.max(0.05, outroFadeOutSec));
     }
 
     syncBgmBed(
@@ -2458,7 +2577,12 @@ class AudioPreviewEngine {
       outroBgmActive,
       inOutroBed,
       Math.max(0, playheadSec - outroStartSec),
-      outroFade
+      outroFade,
+      undefined,
+      {
+        startSec: state.outroBgm?.sourceStartSec,
+        endSec: state.outroBgm?.sourceEndSec,
+      }
     );
 
     this.wasPlaying = true;
