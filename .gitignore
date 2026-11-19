@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist_dmg_staging/
+application/
+.venv/
+models/
+src-tauri/target/
+**/__pycache__/
+*.pyc
+.DS_Store
+*.log
+*.dmg
+*.zip
+*.exe
+.env
+.env.local

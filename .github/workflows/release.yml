@@ -1,0 +1,192 @@
+name: Build & Release (macOS Intel, macOS Apple Silicon, Windows)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '是否同时发布到 GitHub Release（基于 package.json 版本号）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon (aarch64)
+            platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: tapwave-macos-aarch64
+            arch_suffix: aarch64
+          - name: macOS Intel (x86_64)
+            platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: tapwave-macos-intel-x64
+            arch_suffix: x64_intel
+          - name: Windows (x64 exe)
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: tapwave-windows-x64-exe
+            arch_suffix: x64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          APP_VERSION=$(node -p "require('./package.json').version")
+          echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS app & package DMG (${{ matrix.target }})
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tauri build --target ${{ matrix.target }} --bundles app
+
+          APP_VERSION="${{ steps.version.outputs.version }}"
+          APP_BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle/macos/点波 TapWave.app"
+
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "App bundle not found: $APP_BUNDLE"
+            ls -la "src-tauri/target/${{ matrix.target }}/release/bundle/macos" || true
+            exit 1
+          fi
+
+          # 确保 sidecar 资源位于 Contents/Resources/sidecar
+          mkdir -p "$APP_BUNDLE/Contents/Resources/sidecar"
+          cp -R sidecar/. "$APP_BUNDLE/Contents/Resources/sidecar/"
+
+          # Ad-hoc 签名并清除隔离标志
+          codesign --force --deep --sign - "$APP_BUNDLE"
+          xattr -cr "$APP_BUNDLE" || true
+
+          # 准备 DMG 内容目录
+          STAGING="dist_dmg_staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "$APP_BUNDLE" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          cat > "$STAGING/首次打开提示已损坏-点我一键修复.command" <<'EOF'
+          #!/bin/bash
+          clear
+          echo "=========================================================="
+          echo "  点波 TapWave — macOS 首次打开安全授权修复脚本"
+          echo "=========================================================="
+          echo ""
+          echo "正在自动清除隔离拦截标志并配置授权..."
+          xattr -cr "/Applications/点波 TapWave.app" 2>/dev/null || true
+          xattr -rd com.apple.quarantine "/Applications/点波 TapWave.app" 2>/dev/null || true
+          codesign --force --deep --sign - "/Applications/点波 TapWave.app" 2>/dev/null || true
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted "/Applications/点波 TapWave.app" 2>/dev/null || true
+          echo ""
+          echo "✅ 修复完成！现在可以从【应用程序】中打开「点波 TapWave」了。"
+          read -p "按回车键退出..."
+          EOF
+          chmod +x "$STAGING/首次打开提示已损坏-点我一键修复.command"
+
+          mkdir -p release-artifacts
+          DMG_PATH="release-artifacts/TapWave_${APP_VERSION}_macOS_${{ matrix.arch_suffix }}.dmg"
+          hdiutil create -volname "点波 TapWave" -srcfolder "$STAGING" -ov -format UDZO "$DMG_PATH"
+          codesign --force --sign - "$DMG_PATH" || true
+          ls -lh release-artifacts/
+
+      - name: Build Windows NSIS installer (.exe)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npx tauri build --target ${{ matrix.target }} --bundles nsis
+
+          $appVersion = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path "release-artifacts" | Out-Null
+
+          $nsisDir = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+          $exeFile = Get-ChildItem -Path $nsisDir -Filter "*.exe" | Select-Object -First 1
+          if (-not $exeFile) {
+            Write-Error "NSIS .exe installer not found in $nsisDir"
+            exit 1
+          }
+
+          $destPath = "release-artifacts/TapWave_${appVersion}_Windows_x64_setup.exe"
+          Copy-Item -Path $exeFile.FullName -Destination $destPath -Force
+          Get-ChildItem -Path "release-artifacts"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            APP_VERSION=$(node -p "require('./package.json').version")
+            echo "tag=v${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -lh all-artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: 点波 TapWave ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: all-artifacts/*

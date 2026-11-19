@@ -1,0 +1,38 @@
+{
+  "name": "tapwave",
+  "private": true,
+  "version": "2.1.16",
+  "description": "点波 TapWave",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 1420 --strictPort",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 1420",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "package": "node scripts/package.mjs",
+    "package:minor": "node scripts/package.mjs --type minor",
+    "package:major": "node scripts/package.mjs --type major",
+    "package:no-bump": "node scripts/package.mjs --no-bump"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-fs": "^2.2.0",
+    "lucide-react": "^0.469.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.6",
+    "@tauri-apps/cli": "^2.2.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.6",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

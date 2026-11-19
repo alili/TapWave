@@ -1,0 +1,58 @@
+{
+  "profileName": "自然对谈微创精剪策略 (Natural Micro-Surgical Profile)",
+  "version": "1.0",
+  "derivedFrom": "EP121 坚叔 (4轨同场访谈实操)",
+  "workspacePreferences": {
+    "recordingMode": "same_room_sync",
+    "autoSoloMode": "natural_ducking",
+    "duckAttenuationDb": -16,
+    "loudnessAligned": true,
+    "deClickEnabled": true,
+    "deClickStrength": "medium",
+    "stripSilenceEnabled": false,
+    "waveformSelectionMode": "free",
+    "cutPrerollEnabled": true,
+    "cutPrerollSec": 1.0,
+    "pauseCutJumpEnabled": true,
+    "coldOpenEnabled": true,
+    "targetTotalHighlightSec": 90,
+    "highlightGapSec": 0.8,
+    "autoHighlightGap": true,
+    "bgmDuckDb": -21
+  },
+  "fillerPolicy": {
+    "highPriorityCutList": ["呃", "呃，", "呃。", "呃……"],
+    "isolatedContextCutList": ["这个", "那个", "就是说", "怎么说呢"],
+    "protectedBackchannels": ["嗯", "嗯。", "嗯，", "对", "对，", "对对", "啊", "啊。", "啊，", "哈", "好的"],
+    "protectStandaloneShortBlocks": true,
+    "maxWordsForStandaloneBlock": 3,
+    "protectMidFluentThresholdSec": 0.15
+  },
+  "stutterAndRepeatPolicy": {
+    "maxRepeatWordCount": 4,
+    "buttCutGapSec": 0.02,
+    "repairedWordGapSec": 0.06
+  },
+  "pacingPolicy": {
+    "intraClausePauseThresholdSec": 0.75,
+    "intraClauseTargetPauseSec": 0.18,
+    "interTurnPauseThresholdSec": 1.35,
+    "interTurnTargetPauseSec": 0.55,
+    "maxSafeContentCutSec": 5.5
+  },
+  "multitrackMutePolicy": {
+    "enabled": true,
+    "snrLiftDbThreshold": 8.0,
+    "peakDbfsThreshold": -32.0,
+    "minMuteDurationSec": 0.15,
+    "maxMuteDurationSec": 3.5,
+    "padMuteStartMs": 30,
+    "padMuteEndMs": 50
+  },
+  "offAirPolicy": {
+    "autoDetectHeadOffAir": true,
+    "headMaxCheckSec": 20.0,
+    "autoDetectTailOffAir": true,
+    "tailMinSilenceSec": 2.0
+  }
+}

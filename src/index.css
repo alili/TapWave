@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(113, 113, 122, 0.35);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(113, 113, 122, 0.55);
+  }
+}
+
+.token-filler-wavy {
+  text-decoration: underline wavy rgba(245, 158, 11, 0.9);
+  text-underline-offset: 4px;
+}
+
+.token-typo-dotted {
+  background-color: rgba(239, 68, 68, 0.14);
+  border-bottom: 2px dotted #ef4444;
+}
+
+.token-corrected-solid {
+  border-bottom: 2px solid rgba(16, 185, 129, 0.7);
+}

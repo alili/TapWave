@@ -1,0 +1,4 @@
+# Apple Silicon Local ASR & Alignment Dependencies (Optional on-demand install via uv)
+funasr>=1.1.12
+modelscope>=1.18.0
+mlx-whisper>=0.4.1

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "点波 TapWave",
+  "version": "2.1.16",
+  "identifier": "com.tapwave.studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "点波 TapWave",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1180,
+        "minHeight": 760
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "../sidecar/*"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "podcraft"
+        ],
+        "name": "PodCraft 播客工程文件",
+        "description": "PodCraft Studio 播客精剪工程文件",
+        "role": "Editor",
+        "mimeType": "application/x-podcraft",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "com.tapwave.podcraft",
+          "conformsTo": [
+            "public.data",
+            "public.content",
+            "public.json"
+          ]
+        }
+      }
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
