@@ -32,7 +32,7 @@ import {
   Sparkles,
   Volume2,
 } from 'lucide-react';
-import { AuxAudioSlot, PodcastProjectState } from '../types/podcast';
+import { AuxAudioSlot, PodcastProjectState, WorkspaceLayoutMode } from '../types/podcast';
 import { AuxBgmConfigMenu } from './AuxBgmConfigMenu';
 import { RecentProjectItem, formatRecentTime } from '../engine/recentProjects';
 
@@ -62,7 +62,7 @@ interface TopStudioBarProps {
   onClearRecentProjects?: () => void;
   onSaveProjectFile: (saveAs?: boolean) => void;
   onRegisterFileAssociation?: () => void;
-  onSetWorkspaceLayout: (mode: 'multitrack' | 'transcript') => void;
+  onSetWorkspaceLayout: (mode: WorkspaceLayoutMode) => void;
   onToggleRecordingMode: () => void;
   onCycleAutoSolo: () => void;
   onToggleLoudness: () => void;
@@ -1021,6 +1021,22 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
             >
               <span>📝</span>
               <span>文稿视图</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSetWorkspaceLayout('intro')}
+              className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                layoutMode === 'intro'
+                  ? 'bg-purple-600 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+              }`}
+              title="片头视图：独立多轨编辑金句高光、固定口播与片头BGM (快捷键: ⌥3)"
+            >
+              <span>🎬</span>
+              <span>片头视图</span>
+              {(state.coldOpenEnabled || state.introVoiceover?.enabled || state.introBgm?.enabled) && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 inline-block" />
+              )}
             </button>
           </div>
 

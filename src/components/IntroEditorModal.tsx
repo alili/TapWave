@@ -28,6 +28,7 @@ import { audioPreview } from '../engine/audioPreviewEngine';
 
 interface IntroEditorModalProps {
   open: boolean;
+  embedded?: boolean;
   state: PodcastProjectState;
   timeline: TimelineComputation;
   onClose: () => void;
@@ -111,6 +112,7 @@ function samplePeaksForSlice(
 
 export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   open,
+  embedded = false,
   state,
   timeline,
   onClose,
@@ -490,9 +492,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const playheadPct = Math.max(0, Math.min(100, (playheadSec / timelineSpanSec) * 100));
 
+  const wrapperClass = embedded
+    ? 'flex-1 min-w-0 h-full flex flex-col bg-zinc-950 overflow-hidden'
+    : 'fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4';
+  const cardClass = embedded
+    ? 'w-full h-full bg-zinc-900/95 flex flex-col overflow-hidden'
+    : 'w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]';
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
+    <div className={wrapperClass}>
+      <div className={cardClass}>
         {/* Header */}
         <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/75">
           <div className="flex items-center gap-3">
@@ -1110,7 +1119,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
             }}
             className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold cursor-pointer"
           >
-            完成编排
+            {embedded ? '返回音轨视图' : '完成编排'}
           </button>
         </div>
       </div>

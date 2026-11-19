@@ -1000,7 +1000,7 @@ export const App: React.FC = () => {
 
     if (shortcutsModalOpen) return;
 
-    // 切换视图快捷键: ⌥ 1 (音轨视图) / ⌥ 2 (文稿视图)
+    // 切换视图快捷键: ⌥ 1 (音轨视图) / ⌥ 2 (文稿视图) / ⌥ 3 (片头视图)
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
       if (e.key === '1') {
         e.preventDefault();
@@ -1010,6 +1010,11 @@ export const App: React.FC = () => {
       if (e.key === '2') {
         e.preventDefault();
         mutateProject((p) => ({ ...p, workspaceLayout: 'transcript' }));
+        return;
+      }
+      if (e.key === '3') {
+        e.preventDefault();
+        mutateProject((p) => ({ ...p, workspaceLayout: 'intro' }));
         return;
       }
     }
@@ -3659,8 +3664,11 @@ export const App: React.FC = () => {
   );
   const stableStepPlayhead = useLatestCallback(stepPlayhead);
   const stableWaveformCutAction = useLatestCallback(handleWaveformCutAction);
-  const stableSetWorkspaceLayout = useLatestCallback((mode: 'multitrack' | 'transcript') =>
+  const stableSetWorkspaceLayout = useLatestCallback((mode: 'multitrack' | 'transcript' | 'intro') =>
     mutateProject((p) => ({ ...p, workspaceLayout: mode }))
+  );
+  const stableSwitchToIntroView = useLatestCallback(() =>
+    mutateProject((p) => ({ ...p, workspaceLayout: 'intro' }))
   );
   const stableSetWaveformSelectionMode = useLatestCallback((mode: WaveformSelectionMode) => {
     mutateProject((p) => ({ ...p, waveformSelectionMode: mode }));
@@ -3914,7 +3922,7 @@ export const App: React.FC = () => {
                   onNotify={notify}
                   onCollapsePane={stableToggleLeftPane}
                   onOpenHighlightEditModal={setGlobalEditingHighlight}
-                  onOpenIntroEditor={() => setIntroEditorOpen(true)}
+                  onOpenIntroEditor={stableSwitchToIntroView}
                 />
               </div>
               <div
@@ -4147,6 +4155,20 @@ export const App: React.FC = () => {
             onTogglePlay={stableTogglePlay}
             onSeekAndPlay={stableSeekAndPlay}
           />
+        ) : (state.workspaceLayout ?? 'multitrack') === 'intro' ? (
+          <Suspense fallback={null}>
+            <LazyIntroEditorModal
+              open
+              embedded
+              state={state}
+              timeline={timeline}
+              onClose={() => stableSetWorkspaceLayout('multitrack')}
+              onUpdateState={mutateProject}
+              onImportBgm={(slot) => void handleImportBgm(slot)}
+              onSeekMainPlayhead={stableSeekToSec}
+              onNotify={notify}
+            />
+          </Suspense>
         ) : (
           <WaveformEditorBar
             isMainStage
@@ -4195,7 +4217,7 @@ export const App: React.FC = () => {
             onCancelDuckingSelected={stableCancelDuckingSelected}
             onSetWaveformSelectionMode={stableSetWaveformSelectionMode}
             onUpdateBgmAsset={handleUpdateBgmAsset}
-            onOpenIntroEditor={() => setIntroEditorOpen(true)}
+            onOpenIntroEditor={stableSwitchToIntroView}
             onNotify={notify}
           />
         )}

@@ -3,7 +3,7 @@ export type AutoSoloMode = 'natural_ducking' | 'hard_mute' | 'off';
 export type DeClickStrength = 'medium' | 'strong';
 export type TranscriptGroupingMode = 'text_editor' | 'chronological' | 'by_speaker' | 'outline';
 export type EditInteractionMode = 'audio_cut' | 'text_proofread';
-export type WorkspaceLayoutMode = 'multitrack' | 'transcript';
+export type WorkspaceLayoutMode = 'multitrack' | 'transcript' | 'intro';
 export type WaveformSelectionMode = 'snap' | 'free';
 export type SpeakerRole = 'host' | 'co_host' | 'guest' | 'ref' | 'bgm';
 

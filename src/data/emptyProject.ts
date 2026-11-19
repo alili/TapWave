@@ -451,7 +451,11 @@ export function parsePodcraftProjectJson(
         ? Number(rawProject.savedPlayheadSec.toFixed(3))
         : 0,
     workspaceLayout:
-      rawProject.workspaceLayout === 'transcript' ? 'transcript' : 'multitrack',
+      rawProject.workspaceLayout === 'transcript'
+        ? 'transcript'
+        : rawProject.workspaceLayout === 'intro'
+        ? 'intro'
+        : 'multitrack',
     waveformSelectionMode:
       rawProject.waveformSelectionMode === 'free' ? 'free' : 'snap',
     cutPrerollEnabled:
