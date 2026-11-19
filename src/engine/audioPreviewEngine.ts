@@ -1234,6 +1234,7 @@ class AudioPreviewEngine {
     }
 
     // Pre-warm Intro & Outro BGM elements so entering BGM beds starts immediately
+    const playbackRate = Math.max(0.5, Math.min(3.5, state.playbackRate || 1.0));
     for (const [slot, asset, label] of [
       ['intro', state.introBgm, '片头 BGM'],
       ['outro', state.outroBgm, '片尾 BGM'],
@@ -1248,7 +1249,7 @@ class AudioPreviewEngine {
             asset.audioUrl,
             effectivePath,
             label,
-            1.0,
+            playbackRate,
             true
           );
         }
@@ -1336,22 +1337,65 @@ class AudioPreviewEngine {
       this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, voTarget, true);
       if (voEl.paused || voEl.ended) {
         voEl.volume = 0;
+        this.introVoiceoverTimelineEl.lastPlayRetryPerfMs = this.playStartPerfMs;
         void voEl.play().then(() => {
-          if (!this.wasPlaying || playheadSec >= voEnd) {
+          if (!this.wasPlaying || !inVoNow) {
             voEl.pause();
           }
         }).catch(() => {});
       }
     }
 
+    const playbackRate = Math.max(0.5, Math.min(3.5, state.playbackRate || 1.0));
+    const prefixTotalSec =
+      timeline.prefixDurationSec ??
+      timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec;
+    const customIntroBgmSec = state.introBgm?.customDurationSec;
+    const introEndSec =
+      customIntroBgmSec && customIntroBgmSec > 0
+        ? customIntroBgmSec
+        : timeline.introBgmDurationSec && timeline.introBgmDurationSec > 0
+        ? timeline.introBgmDurationSec
+        : prefixTotalSec > 0
+        ? prefixTotalSec
+        : Math.min(10, timeline.totalEditedDurationSec * 0.35);
+    const customOutroSec = state.outroBgm?.customDurationSec;
+    const outroWindowSec =
+      typeof customOutroSec === 'number' && customOutroSec > 0
+        ? customOutroSec
+        : Math.min(20, Math.max(6, timeline.totalEditedDurationSec * 0.18));
+    const outroStartSec = Math.max(
+      introEndSec + 0.5,
+      timeline.totalEditedDurationSec - outroWindowSec
+    );
+
     for (const slot of ['intro', 'outro'] as const) {
       const bgmHolder = this.bgmTimelineElements[slot];
       if (bgmHolder && !bgmHolder.failedFatal) {
         const bgmEl = bgmHolder.audio;
+        applyPitchPreservingPlaybackRate(bgmEl, playbackRate);
+        const inWindowNow =
+          slot === 'intro'
+            ? Boolean(state.introBgm?.enabled) && playheadSec <= introEndSec
+            : Boolean(state.outroBgm?.enabled) &&
+              timeline.totalEditedDurationSec > 3 &&
+              playheadSec >= outroStartSec;
+        const rawOffsetSec =
+          slot === 'intro'
+            ? Math.max(0, playheadSec)
+            : Math.max(0, playheadSec - outroStartSec);
+        const bgmTarget =
+          inWindowNow && bgmEl.duration && Number.isFinite(bgmEl.duration)
+            ? rawOffsetSec % Math.max(1, bgmEl.duration)
+            : inWindowNow
+            ? rawOffsetSec
+            : 0;
+        this.seekHolderOnSpliceOnly(bgmHolder, bgmTarget, true);
         if (bgmEl.paused || bgmEl.ended) {
           bgmEl.volume = 0;
+          bgmHolder.lastPlayRetryPerfMs = this.playStartPerfMs;
           void bgmEl.play().then(() => {
-            if (!this.wasPlaying) {
+            if (!this.wasPlaying || !inWindowNow) {
               bgmEl.pause();
             }
           }).catch(() => {});
@@ -1572,6 +1616,38 @@ class AudioPreviewEngine {
                       ? Math.min(timeline.coldOpenDurationSec, nextPlayheadSec + drift * 0.45)
                       : currentPlayheadSec + stepSec * 0.25;
                 }
+              }
+            }
+          }
+        } else if (state.introBgm?.enabled) {
+          const bgmHolder = this.bgmTimelineElements.intro;
+          if (bgmHolder && !bgmHolder.failedFatal) {
+            const bgmEl = bgmHolder.audio;
+            if (
+              nowPerf - Math.max(this.playStartPerfMs, bgmHolder.lastSeekPerfMs) < 450 &&
+              (bgmEl.seeking || bgmEl.readyState < 2)
+            ) {
+              nextPlayheadSec = currentPlayheadSec;
+            } else if (
+              !bgmEl.paused &&
+              !bgmEl.ended &&
+              !bgmEl.seeking &&
+              bgmEl.readyState >= 2 &&
+              bgmEl.duration &&
+              Number.isFinite(bgmEl.duration) &&
+              currentPlayheadSec < bgmEl.duration - 0.1
+            ) {
+              const drift = bgmEl.currentTime - nextPlayheadSec;
+              if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.45) {
+                nextPlayheadSec = Math.max(
+                  currentPlayheadSec + stepSec * 0.5,
+                  nextPlayheadSec + drift * 0.25
+                );
+              } else if (Math.abs(drift) >= 0.45 && Math.abs(drift) < 2.0) {
+                nextPlayheadSec =
+                  drift > 0
+                    ? Math.min(prefixSec, nextPlayheadSec + drift * 0.45)
+                    : currentPlayheadSec + stepSec * 0.25;
               }
             }
           }
@@ -2026,16 +2102,18 @@ class AudioPreviewEngine {
         const voNeedInitialSeek =
           this.forceSeekPending || !this.wasPlaying || Math.abs(voEl.currentTime - offsetInVo) > 0.15;
         this.seekHolderOnSpliceOnly(voHolder, offsetInVo, voNeedInitialSeek && crossedCutOrScrub, 0.9, 1200);
-        if (voEl.paused && !voEl.ended) {
+        if (voEl.paused && !voEl.ended && !voEl.seeking && nowPerf - voHolder.lastPlayRetryPerfMs > 300) {
+          voHolder.lastPlayRetryPerfMs = nowPerf;
           void voEl.play().catch(() => {});
         }
       }
     } else if (this.introVoiceoverTimelineEl) {
       this.applySlewedVolume(this.introVoiceoverTimelineEl, 0, true);
+      if (!this.introVoiceoverTimelineEl.audio.paused) {
+        this.introVoiceoverTimelineEl.audio.pause();
+      }
       if (playheadSec < voStartSec) {
         this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, 0, false, 0.25, 450);
-      } else if (!this.introVoiceoverTimelineEl.audio.paused) {
-        this.introVoiceoverTimelineEl.audio.pause();
       }
     }
 
@@ -2063,12 +2141,13 @@ class AudioPreviewEngine {
           bgmUrl,
           bgmPath,
           slot === 'intro' ? '片头 BGM' : '片尾 BGM',
-          1.0,
+          playbackRate,
           true
         );
         this.bgmTimelineElements[slot] = holder;
       }
       if (!holder || holder.failedFatal) return;
+      applyPitchPreservingPlaybackRate(holder.audio, playbackRate);
 
       // 片头金句整段闪避（不考虑段内的音量连续）：
       // 在片头金句发声段（从 2.0s 前奏垫音结束，直到金句全部播放完成），全程持续闪避，不因句内停顿或句间 gap 回弹！
@@ -2092,9 +2171,15 @@ class AudioPreviewEngine {
       if (holder.audio.duration && Number.isFinite(holder.audio.duration)) {
         const modTime = offsetSecInBgm % Math.max(1, holder.audio.duration);
         const manualSeekOrStart = this.forceSeekPending || !this.wasPlaying;
-        this.seekHolderOnSpliceOnly(holder, modTime, manualSeekOrStart, 1.5, 2000);
+        this.seekHolderOnSpliceOnly(holder, modTime, manualSeekOrStart, 2.0, 2500);
       }
-      if (holder.audio.paused) {
+      if (
+        holder.audio.paused &&
+        !holder.audio.ended &&
+        !holder.audio.seeking &&
+        nowPerf - holder.lastPlayRetryPerfMs > 300
+      ) {
+        holder.lastPlayRetryPerfMs = nowPerf;
         void holder.audio.play().catch(() => {});
       }
     };
