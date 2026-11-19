@@ -87,6 +87,28 @@ type DragAction =
       rectWidth: number;
     };
 
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace('#', '');
+  const full = clean.length === 3 ? clean.replace(/(.)/g, '$1$1') : clean;
+  const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return `rgba(168, 85, 247, ${alpha})`;
+  const r = (num >> 16) & 255;
+  const g = (num >> 8) & 255;
+  const b = num & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function lightenHex(hex: string, amount = 42): string {
+  const clean = hex.replace('#', '');
+  const full = clean.length === 3 ? clean.replace(/(.)/g, '$1$1') : clean;
+  const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return `rgb(216, 180, 254)`;
+  const r = Math.min(255, ((num >> 16) & 255) + amount);
+  const g = Math.min(255, ((num >> 8) & 255) + amount);
+  const b = Math.min(255, (num & 255) + amount);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 interface HiResClipWaveformCanvasProps {
   hiRes?: HiResWaveformEnvelope;
   legacyPeaks: number[];
@@ -101,6 +123,24 @@ interface HiResClipWaveformCanvasProps {
 const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.memo(
   ({ hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed = false, gainFn }) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const updateSize = () => {
+        const rect = canvas.getBoundingClientRect();
+        const w = Math.max(1, Math.round(rect.width));
+        const h = Math.max(1, Math.round(rect.height));
+        setBoxSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+      };
+      updateSize();
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(updateSize);
+        ro.observe(canvas);
+        return () => ro.disconnect();
+      }
+    }, []);
 
     useEffect(() => {
       const canvas = canvasRef.current;
@@ -123,15 +163,48 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
       const safeDurMs = Math.max(1, durationMs || hiRes?.durationMs || sliceEndMs || 1000);
       const calibration = hiRes ?? computeLegacyPeaksCalibration(legacyPeaks);
       const sharedRefCeiling = calibration.p992Peak || 0.72;
-      const midY = H / 2;
-      const maxAmp = Math.max(4, H * 0.44);
+      const yMid = H / 2;
+      const maxHalfAmp = Math.max(4, H * 0.43);
       const spanMs = Math.max(1, sliceEndMs - sliceStartMs);
-      const halfWinRatio = Math.max(0.0005, (spanMs / W) * 0.5 / safeDurMs);
+      const stepPx = W <= 160 ? 1.25 : 1.5;
+      const halfWinRatio = Math.max(0.0005, ((spanMs / W) * stepPx * 0.5) / safeDurMs);
 
-      ctx.strokeStyle = dimmed ? 'rgba(113, 113, 122, 0.55)' : color;
-      ctx.lineWidth = 1;
+      // Center 0-crossing axis (matching WaveformEditorBar)
+      ctx.strokeStyle = hexToRgba(color, dimmed ? 0.08 : 0.24);
+      ctx.lineWidth = 0.75;
+      ctx.beginPath();
+      ctx.moveTo(0, Math.round(yMid) + 0.5);
+      ctx.lineTo(W, Math.round(yMid) + 0.5);
+      ctx.stroke();
 
-      for (let x = 0; x < W; x += 1.5) {
+      // Subtle -6dB reference lines
+      if (H >= 34) {
+        const subOffset = maxHalfAmp * 0.5;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+        ctx.lineWidth = 0.5;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(yMid - subOffset) + 0.5);
+        ctx.lineTo(W, Math.round(yMid - subOffset) + 0.5);
+        ctx.moveTo(0, Math.round(yMid + subOffset) + 0.5);
+        ctx.lineTo(W, Math.round(yMid + subOffset) + 0.5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      const samples: Array<{
+        x: number;
+        posAmpPx: number;
+        negAmpPx: number;
+        rmsAmpPx: number;
+        yUpper: number;
+        yLower: number;
+        yRmsUpper: number;
+        yRmsLower: number;
+        isVoiced: boolean;
+      }> = [];
+
+      for (let x = 0; x < W; x += stepPx) {
         const tMs = sliceStartMs + (x / W) * spanMs;
         const ratio = Math.max(0, Math.min(0.999999, tMs / safeDurMs));
         const pt = sampleCalibratedWaveformPoint(
@@ -144,24 +217,131 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
           sharedRefCeiling
         );
         const g = gainFn ? gainFn((tMs - sliceStartMs) / 1000) : 1.0;
-        const posH = Math.max(1, pt.posPeak * maxAmp * g);
-        const negH = Math.max(1, pt.negPeak * maxAmp * g);
+        const posNorm = pt.posPeak * g;
+        const negNorm = pt.negPeak * g;
+        const rmsNorm = pt.rms * g;
+        const posAmpPx = posNorm * maxHalfAmp;
+        const negAmpPx = negNorm * maxHalfAmp;
+        const rmsAmpPx = Math.min(rmsNorm * maxHalfAmp, Math.max(posAmpPx, negAmpPx) * 0.92);
+        const isVoiced = !dimmed && Math.max(posNorm, negNorm) >= 0.018;
 
-        ctx.globalAlpha = dimmed ? 0.45 : 0.78;
-        ctx.beginPath();
-        ctx.moveTo(x + 0.5, midY - posH);
-        ctx.lineTo(x + 0.5, midY + negH);
-        ctx.stroke();
-
-        const rmsH = Math.max(0.5, pt.rms * maxAmp * g);
-        ctx.globalAlpha = dimmed ? 0.5 : 0.95;
-        ctx.beginPath();
-        ctx.moveTo(x + 0.5, midY - rmsH);
-        ctx.lineTo(x + 0.5, midY + rmsH);
-        ctx.stroke();
+        samples.push({
+          x,
+          posAmpPx,
+          negAmpPx,
+          rmsAmpPx,
+          yUpper: yMid - posAmpPx,
+          yLower: yMid + negAmpPx,
+          yRmsUpper: yMid - rmsAmpPx,
+          yRmsLower: yMid + rmsAmpPx,
+          isVoiced,
+        });
       }
+
+      if (samples.length >= 2) {
+        // Pass 1: Subtle baseline vertical excursions
+        ctx.save();
+        ctx.strokeStyle = hexToRgba(color, dimmed ? 0.18 : 0.24);
+        ctx.lineWidth = 0.85;
+        ctx.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const p = samples[i];
+          if (p.posAmpPx > 0.35 || p.negAmpPx > 0.35) {
+            const xAligned = Math.round(p.x) + 0.5;
+            ctx.moveTo(xAligned, p.yUpper);
+            ctx.lineTo(xAligned, p.yLower);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+
+        if (!dimmed) {
+          const coreLineColor = lightenHex(color, 36);
+          const rmsCoreColor = lightenHex(color, 68);
+
+          // Pass 2: Voiced Audition Peak Transient Layer (zigzag envelope per voiced run)
+          ctx.save();
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          ctx.strokeStyle = coreLineColor;
+          ctx.globalAlpha = 0.78;
+          ctx.lineWidth = 0.95;
+          ctx.beginPath();
+          let inPeakRun = false;
+          for (let i = 0; i < samples.length; i++) {
+            const p = samples[i];
+            if (!p.isVoiced) {
+              inPeakRun = false;
+              continue;
+            }
+            const nextX =
+              i + 1 < samples.length ? (p.x + samples[i + 1].x) * 0.5 : p.x + stepPx * 0.5;
+            const flip = (i & 1) === 0;
+            if (!inPeakRun) {
+              ctx.moveTo(p.x, flip ? p.yUpper : p.yLower);
+              ctx.lineTo(nextX, flip ? p.yLower : p.yUpper);
+              inPeakRun = true;
+            } else {
+              ctx.lineTo(p.x, flip ? p.yUpper : p.yLower);
+              ctx.lineTo(nextX, flip ? p.yLower : p.yUpper);
+            }
+          }
+          ctx.stroke();
+          ctx.restore();
+
+          // Pass 3: Voiced Audition Bright RMS Loudness Core
+          ctx.save();
+          let runStart = -1;
+          const drawRmsIsland = (sIdx: number, eIdx: number) => {
+            if (eIdx > sIdx) {
+              ctx.fillStyle = rmsCoreColor;
+              ctx.globalAlpha = 0.52;
+              ctx.beginPath();
+              for (let j = sIdx; j <= eIdx; j++) {
+                const pt = samples[j];
+                if (j === sIdx) ctx.moveTo(pt.x, pt.yRmsUpper);
+                else ctx.lineTo(pt.x, pt.yRmsUpper);
+              }
+              for (let j = eIdx; j >= sIdx; j--) {
+                const pt = samples[j];
+                ctx.lineTo(pt.x, pt.yRmsLower);
+              }
+              ctx.closePath();
+              ctx.fill();
+            }
+
+            ctx.strokeStyle = rmsCoreColor;
+            ctx.globalAlpha = 0.85;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let j = sIdx; j <= eIdx; j++) {
+              const pt = samples[j];
+              const rx = Math.round(pt.x) + 0.5;
+              ctx.moveTo(rx, pt.yRmsUpper);
+              ctx.lineTo(rx, pt.yRmsLower);
+            }
+            ctx.stroke();
+          };
+
+          for (let i = 0; i < samples.length; i++) {
+            const p = samples[i];
+            const rmsActive = p.isVoiced && p.rmsAmpPx >= 0.6;
+            if (rmsActive) {
+              if (runStart < 0) runStart = i;
+            } else if (runStart >= 0) {
+              drawRmsIsland(runStart, i - 1);
+              runStart = -1;
+            }
+          }
+          if (runStart >= 0) {
+            drawRmsIsland(runStart, samples.length - 1);
+          }
+          ctx.restore();
+        }
+      }
+
       ctx.restore();
-    }, [hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed, gainFn]);
+    }, [hiRes, legacyPeaks, durationMs, sliceStartMs, sliceEndMs, color, dimmed, gainFn, boxSize]);
 
     return <canvas ref={canvasRef} className="w-full h-full block pointer-events-none" />;
   }
@@ -1025,14 +1205,14 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               </div>
 
               {/* 片头 BGM 紧凑轨头 */}
-              <div className="h-[44px] shrink-0 px-2.5 flex items-center justify-between gap-1 bg-zinc-900/40">
+              <div className="h-[44px] shrink-0 px-2.5 flex items-center justify-between gap-1 bg-zinc-900/40 border-t border-cyan-500/20">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1 text-[11px] font-semibold text-blue-200 truncate">
-                    <Music className="w-3 h-3 text-blue-400 shrink-0" />
+                  <div className="flex items-center gap-1 text-[11px] font-semibold text-cyan-300 truncate">
+                    <Music className="w-3 h-3 text-cyan-400 shrink-0" />
                     <span>片头 BGM</span>
                   </div>
                   <div className="text-[9px] text-zinc-500 truncate">
-                    {state.introBgm?.enabled ? `${introBgmDurationSec.toFixed(1)}s` : '未启用'}
+                    {state.introBgm?.enabled ? `固定 ${introBgmDurationSec.toFixed(1)}s · 智能避让` : '未启用'}
                   </div>
                 </div>
                 <button
@@ -1048,7 +1228,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
           </div>
 
           {/* Right Scrollable Multi-Track Canvas Area */}
-          <div ref={scrollViewportRef} className="flex-1 overflow-x-auto relative select-none">
+          <div ref={scrollViewportRef} className="flex-1 overflow-x-auto relative select-none bg-[#0f1218]">
             <div
               ref={trackAreaRef}
               style={{ width: `${zoom * 100}%`, minWidth: '100%' }}
@@ -1065,21 +1245,25 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   seekIntroToSec(sec);
                   setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
                 }}
-                className="h-[22px] shrink-0 border-b border-zinc-800 bg-zinc-900/50 relative cursor-pointer"
+                title="点击或横向拖动调整试听游标 · Ctrl/Cmd+滚轮缩放时间轴"
+                className="h-[22px] shrink-0 border-b border-white/10 bg-[#12161f] relative cursor-pointer"
               >
                 {rulerTicks.map((t) => (
                   <div
                     key={t}
                     style={{ left: `${(t / timelineSpanSec) * 100}%` }}
-                    className="absolute top-0 bottom-0 border-l border-zinc-700/70 pl-1 flex items-center text-[10px] font-mono text-zinc-400 pointer-events-none"
+                    className="absolute top-0 bottom-0 border-l border-white/15 pl-1 flex items-center text-[10px] font-mono text-zinc-400 pointer-events-none"
                   >
                     {t}s
                   </div>
                 ))}
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-mono text-zinc-500 pointer-events-none">
+                  空格播放 · 滚轮缩放 · 拖动片段调整 · 段落静音框选区间
+                </span>
               </div>
 
               <div className="flex-1 min-h-0 flex flex-col">
-                {speakerTracks.map((tr) => {
+                {speakerTracks.map((tr, trIdx) => {
                   const isTrackMuted = tr.muted;
                   return (
                     <div
@@ -1094,14 +1278,21 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                           setDragAction({ kind: 'mute_range', trackId: tr.id, startSec: sec, endSec: sec });
                         }
                       }}
-                      className={`flex-1 min-h-[54px] border-b border-zinc-800/60 relative bg-zinc-950/80 ${
-                        toolMode === 'mute_range' ? 'cursor-crosshair' : ''
-                      }`}
+                      className={`flex-1 min-h-[54px] border-b border-white/[0.07] relative ${
+                        trIdx % 2 === 1 ? 'bg-white/[0.015]' : 'bg-transparent'
+                      } ${toolMode === 'mute_range' ? 'cursor-crosshair' : ''}`}
                     >
+                      {/* Center 0dB reference line & right scale labels (matching WaveformEditorBar) */}
                       <div
                         className="absolute left-0 right-0 top-1/2 h-px pointer-events-none opacity-25"
                         style={{ backgroundColor: tr.color }}
                       />
+                      <span className="absolute right-1.5 top-1 text-[8px] font-mono text-zinc-500/70 pointer-events-none">
+                        0dB
+                      </span>
+                      <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[8px] font-mono text-zinc-500/60 pointer-events-none">
+                        -6
+                      </span>
 
                       {clipWindows.map(({ highlight: hl, startSec, endSec }) => {
                         const leftPct = (startSec / timelineSpanSec) * 100;
@@ -1118,12 +1309,12 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                             style={{
                               left: `${leftPct}%`,
                               width: `${widthPct}%`,
-                              borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}88`,
+                              borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}66`,
                               backgroundColor: isClipMuted
-                                ? 'rgba(63,63,70,0.35)'
+                                ? 'rgba(39,39,42,0.42)'
                                 : isPrimarySpeaker
-                                ? `${tr.color}28`
-                                : `${tr.color}12`,
+                                ? `${tr.color}18`
+                                : `${tr.color}0a`,
                             }}
                             onPointerDown={(e) => {
                               if (toolMode === 'mute_range' || e.shiftKey) return;
@@ -1136,7 +1327,12 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                 origStartSec: startSec,
                               });
                             }}
-                            className={`absolute top-1.5 bottom-1.5 rounded-md border overflow-hidden flex flex-col justify-between px-1.5 py-0.5 shadow-sm ${
+                            title={
+                              toolMode === 'mute_range'
+                                ? `在 ${tr.name} 轨横向框选静音区间`
+                                : `${isPrimarySpeaker ? '主讲金句' : '同段副轨'} · ${startSec.toFixed(1)}s–${endSec.toFixed(1)}s · 拖动调整位置 / 左右边缘修剪 · ${hl.text}`
+                            }
+                            className={`absolute top-1 bottom-1 rounded border overflow-hidden flex flex-col justify-between px-1.5 py-0.5 shadow-sm ${
                               toolMode === 'mute_range'
                                 ? 'cursor-crosshair'
                                 : 'cursor-grab active:cursor-grabbing'
@@ -1157,8 +1353,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                     origDurationSec: hl.durationSec,
                                   });
                                 }}
-                                title="左右拖动缩放/修剪金句开头"
-                                className="absolute left-0 top-0 bottom-0 w-1.5 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                                title="左右拖动修剪金句开头（不改变原音频）"
+                                className="absolute left-0 top-0 bottom-0 w-1.5 bg-white/20 hover:bg-white/75 cursor-ew-resize z-10"
                               />
                             )}
                             {toolMode === 'edit' && (
@@ -1175,14 +1371,21 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                     maxSourceMs: tr.durationMs ?? hl.sourceEndMs + 30000,
                                   });
                                 }}
-                                title="左右拖动缩放/扩展金句结尾"
-                                className="absolute right-0 top-0 bottom-0 w-1.5 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                                title="左右拖动扩展或缩短金句结尾"
+                                className="absolute right-0 top-0 bottom-0 w-1.5 bg-white/20 hover:bg-white/75 cursor-ew-resize z-10"
                               />
                             )}
 
-                            <div className="flex items-center justify-between gap-1 text-[9px] font-mono z-10 pl-0.5 pr-0.5">
-                              <span className="text-zinc-200 truncate pointer-events-none">
-                                {isPrimarySpeaker ? '★ ' : ''}@{startSec.toFixed(1)}s
+                            {/* Top caption bar matching WaveformEditorBar clipCaptionsBySpeaker */}
+                            <div className="flex items-center justify-between gap-1 text-[9.5px] z-10 pl-0.5 pr-0.5 leading-tight">
+                              <span
+                                className={`truncate pointer-events-none font-medium ${
+                                  isClipMuted ? 'text-zinc-400' : isPrimarySpeaker ? 'text-zinc-100' : 'text-zinc-300/80'
+                                }`}
+                              >
+                                {isPrimarySpeaker
+                                  ? `🎙️ ${startSec.toFixed(1)}–${endSec.toFixed(1)}s · ${hl.text}`
+                                  : `副轨 · ${startSec.toFixed(1)}–${endSec.toFixed(1)}s`}
                               </span>
                               <button
                                 type="button"
@@ -1191,11 +1394,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                   e.stopPropagation();
                                   toggleHighlightTrackMute(hl.id, tr.id);
                                 }}
-                                className={`px-1 rounded text-[9px] cursor-pointer ${
-                                  isClipMuted ? 'bg-red-500/80 text-white' : 'bg-zinc-900/70 text-zinc-300'
+                                title={isClipMuted ? '点击恢复此音轨该金句声音' : '点击静音此音轨该金句'}
+                                className={`px-1 py-px rounded text-[9px] shrink-0 cursor-pointer transition ${
+                                  isClipMuted
+                                    ? 'bg-zinc-800/95 text-zinc-200 border border-zinc-600/70'
+                                    : isPrimarySpeaker
+                                    ? 'bg-purple-950/80 text-purple-200 hover:bg-purple-900/80'
+                                    : 'bg-emerald-950/80 text-emerald-200 hover:bg-emerald-900/80'
                                 }`}
                               >
-                                {isClipMuted ? '🔇' : '🔊'}
+                                {isClipMuted ? '🔇 静音' : isPrimarySpeaker ? '🔊 主讲' : '🔊 原声'}
                               </button>
                             </div>
 
@@ -1236,9 +1444,11 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                                       width: `${Math.min(100, Math.max(4, pmWidthPct))}%`,
                                     }}
                                     title="已静音该音轨段落（点击恢复声音）"
-                                    className="absolute inset-y-0 bg-red-950/75 border-x border-red-400/80 flex items-center justify-center text-[10px] text-red-200 z-20 cursor-pointer hover:bg-red-900/80"
+                                    className="absolute inset-y-0 bg-zinc-950/75 border-x border-dashed border-zinc-400/70 flex items-start justify-start p-0.5 z-20 cursor-pointer hover:bg-zinc-900/85"
                                   >
-                                    🔇
+                                    <span className="px-1 py-px rounded bg-zinc-800/95 text-[9px] font-semibold text-zinc-200 leading-none">
+                                      🔇 静音
+                                    </span>
                                   </button>
                                 );
                               })}
@@ -1260,7 +1470,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 })}
 
                 {/* 固定口播紧凑轨 */}
-                <div className="h-[44px] shrink-0 border-b border-zinc-800/60 relative bg-zinc-950/60">
+                <div className="h-[44px] shrink-0 border-b border-white/[0.07] relative bg-white/[0.01]">
                   {state.introVoiceover?.enabled && (state.introVoiceover.filePath || state.introVoiceover.audioUrl) ? (
                     <div
                       style={{
@@ -1275,11 +1485,11 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                           origStartOffsetSec: introVoStartSec,
                         });
                       }}
-                      title="左右拖动调整固定口播起播时间"
-                      className="absolute top-1 bottom-1 rounded-md border border-amber-400/80 bg-amber-500/15 cursor-grab active:cursor-grabbing overflow-hidden px-1.5 py-0.5 flex flex-col justify-between shadow-sm"
+                      title="左右拖动调整固定片头口播起播时间"
+                      className="absolute top-1 bottom-1 rounded border border-amber-400/75 bg-amber-500/12 cursor-grab active:cursor-grabbing overflow-hidden px-1.5 py-0.5 flex flex-col justify-between shadow-sm"
                     >
-                      <span className="text-[9px] font-mono text-amber-200 truncate pointer-events-none z-10 leading-none">
-                        🎙️ @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
+                      <span className="text-[9.5px] font-semibold text-amber-200 truncate pointer-events-none z-10 leading-none">
+                        🎙️ 固定口播 · @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s) · 可左右拖动
                       </span>
                       <div className="flex-1 min-h-0 w-full pointer-events-none">
                         <HiResClipWaveformCanvas
@@ -1294,23 +1504,25 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                     </div>
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
-                      未开启固定口播
+                      未开启固定口播（点击左侧上传按钮导入）
                     </div>
                   )}
                 </div>
 
-                {/* 片头 BGM 紧凑轨（真实波形 + 闪避包络） */}
-                <div className="h-[44px] shrink-0 relative bg-zinc-950/40">
+                {/* 片头 BGM 紧凑轨（与音轨视图 Cyan BGM 轨完全一致：真实连续波形 + 闪避包络） */}
+                <div className="h-[44px] shrink-0 relative border-t border-cyan-500/25 bg-cyan-500/[0.02]">
                   {state.introBgm?.enabled && (state.introBgm.filePath || state.introBgm.audioUrl || state.bgmWavPath) ? (
                     <div
                       style={{
                         left: '0%',
                         width: `${Math.min(100, (introBgmDurationSec / timelineSpanSec) * 100)}%`,
                       }}
-                      className="absolute top-1 bottom-1 rounded-md border border-blue-500/60 bg-blue-500/10 overflow-hidden px-1.5 py-0.5 flex flex-col justify-between"
+                      title={`片头 BGM · 固定 ${introBgmDurationSec.toFixed(1)}s · 人声发声自动避让 ${state.bgmDuckDb ?? -18}dB`}
+                      className="absolute top-1 bottom-1 rounded border border-cyan-500/45 bg-cyan-500/[0.06] overflow-hidden px-1.5 py-0.5 flex flex-col justify-between"
                     >
-                      <span className="text-[9px] font-mono text-blue-200 truncate pointer-events-none z-10 leading-none">
-                        🎵 {state.introBgm.fileName} (避让 {state.bgmDuckDb ?? -18}dB)
+                      <div className="absolute top-0 left-0 right-0 h-[1.5px] bg-cyan-400/60 pointer-events-none" />
+                      <span className="text-[9.5px] font-semibold text-cyan-300 truncate pointer-events-none z-10 leading-none">
+                        🎬 片头 BGM · 固定 {introBgmDurationSec.toFixed(1)}s (智能避让 {state.bgmDuckDb ?? -18}dB)
                       </span>
                       <div className="flex-1 min-h-0 w-full pointer-events-none">
                         <HiResClipWaveformCanvas
@@ -1319,14 +1531,14 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                           durationMs={(state.introBgm.durationSec ?? introBgmDurationSec) * 1000}
                           sliceStartMs={0}
                           sliceEndMs={introBgmDurationSec * 1000}
-                          color="#60a5fa"
+                          color="#06b6d4"
                           gainFn={(t) => (isSecDucked(t) ? duckPct / 100 : 1.0)}
                         />
                       </div>
                     </div>
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-600">
-                      未开启片头 BGM
+                      未开启片头 BGM（点击左侧上传按钮导入）
                     </div>
                   )}
                 </div>
