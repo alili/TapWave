@@ -127,7 +127,13 @@ interface TextEditorModeWorkspaceProps {
   ) => void;
   onApplyManualCorrection?: (tokenId: string, newText: string, saveToGlossary: boolean) => void;
   onRenameSpeakerTrack?: (trackId: string, newName?: string, newRole?: SpeakerRole) => void;
-  onAddSelectedToHighlight?: (options?: { text?: string; startSec?: number; endSec?: number; speakerId?: string }) => void;
+  onAddSelectedToHighlight?: (options?: {
+    text?: string;
+    startSec?: number;
+    endSec?: number;
+    speakerId?: string;
+    isEditedTime?: boolean;
+  }) => void;
   onRetranscribe?: () => void;
   onOpenAiTimeline?: () => void;
   onSeekToHighlight?: (hl: HighlightClip) => void;
@@ -1385,6 +1391,7 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                     startSec: selectionRange.startSec,
                     endSec: selectionRange.endSec,
                     speakerId: selectionRange.speakerId,
+                    isEditedTime: true,
                   });
                   setSelectionRange(null);
                 }}
@@ -1538,6 +1545,7 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                   startSec: contextMenu.startSec,
                   endSec: contextMenu.endSec,
                   speakerId: contextMenu.speakerId,
+                  isEditedTime: true,
                 });
                 setContextMenu(null);
               }}

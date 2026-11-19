@@ -6,6 +6,7 @@ import {
   SpeakerTrack,
 } from '../types/podcast';
 import { refineProjectBlocksWithWaveform } from '../engine/waveformAligner';
+import { repairMisalignedHighlights } from '../engine/timelineEngine';
 
 let nativeAudioServerPort = 0;
 
@@ -478,7 +479,9 @@ export function parsePodcraftProjectJson(
     introBgm: rehydrateBgm(rawProject.introBgm),
     outroBgm: rehydrateBgm(rawProject.outroBgm),
     blocks: refinedBlocks,
-    highlights: Array.isArray(rawProject.highlights) ? rawProject.highlights : [],
+    highlights: Array.isArray(rawProject.highlights)
+      ? repairMisalignedHighlights(rawProject.highlights, refinedBlocks)
+      : [],
     trackMuteRanges: Array.isArray(rawProject.trackMuteRanges) ? rawProject.trackMuteRanges : [],
     glossary: Array.isArray(rawProject.glossary) ? rawProject.glossary : [],
     emotionCurve: Array.isArray(rawProject.emotionCurve) ? rawProject.emotionCurve : [],

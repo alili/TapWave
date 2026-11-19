@@ -42,7 +42,9 @@ import {
   applyTrackMuteSelectionToProject,
   applyWaveformSelectionToBlocks,
   computeEditedTimeline,
+  findSourceRangeByHighlightText,
   formatMmSs,
+  mapEditedSecToSourceMs,
   remapPlayheadAfterTimelineEdit,
   TimelineComputation,
 } from './engine/timelineEngine';
@@ -2072,6 +2074,7 @@ export const App: React.FC = () => {
     startSec?: number;
     endSec?: number;
     speakerId?: string;
+    isEditedTime?: boolean;
   }) => {
     // 1. 支持从文稿模式直接传入文本或范围
     if (directOptions && directOptions.text) {
@@ -2082,54 +2085,41 @@ export const App: React.FC = () => {
       let startMs: number;
       let endMs: number;
 
-      if (
+      const hasExplicitRange =
         typeof directOptions.startSec === 'number' &&
         typeof directOptions.endSec === 'number' &&
-        directOptions.endSec >= directOptions.startSec
-      ) {
-        startMs = Math.round(directOptions.startSec * 1000);
-        endMs = Math.round(directOptions.endSec * 1000);
+        directOptions.endSec >= directOptions.startSec;
+
+      const mappedStartMs = hasExplicitRange
+        ? directOptions.isEditedTime
+          ? mapEditedSecToSourceMs(timeline, directOptions.startSec!) ??
+            Math.round(directOptions.startSec! * 1000)
+          : Math.round(directOptions.startSec! * 1000)
+        : undefined;
+      const mappedEndMs = hasExplicitRange
+        ? directOptions.isEditedTime
+          ? mapEditedSecToSourceMs(timeline, directOptions.endSec!) ??
+            Math.round(directOptions.endSec! * 1000)
+          : Math.round(directOptions.endSec! * 1000)
+        : undefined;
+
+      // 优先按全文非删除词元跨段精确匹配原文，确保 sourceStartMs/sourceEndMs 100% 对准真实音频
+      const matched = findSourceRangeByHighlightText(state.blocks, cleanText, mappedStartMs);
+      if (matched) {
+        startMs = matched.sourceStartMs;
+        endMs = matched.sourceEndMs;
+        if (!spId && matched.speakerId) spId = matched.speakerId;
+      } else if (mappedStartMs !== undefined && mappedEndMs !== undefined) {
+        startMs = mappedStartMs;
+        endMs = mappedEndMs;
         if (endMs <= startMs) {
           endMs = startMs + Math.max(500, Math.round((cleanText.length / 4.5) * 1000));
         }
       } else {
-        // 未传明确时间戳时，尝试在全片 tokens 中检索该文本以获得真实源时间
-        let matchedStartMs: number | null = null;
-        let matchedEndMs: number | null = null;
-        let matchedSpeakerId: string | null = null;
-
-        for (const block of state.blocks) {
-          const activeTokens = block.tokens.filter((t) => !t.deleted && t.type === 'word');
-          const blockText = activeTokens.map((t) => t.text).join('');
-          const foundIdx = blockText.indexOf(cleanText);
-          if (foundIdx !== -1) {
-            let curChar = 0;
-            const chosenTokens: TranscriptToken[] = [];
-            for (const t of activeTokens) {
-              const tStart = curChar;
-              curChar += t.text.length;
-              const tEnd = curChar;
-              if (tEnd > foundIdx && tStart < foundIdx + cleanText.length) {
-                chosenTokens.push(t);
-              }
-            }
-            if (chosenTokens.length > 0) {
-              matchedStartMs = Math.min(...chosenTokens.map((t) => t.sourceStartMs));
-              matchedEndMs = Math.max(...chosenTokens.map((t) => t.sourceEndMs));
-              matchedSpeakerId = block.speakerId;
-              break;
-            }
-          }
-        }
-
-        if (matchedStartMs !== null && matchedEndMs !== null) {
-          startMs = matchedStartMs;
-          endMs = matchedEndMs;
-          if (!spId && matchedSpeakerId) spId = matchedSpeakerId;
-        } else {
-          startMs = Math.round(playheadRef.current * 1000);
-          endMs = startMs + Math.max(500, Math.round((cleanText.length / 4.5) * 1000));
-        }
+        startMs =
+          mapEditedSecToSourceMs(timeline, playheadRef.current) ??
+          Math.round(playheadRef.current * 1000);
+        endMs = startMs + Math.max(500, Math.round((cleanText.length / 4.5) * 1000));
       }
 
       if (!spId) {

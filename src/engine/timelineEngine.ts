@@ -2316,3 +2316,136 @@ export function remapPlayheadAfterTimelineEdit(
 
   return Number(nextTotal.toFixed(3));
 }
+
+const HIGHLIGHT_PUNCT_RE = /[\s\u3000，。！？、；：“”‘’（）().,!?;:'"《》【】—…·]/g;
+
+function normalizeHighlightMatchText(text: string): string {
+  return text.replace(HIGHLIGHT_PUNCT_RE, '');
+}
+
+/**
+ * 在全片非删除词元中跨段落精确检索指定文本对应的原始音源时间区间 [sourceStartMs, sourceEndMs]。
+ * 若文本在多处重复出现，优先返回最接近 `preferSourceMs` 的位置。
+ */
+export function findSourceRangeByHighlightText(
+  blocks: PodcastProjectState['blocks'],
+  text: string,
+  preferSourceMs?: number
+): { sourceStartMs: number; sourceEndMs: number; speakerId: string } | null {
+  const target = normalizeHighlightMatchText(text);
+  if (!target || target.length < 2) return null;
+
+  const flatTokens: Array<{
+    speakerId: string;
+    text: string;
+    sourceStartMs: number;
+    sourceEndMs: number;
+  }> = [];
+  for (const b of blocks) {
+    for (const t of b.tokens) {
+      if (!t.deleted && t.type === 'word' && t.text.trim().length > 0) {
+        flatTokens.push({
+          speakerId: b.speakerId,
+          text: t.text,
+          sourceStartMs: t.sourceStartMs,
+          sourceEndMs: t.sourceEndMs,
+        });
+      }
+    }
+  }
+  if (flatTokens.length === 0) return null;
+  flatTokens.sort((a, b) => a.sourceStartMs - b.sourceStartMs);
+
+  const charToTokenIdx: number[] = [];
+  let fullNorm = '';
+  for (let ti = 0; ti < flatTokens.length; ti++) {
+    const normTok = normalizeHighlightMatchText(flatTokens[ti].text);
+    for (let ci = 0; ci < normTok.length; ci++) {
+      fullNorm += normTok[ci];
+      charToTokenIdx.push(ti);
+    }
+  }
+
+  let searchFrom = 0;
+  let best: { sourceStartMs: number; sourceEndMs: number; speakerId: string; dist: number } | null = null;
+  while (searchFrom <= fullNorm.length - target.length) {
+    const idx = fullNorm.indexOf(target, searchFrom);
+    if (idx === -1) break;
+    const firstTok = flatTokens[charToTokenIdx[idx]];
+    const lastTok = flatTokens[charToTokenIdx[idx + target.length - 1]];
+    const sMs = firstTok.sourceStartMs;
+    const eMs = Math.max(sMs + 100, lastTok.sourceEndMs);
+    const dist = typeof preferSourceMs === 'number' ? Math.abs(sMs - preferSourceMs) : 0;
+    if (!best || dist < best.dist) {
+      best = { sourceStartMs: sMs, sourceEndMs: eMs, speakerId: firstTok.speakerId, dist };
+    }
+    searchFrom = idx + 1;
+  }
+
+  return best
+    ? { sourceStartMs: best.sourceStartMs, sourceEndMs: best.sourceEndMs, speakerId: best.speakerId }
+    : null;
+}
+
+/**
+ * 将正片剪辑后时间轴秒数（editedSec）通过 playbackSpans 映射回原始音频毫秒（sourceMs）。
+ */
+export function mapEditedSecToSourceMs(
+  timeline: TimelineComputation,
+  editedSec: number
+): number | null {
+  const spans = timeline.playbackSpans;
+  if (!spans || spans.length === 0) return null;
+  for (let i = 0; i < spans.length; i++) {
+    const s = spans[i];
+    if (editedSec >= s.editedStartSec - 0.001 && editedSec <= s.editedEndSec + 0.001) {
+      const offset = Math.max(0, Math.min(s.editedEndSec - s.editedStartSec, editedSec - s.editedStartSec));
+      return Math.round((s.sourceStartSec + offset) * 1000);
+    }
+    if (s.editedStartSec > editedSec) {
+      return Math.round(s.sourceStartSec * 1000);
+    }
+  }
+  const last = spans[spans.length - 1];
+  return Math.round(last.sourceEndSec * 1000);
+}
+
+/**
+ * 自动检测并修复历史工程中「文本正确、但 sourceStartMs/sourceEndMs 因误用了剪辑后时间而错位」的金句。
+ */
+export function repairMisalignedHighlights(
+  highlights: HighlightClip[],
+  blocks: PodcastProjectState['blocks']
+): HighlightClip[] {
+  if (!highlights || highlights.length === 0 || !blocks || blocks.length === 0) {
+    return highlights;
+  }
+  return highlights.map((hl) => {
+    const targetNorm = normalizeHighlightMatchText(hl.text || '');
+    if (targetNorm.length < 6) return hl;
+
+    let currentRangeText = '';
+    for (const b of blocks) {
+      for (const t of b.tokens) {
+        if (!t.deleted && t.type === 'word' && t.sourceEndMs > hl.sourceStartMs - 100 && t.sourceStartMs < hl.sourceEndMs + 100) {
+          currentRangeText += t.text;
+        }
+      }
+    }
+    const currentNorm = normalizeHighlightMatchText(currentRangeText);
+    const probe = targetNorm.slice(0, Math.min(8, targetNorm.length));
+    if (currentNorm.includes(probe)) {
+      return hl; // 当前区间文本已匹配，无需修复
+    }
+
+    const matched = findSourceRangeByHighlightText(blocks, hl.text, hl.sourceStartMs);
+    if (!matched) return hl;
+
+    return {
+      ...hl,
+      sourceStartMs: matched.sourceStartMs,
+      sourceEndMs: matched.sourceEndMs,
+      durationSec: Math.max(0.1, Number(((matched.sourceEndMs - matched.sourceStartMs) / 1000).toFixed(2))),
+    };
+  });
+}
