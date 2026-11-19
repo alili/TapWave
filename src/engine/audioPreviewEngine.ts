@@ -1170,43 +1170,44 @@ class AudioPreviewEngine {
       }
     }
 
-    // Pre-warm dedicated Cold Open highlight clip elements (pre-parked at sourceStartMs so Cold Open plays with 0ms seek lag and zero main-track disruption)
-    const activeColdOpenIds = new Set(
-      state.coldOpenEnabled ? state.highlights.map((h) => h.id) : []
-    );
-    for (const [hlId, holder] of this.coldOpenClipElements.entries()) {
-      if (!activeColdOpenIds.has(hlId)) {
-        this.disposeHolder(holder);
-        this.coldOpenClipElements.delete(hlId);
-      }
-    }
+    // Pre-warm dedicated Cold Open highlight clip elements for all speaker tracks (multi-track slice per highlight)
+    const activeColdOpenKeys = new Set<string>();
+    const playableColdTracks = selectPlayableTracks(state);
     if (state.coldOpenEnabled && state.highlights.length > 0) {
       for (const hl of state.highlights) {
-        const tr = state.tracks.find((t) => t.id === hl.speakerId);
-        if (!tr) continue;
-        const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
-        const clipStartSec = Math.max(0, hl.sourceStartMs / 1000 - effOffset);
-        const clipKey = `${hl.id}|${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|${clipStartSec.toFixed(3)}`;
-        const existing = this.coldOpenClipElements.get(hl.id);
-        if (!existing || existing.sourceKey !== clipKey || existing.failedFatal) {
-          if (existing) {
-            this.disposeHolder(existing);
-            this.coldOpenClipElements.delete(hl.id);
-          }
-          const created = this.createManagedHolder(
-            tr.audioUrl,
-            tr.filePath,
-            `片头金句_${tr.name}`,
-            rate,
-            false,
-            tr.sourceFilePath
-          );
-          if (created) {
-            created.sourceKey = clipKey;
-            this.seekHolderOnSpliceOnly(created, clipStartSec, true);
-            this.coldOpenClipElements.set(hl.id, created);
+        for (const tr of playableColdTracks) {
+          const clipElemId = `${hl.id}::${tr.id}`;
+          activeColdOpenKeys.add(clipElemId);
+          const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+          const clipStartSec = Math.max(0, hl.sourceStartMs / 1000 - effOffset);
+          const clipKey = `${clipElemId}|${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|${clipStartSec.toFixed(3)}`;
+          const existing = this.coldOpenClipElements.get(clipElemId);
+          if (!existing || existing.sourceKey !== clipKey || existing.failedFatal) {
+            if (existing) {
+              this.disposeHolder(existing);
+              this.coldOpenClipElements.delete(clipElemId);
+            }
+            const created = this.createManagedHolder(
+              tr.audioUrl,
+              tr.filePath,
+              `片头金句_${tr.name}`,
+              rate,
+              false,
+              tr.sourceFilePath
+            );
+            if (created) {
+              created.sourceKey = clipKey;
+              this.seekHolderOnSpliceOnly(created, clipStartSec, true);
+              this.coldOpenClipElements.set(clipElemId, created);
+            }
           }
         }
+      }
+    }
+    for (const [clipElemId, holder] of this.coldOpenClipElements.entries()) {
+      if (!activeColdOpenKeys.has(clipElemId)) {
+        this.disposeHolder(holder);
+        this.coldOpenClipElements.delete(clipElemId);
       }
     }
 
@@ -1295,12 +1296,13 @@ class AudioPreviewEngine {
       }
     }
 
-    for (const [hlId, clipHolder] of this.coldOpenClipElements.entries()) {
+    for (const [clipElemId, clipHolder] of this.coldOpenClipElements.entries()) {
       if (clipHolder.failedFatal) continue;
+      const [hlId, trackId] = clipElemId.split('::');
       const isCurrentHl =
         mapped.inColdOpen && !mapped.inIntroOrGapSilence && mapped.activeHighlight?.id === hlId;
       const hl = state.highlights.find((h) => h.id === hlId);
-      const tr = hl ? state.tracks.find((t) => t.id === hl.speakerId) : undefined;
+      const tr = state.tracks.find((t) => t.id === trackId);
       const effOffset =
         tr && state.recordingMode !== 'same_room_sync' ? (tr.syncOffsetMs || 0) / 1000 : 0;
       const clipTarget =
@@ -1538,7 +1540,7 @@ class AudioPreviewEngine {
           preMapped.sourceSec !== null
         ) {
           const clipHolder =
-            this.coldOpenClipElements.get(preMapped.activeHighlight.id) ??
+            this.coldOpenClipElements.get(`${preMapped.activeHighlight.id}::${preMapped.activeSpeakerId}`) ??
             this.trackElements.get(preMapped.activeSpeakerId);
           const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
           if (clipHolder && !clipHolder.failedFatal && clipTrack) {
@@ -1771,11 +1773,12 @@ class AudioPreviewEngine {
 
     const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
 
-    // Dedicated Cold Open highlight playback (copied/pre-parked audio clips, leaving main tracks undisturbed for body)
+    // Dedicated Cold Open multi-track highlight playback (all tracks stay phase-locked at highlight source range)
     const activeColdHighlight =
       mapped.inColdOpen && !mapped.inIntroOrGapSilence ? mapped.activeHighlight : undefined;
-    for (const [hlId, clipHolder] of this.coldOpenClipElements.entries()) {
+    for (const [clipElemId, clipHolder] of this.coldOpenClipElements.entries()) {
       if (clipHolder.failedFatal) continue;
+      const [hlId, trackId] = clipElemId.split('::');
       const clipEl = clipHolder.audio;
       if (!activeColdHighlight || activeColdHighlight.id !== hlId || mapped.sourceSec === null) {
         this.applySlewedVolume(clipHolder, 0, true);
@@ -1784,7 +1787,7 @@ class AudioPreviewEngine {
         }
         continue;
       }
-      const tr = state.tracks.find((t) => t.id === activeColdHighlight.speakerId);
+      const tr = state.tracks.find((t) => t.id === trackId);
       const effOffset =
         tr && state.recordingMode !== 'same_room_sync' ? (tr.syncOffsetMs || 0) / 1000 : 0;
       const targetClipSec = Math.max(0, mapped.sourceSec - effOffset);
@@ -1793,10 +1796,10 @@ class AudioPreviewEngine {
         Boolean(tr?.muted) ||
         (anySolo && !tr?.solo) ||
         Boolean(
-          activeColdHighlight.mutedTrackIds?.includes(activeColdHighlight.speakerId) ||
+          activeColdHighlight.mutedTrackIds?.includes(trackId) ||
             activeColdHighlight.partiallyMutedRanges?.some(
               (pm: HighlightMuteInterval) =>
-                pm.trackId === activeColdHighlight.speakerId &&
+                pm.trackId === trackId &&
                 masterSrcMs >= pm.sourceStartMs &&
                 masterSrcMs <= pm.sourceEndMs
             )
@@ -1804,14 +1807,38 @@ class AudioPreviewEngine {
       let clipGain = 1.0;
       if (isMuted) {
         clipGain = 0.0;
-      } else if (tr && state.loudnessAligned) {
-        const dbFactor = Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20);
-        clipGain = Math.min(1.0, 0.9 * dbFactor);
       } else {
-        clipGain = 0.92;
+        if (tr && state.loudnessAligned) {
+          const dbFactor = Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20);
+          clipGain *= Math.min(1.0, 0.9 * dbFactor);
+        } else {
+          clipGain *= 0.92;
+        }
+        if (
+          playableTracks.length > 1 &&
+          state.autoSoloMode !== 'off' &&
+          trackId !== activeColdHighlight.speakerId
+        ) {
+          if (state.autoSoloMode === 'hard_mute') {
+            clipGain *= 0.06;
+          } else {
+            const baseDuck = Math.max(
+              0.10,
+              Math.min(0.50, Math.pow(10, state.duckAttenuationDb / 20))
+            );
+            clipGain *= baseDuck;
+          }
+        }
       }
+      const isPrimaryHlTrack = trackId === activeColdHighlight.speakerId;
       applyPitchPreservingPlaybackRate(clipEl, playbackRate);
-      this.seekHolderOnSpliceOnly(clipHolder, targetClipSec, crossedCutOrScrub, 0.25, 450);
+      this.seekHolderOnSpliceOnly(
+        clipHolder,
+        targetClipSec,
+        crossedCutOrScrub,
+        isPrimaryHlTrack ? 0.25 : 0.065,
+        450
+      );
       this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
       if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
         clipHolder.lastPlayRetryPerfMs = nowPerf;

@@ -1063,6 +1063,9 @@ export const App: React.FC = () => {
       isSpaceKey || (!e.metaKey && !e.ctrlKey && !e.altKey && lower === 'k');
 
     if (isPlayToggleKey) {
+      if ((stateRef.current.workspaceLayout ?? 'multitrack') === 'intro' || introEditorOpen) {
+        return;
+      }
       e.preventDefault();
       if (e.repeat) return;
       if (isSpaceKey) {

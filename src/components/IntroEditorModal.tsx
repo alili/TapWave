@@ -235,6 +235,32 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     };
   }, [open, isPlaying, totalIntroSec, timelineSpanSec]);
 
+  const togglePlayRef = useRef<() => void>(() => {});
+
+  // Ctrl/Cmd + Wheel zoom & Spacebar play/pause inside Intro View
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        if ((target as HTMLInputElement).type !== 'range' && (target as HTMLInputElement).type !== 'checkbox') {
+          return;
+        }
+      }
+      if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) {
+          if (target && (tag === 'BUTTON' || tag === 'INPUT')) target.blur();
+          togglePlayRef.current();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [open]);
+
   // Ctrl/Cmd + Wheel zoom inside Intro Editor
   useEffect(() => {
     const vp = scrollViewportRef.current;
@@ -425,6 +451,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     audioPreview.startFromUserGesture(state, timeline, startAt, onNotify);
     setIsPlaying(true);
   };
+  togglePlayRef.current = togglePlay;
 
   const resetSequentialHighlights = () => {
     onUpdateState((prev) => ({
@@ -718,7 +745,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                     </div>
                   </div>
                   <span className="text-[10px] text-zinc-500 truncate">
-                    {tr.roleLabel} · {clipWindows.filter((w) => w.highlight.speakerId === tr.id).length} 条金句
+                    {tr.roleLabel} · 主讲 {clipWindows.filter((w) => w.highlight.speakerId === tr.id).length} / 共 {clipWindows.length} 段
                   </span>
                 </div>
               ))}
@@ -831,12 +858,11 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         style={{ backgroundColor: tr.color }}
                       />
 
-                      {clipWindows
-                        .filter((w) => w.highlight.speakerId === tr.id)
-                        .map(({ highlight: hl, startSec, endSec }) => {
+                      {clipWindows.map(({ highlight: hl, startSec, endSec }) => {
                           const leftPct = (startSec / timelineSpanSec) * 100;
                           const widthPct = Math.max(0.8, ((endSec - startSec) / timelineSpanSec) * 100);
                           const isSelected = selectedHlId === hl.id;
+                          const isPrimarySpeaker = hl.speakerId === tr.id;
                           const isClipMuted = isTrackMuted || Boolean(hl.mutedTrackIds?.includes(tr.id));
                           const bars = samplePeaksForSlice(
                             tr.peaks,
@@ -848,12 +874,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
                           return (
                             <div
-                              key={hl.id}
+                              key={`${tr.id}_${hl.id}`}
                               style={{
                                 left: `${leftPct}%`,
                                 width: `${widthPct}%`,
-                                borderColor: isSelected ? '#ffffff' : tr.color,
-                                backgroundColor: isClipMuted ? 'rgba(63,63,70,0.35)' : `${tr.color}22`,
+                                borderColor: isSelected ? '#ffffff' : isPrimarySpeaker ? tr.color : `${tr.color}88`,
+                                backgroundColor: isClipMuted
+                                  ? 'rgba(63,63,70,0.35)'
+                                  : isPrimarySpeaker
+                                  ? `${tr.color}28`
+                                  : `${tr.color}12`,
                               }}
                               onPointerDown={(e) => {
                                 if (toolMode === 'mute_range' || e.shiftKey) return;
@@ -915,7 +945,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
                               <div className="flex items-center justify-between gap-1 text-[10px] font-mono z-10 pl-1 pr-1">
                                 <span className="text-zinc-200 truncate pointer-events-none">
-                                  @{startSec.toFixed(1)}s · {hl.durationSec.toFixed(1)}s
+                                  {isPrimarySpeaker ? '★ ' : ''}@{startSec.toFixed(1)}s · {hl.durationSec.toFixed(1)}s
                                 </span>
                                 <button
                                   type="button"
