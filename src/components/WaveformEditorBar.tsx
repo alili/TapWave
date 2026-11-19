@@ -1128,8 +1128,8 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
 
 export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   state,
-  timeline,
-  playheadSec,
+  timeline: rawTimeline,
+  playheadSec: rawPlayheadSec,
   isPlaying,
   isMainStage = false,
   selectedTokenIds,
@@ -1142,8 +1142,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onTogglePlay,
   onStepPlayhead,
   onChangePlaybackRate,
-  onSeekToSec,
-  onWaveformCutAction,
+  onSeekToSec: onRawSeekToSec,
+  onWaveformCutAction: onRawWaveformCutAction,
   onToggleTrackSolo,
   onToggleTrackMute,
   onToggleBgmSolo,
@@ -1152,7 +1152,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onRenameSpeakerTrack,
   onSelectToken,
   onSelectRange,
-  focusRequest,
+  focusRequest: rawFocusRequest,
   onClearSelection,
   onRippleDeleteSelected,
   onMuteTrackSelected,
@@ -1176,6 +1176,71 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onOpenIntroEditor,
   onNotify,
 }) => {
+  // 主音轨视图严格从正片 00:00 开始（片头高光/口播/片头BGM已分离至独立片头编辑器）
+  const bodyOffsetSec = Math.max(0, rawTimeline.prefixDurationSec || 0);
+  const timeline = useMemo(() => {
+    if (bodyOffsetSec <= 0.001) return rawTimeline;
+    const shift = (t: number) => Math.max(0, Number((t - bodyOffsetSec).toFixed(3)));
+    const shiftedBlockStarts: Record<string, number> = {};
+    for (const [k, v] of Object.entries(rawTimeline.blockEditedStartsSec)) {
+      shiftedBlockStarts[k] = shift(v);
+    }
+    return {
+      ...rawTimeline,
+      prefixDurationSec: 0,
+      coldOpenDurationSec: 0,
+      introBgmDurationSec: 0,
+      introVoiceoverDurationSec: 0,
+      introVoiceoverStartSec: 0,
+      totalEditedDurationSec: rawTimeline.editedBodyDurationSec,
+      blockEditedStartsSec: shiftedBlockStarts,
+      chapters: rawTimeline.chapters
+        .filter((c) => !c.isColdOpen)
+        .map((c) => {
+          const t = shift(c.timeSec);
+          return { ...c, timeSec: t, timeFormatted: formatMmSs(t) };
+        }),
+      mappedTokens: rawTimeline.mappedTokens.map((m) => ({
+        ...m,
+        editedStartSec: shift(m.editedStartSec),
+        editedEndSec: shift(m.editedEndSec),
+      })),
+      playbackSpans: rawTimeline.playbackSpans.map((s) => ({
+        ...s,
+        editedStartSec: shift(s.editedStartSec),
+        editedEndSec: shift(s.editedEndSec),
+      })),
+      overlapRegions: rawTimeline.overlapRegions.map((ov) => ({
+        ...ov,
+        editedStartSec: shift(ov.editedStartSec),
+        editedEndSec: shift(ov.editedEndSec),
+      })),
+    };
+  }, [rawTimeline, bodyOffsetSec]);
+
+  const playheadSec = Math.max(0, rawPlayheadSec - bodyOffsetSec);
+  const onSeekToSec = (bodySec: number) => onRawSeekToSec(bodyOffsetSec + Math.max(0, bodySec));
+  const onWaveformCutAction = (
+    startBodySec: number,
+    endBodySec: number,
+    op: 'ripple_all' | 'mute_lane' | 'bleep_range' | 'add_highlight' | 'cancel_ducking',
+    trackId?: string
+  ) => onRawWaveformCutAction(bodyOffsetSec + startBodySec, bodyOffsetSec + endBodySec, op, trackId);
+
+  const focusRequest = useMemo(() => {
+    if (!rawFocusRequest) return rawFocusRequest;
+    if (bodyOffsetSec <= 0.001) return rawFocusRequest;
+    return {
+      ...rawFocusRequest,
+      startSec: Math.max(0, rawFocusRequest.startSec - bodyOffsetSec),
+      endSec: Math.max(0, rawFocusRequest.endSec - bodyOffsetSec),
+      anchorSec:
+        typeof rawFocusRequest.anchorSec === 'number'
+          ? Math.max(0, rawFocusRequest.anchorSec - bodyOffsetSec)
+          : undefined,
+    };
+  }, [rawFocusRequest, bodyOffsetSec]);
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const baseCacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -5487,9 +5552,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             >
               <Sparkles className="w-3 h-3 text-purple-300" />
               <span>片头编辑器</span>
-              {timeline.prefixDurationSec > 0 && (
+              {rawTimeline.prefixDurationSec > 0 && (
                 <span className="px-1 py-0.2 rounded bg-purple-500/30 text-[10px] font-mono text-purple-200">
-                  {timeline.prefixDurationSec.toFixed(1)}s
+                  {rawTimeline.prefixDurationSec.toFixed(1)}s
                 </span>
               )}
             </button>
