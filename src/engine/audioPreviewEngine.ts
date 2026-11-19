@@ -1700,63 +1700,93 @@ class AudioPreviewEngine {
       const voEndSec = voStartSec + timeline.introVoiceoverDurationSec;
 
       if (currentPlayheadSec < prefixSec - 0.002) {
-        // Prefix region: Cold Open highlights & Fixed Intro Voiceover hardware clock sync
-        const preMapped = resolveEditedPlayheadToSource(state, timeline, currentPlayheadSec);
+        if (this.ctx?.state === 'suspended' && nowPerf - this.playStartPerfMs < 350) {
+          nextPlayheadSec = currentPlayheadSec;
+        } else {
+          // Prefix region: lock playhead tightly to sample-accurate Web Audio hardware clock when available
+          const preMapped = resolveEditedPlayheadToSource(state, timeline, currentPlayheadSec);
+          const webAudioVo = this.activeWebAudioAux.get('intro_vo');
+          const webAudioBgm = this.activeWebAudioAux.get('intro_bgm');
+          const ctxNow = this.ctx && this.ctx.state === 'running' ? this.ctx.currentTime : null;
 
-        if (
-          state.introVoiceover?.enabled &&
-          timeline.introVoiceoverDurationSec > 0 &&
-          currentPlayheadSec >= voStartSec &&
-          currentPlayheadSec < voEndSec
-        ) {
-          // If Web Audio hardware buffer drives intro VO, keep monotonic dt clock (zero jitter)
-          if (!this.activeWebAudioAux.has('intro_vo')) {
-            const voHolder = this.introVoiceoverTimelineEl;
-            if (voHolder && !voHolder.failedFatal) {
-              const voEl = voHolder.audio;
-              if (!voEl.paused && !voEl.ended && !voEl.seeking && voEl.readyState >= 2) {
-                const hwEditedSec = voStartSec + voEl.currentTime;
-                if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
-                  const drift = hwEditedSec - nextPlayheadSec;
-                  if (Math.abs(drift) > 0.08 && Math.abs(drift) < 0.45) {
-                    nextPlayheadSec = Math.max(
-                      currentPlayheadSec + stepSec * 0.5,
-                      nextPlayheadSec + drift * 0.2
-                    );
+          if (
+            state.introVoiceover?.enabled &&
+            timeline.introVoiceoverDurationSec > 0 &&
+            currentPlayheadSec >= voStartSec &&
+            currentPlayheadSec < voEndSec
+          ) {
+            if (webAudioVo && ctxNow !== null) {
+              const hwEditedSec =
+                voStartSec +
+                webAudioVo.startOffsetSec +
+                Math.max(0, ctxNow - webAudioVo.startedCtxTime) * webAudioVo.playbackRate;
+              if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
+                const drift = hwEditedSec - nextPlayheadSec;
+                if (Math.abs(drift) > 0.01 && Math.abs(drift) < 0.8) {
+                  nextPlayheadSec = Math.max(currentPlayheadSec, nextPlayheadSec + drift * 0.65);
+                }
+              }
+            } else {
+              const voHolder = this.introVoiceoverTimelineEl;
+              if (voHolder && !voHolder.failedFatal) {
+                const voEl = voHolder.audio;
+                if (!voEl.paused && !voEl.ended && !voEl.seeking && voEl.readyState >= 2) {
+                  const hwEditedSec = voStartSec + voEl.currentTime;
+                  if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
+                    const drift = hwEditedSec - nextPlayheadSec;
+                    if (Math.abs(drift) > 0.025 && Math.abs(drift) < 1.0) {
+                      nextPlayheadSec = Math.max(
+                        currentPlayheadSec + stepSec * 0.25,
+                        nextPlayheadSec + drift * 0.45
+                      );
+                    }
                   }
                 }
               }
             }
-          }
-        } else if (
-          preMapped.inColdOpen &&
-          !preMapped.inIntroOrGapSilence &&
-          preMapped.activeSpeakerId &&
-          preMapped.activeHighlight &&
-          preMapped.sourceSec !== null
-        ) {
-          const clipHolder =
-            this.coldOpenClipElements.get(`${preMapped.activeHighlight.id}::${preMapped.activeSpeakerId}`) ??
-            this.trackElements.get(preMapped.activeSpeakerId);
-          const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
-          if (clipHolder && !clipHolder.failedFatal && clipTrack) {
-            const el = clipHolder.audio;
-            if (!el.paused && !el.ended && !el.seeking && el.readyState >= 2) {
-              const offsetSec =
-                state.recordingMode === 'same_room_sync'
-                  ? 0
-                  : (clipTrack.syncOffsetMs || 0) / 1000;
-              const actualSourceSec = el.currentTime + offsetSec;
-              const hlStartSrc = preMapped.activeHighlight.sourceStartMs / 1000;
-              const hlEndSrc = preMapped.activeHighlight.sourceEndMs / 1000;
-              if (actualSourceSec >= hlStartSrc - 0.02 && actualSourceSec <= hlEndSrc + 0.02) {
-                const hwEditedSec = currentPlayheadSec + (actualSourceSec - preMapped.sourceSec);
-                const drift = hwEditedSec - nextPlayheadSec;
-                if (Math.abs(drift) > 0.08 && Math.abs(drift) < 0.45) {
-                  nextPlayheadSec = Math.max(
-                    currentPlayheadSec + stepSec * 0.5,
-                    nextPlayheadSec + drift * 0.2
-                  );
+          } else if (webAudioBgm && ctxNow !== null && !webAudioBgm.loop) {
+            // Non-looping safety
+          } else if (webAudioBgm && ctxNow !== null) {
+            const bufDur = Math.max(0.05, webAudioBgm.source.buffer?.duration ?? 9999);
+            const hwBgmSec =
+              webAudioBgm.startOffsetSec +
+              Math.max(0, ctxNow - webAudioBgm.startedCtxTime) * webAudioBgm.playbackRate;
+            if (hwBgmSec < bufDur - 0.05) {
+              const drift = hwBgmSec - nextPlayheadSec;
+              if (Math.abs(drift) > 0.01 && Math.abs(drift) < 0.8) {
+                nextPlayheadSec = Math.max(currentPlayheadSec, nextPlayheadSec + drift * 0.65);
+              }
+            }
+          } else if (
+            preMapped.inColdOpen &&
+            !preMapped.inIntroOrGapSilence &&
+            preMapped.activeSpeakerId &&
+            preMapped.activeHighlight &&
+            preMapped.sourceSec !== null
+          ) {
+            const clipHolder =
+              this.coldOpenClipElements.get(`${preMapped.activeHighlight.id}::${preMapped.activeSpeakerId}`) ??
+              this.trackElements.get(preMapped.activeSpeakerId);
+            const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
+            if (clipHolder && !clipHolder.failedFatal && clipTrack) {
+              const el = clipHolder.audio;
+              if (!el.paused && !el.ended && !el.seeking && el.readyState >= 2) {
+                const offsetSec =
+                  state.recordingMode === 'same_room_sync'
+                    ? 0
+                    : (clipTrack.syncOffsetMs || 0) / 1000;
+                const actualSourceSec = el.currentTime + offsetSec;
+                const hlStartSrc = preMapped.activeHighlight.sourceStartMs / 1000;
+                const hlEndSrc = preMapped.activeHighlight.sourceEndMs / 1000;
+                if (actualSourceSec >= hlStartSrc - 0.02 && actualSourceSec <= hlEndSrc + 0.02) {
+                  const hwEditedSec = currentPlayheadSec + (actualSourceSec - preMapped.sourceSec);
+                  const drift = hwEditedSec - nextPlayheadSec;
+                  if (Math.abs(drift) > 0.025 && Math.abs(drift) < 1.2) {
+                    nextPlayheadSec = Math.max(
+                      currentPlayheadSec + stepSec * 0.25,
+                      nextPlayheadSec + drift * 0.45
+                    );
+                  }
                 }
               }
             }
@@ -1960,6 +1990,10 @@ class AudioPreviewEngine {
     const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
 
     // Dedicated Cold Open multi-track highlight playback (all tracks stay phase-locked at highlight source range)
+    const coldClipWindows =
+      state.coldOpenEnabled && state.highlights.length > 0
+        ? resolveColdOpenClipWindows(state.highlights, resolveEffectiveHighlightGapSec(state))
+        : [];
     const activeColdHighlight =
       mapped.inColdOpen && !mapped.inIntroOrGapSilence ? mapped.activeHighlight : undefined;
     for (const [clipElemId, clipHolder] of this.coldOpenClipElements.entries()) {
@@ -1970,6 +2004,15 @@ class AudioPreviewEngine {
         this.applySlewedVolume(clipHolder, 0, true);
         if (!clipEl.paused) {
           clipEl.pause();
+        }
+        // Pre-seek upcoming highlight within 0.6s so entry starts instantaneously on cue
+        const upcomingWin = coldClipWindows.find((w) => w.highlight.id === hlId);
+        if (upcomingWin && upcomingWin.startSec > playheadSec && upcomingWin.startSec - playheadSec <= 0.6) {
+          const upTr = state.tracks.find((t) => t.id === trackId);
+          const upOffset =
+            upTr && state.recordingMode !== 'same_room_sync' ? (upTr.syncOffsetMs || 0) / 1000 : 0;
+          const upStartSec = Math.max(0, upcomingWin.highlight.sourceStartMs / 1000 - upOffset);
+          this.seekHolderOnSpliceOnly(clipHolder, upStartSec, false, 0.05, 500);
         }
         continue;
       }
@@ -2022,8 +2065,8 @@ class AudioPreviewEngine {
         clipHolder,
         targetClipSec,
         crossedCutOrScrub,
-        isPrimaryHlTrack ? 0.9 : 0.45,
-        isPrimaryHlTrack ? 1200 : 1500
+        isPrimaryHlTrack ? 0.18 : 0.25,
+        isPrimaryHlTrack ? 900 : 1200
       );
       this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
       if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
