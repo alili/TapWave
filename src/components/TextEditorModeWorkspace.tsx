@@ -662,6 +662,14 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  const resolveHighlightEditedSec = (hl: HighlightClip): number => {
+    const hlSrcSec = hl.sourceStartMs / 1000;
+    const span = timeline.playbackSpans.find(
+      (s) => hlSrcSec >= s.sourceStartSec - 0.05 && hlSrcSec <= s.sourceEndSec + 0.05
+    );
+    return span ? span.editedStartSec + Math.max(0, hlSrcSec - span.sourceStartSec) : hlSrcSec;
+  };
+
   // 点击文字跳转下方播放台对应位置
   const handleWordClick = (
     e: React.MouseEvent,
@@ -886,7 +894,7 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                         <div className="flex items-center justify-between gap-1.5 text-[11px]">
                           <div
                             onClick={() => {
-                              handleJumpAndPlay(hl.sourceStartMs / 1000);
+                              handleJumpAndPlay(resolveHighlightEditedSec(hl));
                             }}
                             title="点击定位并试听该条金句"
                             className="flex items-center gap-1.5 min-w-0 cursor-pointer flex-1"
@@ -910,7 +918,7 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleJumpAndPlay(hl.sourceStartMs / 1000);
+                                handleJumpAndPlay(resolveHighlightEditedSec(hl));
                               }}
                               title="立即试听播放该条金句"
                               className="p-1 rounded text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/20 transition cursor-pointer"
@@ -1000,14 +1008,7 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
                             if (onSeekToHighlight) {
                               onSeekToHighlight(hl);
                             } else {
-                              const hlSrcSec = hl.sourceStartMs / 1000;
-                              const span = timeline.playbackSpans.find(
-                                (s) => hlSrcSec >= s.sourceStartSec - 0.05 && hlSrcSec <= s.sourceEndSec + 0.05
-                              );
-                              const targetSec = span
-                                ? span.editedStartSec + Math.max(0, hlSrcSec - span.sourceStartSec)
-                                : hlSrcSec;
-                              onSeekToSec(targetSec);
+                              onSeekToSec(resolveHighlightEditedSec(hl));
                             }
                           }}
                           className="text-xs text-zinc-200 leading-snug line-clamp-2 select-text cursor-pointer hover:text-purple-200"
