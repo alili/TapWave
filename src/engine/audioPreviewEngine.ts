@@ -897,6 +897,143 @@ class AudioPreviewEngine {
 
   private coldOpenClipElements = new Map<string, ManagedAudioHolder>();
   private lastAutoSoloEvalPerfMs = 0;
+  private decodedAuxBuffers = new Map<string, AudioBuffer>();
+  private decodingAuxUrls = new Set<string>();
+  private activeWebAudioAux = new Map<
+    'intro_bgm' | 'outro_bgm' | 'intro_vo',
+    {
+      url: string;
+      source: AudioBufferSourceNode;
+      gainNode: GainNode;
+      startedCtxTime: number;
+      startOffsetSec: number;
+      playbackRate: number;
+      loop: boolean;
+    }
+  >();
+
+  private preloadDecodedAuxBuffer(rawUrl: string | undefined, filePath: string | undefined): void {
+    const resolvedUrl = normalizePlayableAudioUrl(rawUrl, filePath, false);
+    if (!resolvedUrl) return;
+    if (this.decodedAuxBuffers.has(resolvedUrl) || this.decodingAuxUrls.has(resolvedUrl)) return;
+    const ctx = this.ensureContext();
+    if (!ctx || typeof fetch === 'undefined') return;
+    this.decodingAuxUrls.add(resolvedUrl);
+    void fetch(resolvedUrl)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.arrayBuffer();
+      })
+      .then((arr) => ctx.decodeAudioData(arr))
+      .then((audioBuf) => {
+        this.decodedAuxBuffers.set(resolvedUrl, audioBuf);
+      })
+      .catch(() => {
+        // Fallback smoothly to HTMLAudioElement if decode fails
+      })
+      .finally(() => {
+        this.decodingAuxUrls.delete(resolvedUrl);
+      });
+  }
+
+  private stopWebAudioAux(slot: 'intro_bgm' | 'outro_bgm' | 'intro_vo'): void {
+    const active = this.activeWebAudioAux.get(slot);
+    if (!active) return;
+    this.activeWebAudioAux.delete(slot);
+    try {
+      active.source.stop();
+    } catch {
+      // Ignore already stopped source
+    }
+    try {
+      active.source.disconnect();
+      active.gainNode.disconnect();
+    } catch {
+      // Ignore disconnect errors
+    }
+  }
+
+  private syncWebAudioAux(
+    slot: 'intro_bgm' | 'outro_bgm' | 'intro_vo',
+    rawUrl: string | undefined,
+    filePath: string | undefined,
+    activeWindow: boolean,
+    offsetSec: number,
+    playbackRate: number,
+    targetGain: number,
+    loop: boolean,
+    forceRestart: boolean
+  ): boolean {
+    if (!activeWindow) {
+      this.stopWebAudioAux(slot);
+      return false;
+    }
+    const resolvedUrl = normalizePlayableAudioUrl(rawUrl, filePath, false);
+    if (!resolvedUrl) {
+      this.stopWebAudioAux(slot);
+      return false;
+    }
+    const buffer = this.decodedAuxBuffers.get(resolvedUrl);
+    if (!buffer) {
+      this.preloadDecodedAuxBuffer(rawUrl, filePath);
+      return false;
+    }
+    const ctx = this.ensureContext();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+
+    const dur = Math.max(0.05, buffer.duration);
+    const desiredOffset = loop ? ((offsetSec % dur) + dur) % dur : Math.max(0, offsetSec);
+    if (!loop && desiredOffset >= dur - 0.02) {
+      this.stopWebAudioAux(slot);
+      return true;
+    }
+
+    const now = ctx.currentTime;
+    const existing = this.activeWebAudioAux.get(slot);
+    if (existing && existing.url === resolvedUrl && !forceRestart) {
+      const elapsed = Math.max(0, now - existing.startedCtxTime) * existing.playbackRate;
+      const curPos = loop
+        ? (existing.startOffsetSec + elapsed) % dur
+        : existing.startOffsetSec + elapsed;
+      const drift = Math.abs(curPos - desiredOffset);
+      const wrapDrift = loop ? Math.min(drift, dur - drift) : drift;
+      if (wrapDrift <= 1.2) {
+        if (Math.abs(existing.playbackRate - playbackRate) > 0.005) {
+          existing.startOffsetSec = curPos;
+          existing.startedCtxTime = now;
+          existing.playbackRate = playbackRate;
+          existing.source.playbackRate.setTargetAtTime(playbackRate, now, 0.02);
+        }
+        existing.gainNode.gain.setTargetAtTime(Math.max(0, Math.min(1, targetGain)), now, 0.045);
+        return true;
+      }
+    }
+
+    this.stopWebAudioAux(slot);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = loop;
+    source.playbackRate.value = playbackRate;
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(Math.max(0, Math.min(1, targetGain)), now);
+    source.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    source.start(0, desiredOffset);
+
+    this.activeWebAudioAux.set(slot, {
+      url: resolvedUrl,
+      source,
+      gainNode,
+      startedCtxTime: now,
+      startOffsetSec: desiredOffset,
+      playbackRate,
+      loop,
+    });
+    return true;
+  }
 
   private ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -1211,11 +1348,12 @@ class AudioPreviewEngine {
       }
     }
 
-    // Pre-warm fixed intro voiceover element so entering intro voiceover starts with 0ms lag
+    // Pre-warm fixed intro voiceover element & Web Audio buffer so entering intro voiceover starts with 0ms lag
     if (
       state.introVoiceover?.enabled &&
       (state.introVoiceover.audioUrl || state.introVoiceover.filePath)
     ) {
+      this.preloadDecodedAuxBuffer(state.introVoiceover.audioUrl, state.introVoiceover.filePath);
       const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}|`;
       if (
         !this.introVoiceoverTimelineEl ||
@@ -1233,7 +1371,7 @@ class AudioPreviewEngine {
       }
     }
 
-    // Pre-warm Intro & Outro BGM elements so entering BGM beds starts immediately
+    // Pre-warm Intro & Outro BGM elements & Web Audio buffers so BGM plays with zero stutter
     const playbackRate = Math.max(0.5, Math.min(3.5, state.playbackRate || 1.0));
     for (const [slot, asset, label] of [
       ['intro', state.introBgm, '片头 BGM'],
@@ -1241,6 +1379,7 @@ class AudioPreviewEngine {
     ] as const) {
       const effectivePath = asset?.filePath || (slot === 'intro' ? state.bgmWavPath : undefined);
       if (asset?.enabled && (asset.audioUrl || effectivePath)) {
+        this.preloadDecodedAuxBuffer(asset.audioUrl, effectivePath);
         const bgmKey = `${asset.audioUrl ?? ''}|${effectivePath ?? ''}|`;
         const existing = this.bgmTimelineElements[slot];
         if (!existing || existing.sourceKey !== bgmKey || existing.failedFatal) {
@@ -1272,6 +1411,7 @@ class AudioPreviewEngine {
     }
     this.reportedErrorKeys.clear();
     this.lastKnownPlayheadSec = playheadSec;
+    this.ensureContext();
     this.preloadTracks(state);
     this.forceSeekPending = true;
     this.playStartPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -1279,7 +1419,12 @@ class AudioPreviewEngine {
     this.lastHeldSpeakerId = null;
     this.speakerHoldUntilPerfMs.clear();
 
-    // Seek BEFORE play() synchronously inside user gesture so AVPlayer unlocks every stem immediately
+    const prefixTotalSec =
+      timeline.prefixDurationSec ??
+      timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec;
+    const inIntroOnlyStart = playheadSec < Math.max(0, prefixTotalSec - 0.5);
+
+    // Seek BEFORE play() synchronously inside user gesture so AVPlayer unlocks needed stems
     const mapped = resolveEditedPlayheadToSource(state, timeline, playheadSec);
     for (const tr of selectPlayableTracks(state)) {
       const holder = this.trackElements.get(tr.id);
@@ -1290,7 +1435,7 @@ class AudioPreviewEngine {
           ? Math.max(0, mapped.sourceSec - effOffset)
           : 0;
       this.seekHolderOnSpliceOnly(holder, targetSec, true);
-      if (holder.audio.paused || holder.audio.ended) {
+      if (!inIntroOnlyStart && (holder.audio.paused || holder.audio.ended)) {
         holder.audio.volume = 0;
         holder.lastPlayRetryPerfMs = this.playStartPerfMs;
         void holder.audio.play().catch(() => {});
@@ -1314,17 +1459,24 @@ class AudioPreviewEngine {
           : 0;
       this.seekHolderOnSpliceOnly(clipHolder, clipTarget, true);
       const clipEl = clipHolder.audio;
-      if (clipEl.paused || clipEl.ended) {
+      if (isCurrentHl && (clipEl.paused || clipEl.ended)) {
         clipEl.volume = 0;
-        void clipEl.play().then(() => {
-          if (!isCurrentHl) {
-            clipEl.pause();
-          }
-        }).catch(() => {});
+        clipHolder.lastPlayRetryPerfMs = this.playStartPerfMs;
+        void clipEl.play().catch(() => {});
       }
     }
 
-    if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.failedFatal) {
+    const voResolvedUrl = normalizePlayableAudioUrl(
+      state.introVoiceover?.audioUrl,
+      state.introVoiceover?.filePath,
+      false
+    );
+    const voHasWebAudio = Boolean(voResolvedUrl && this.decodedAuxBuffers.has(voResolvedUrl));
+    if (
+      !voHasWebAudio &&
+      this.introVoiceoverTimelineEl &&
+      !this.introVoiceoverTimelineEl.failedFatal
+    ) {
       const voStart = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
       const voEnd = voStart + timeline.introVoiceoverDurationSec;
       const inVoNow =
@@ -1335,14 +1487,10 @@ class AudioPreviewEngine {
       const voTarget = inVoNow ? Math.max(0, playheadSec - voStart) : 0;
       const voEl = this.introVoiceoverTimelineEl.audio;
       this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, voTarget, true);
-      if (voEl.paused || voEl.ended) {
+      if (inVoNow && (voEl.paused || voEl.ended)) {
         voEl.volume = 0;
         this.introVoiceoverTimelineEl.lastPlayRetryPerfMs = this.playStartPerfMs;
-        void voEl.play().then(() => {
-          if (!this.wasPlaying || !inVoNow) {
-            voEl.pause();
-          }
-        }).catch(() => {});
+        void voEl.play().catch(() => {});
       }
     }
 
@@ -1378,8 +1526,12 @@ class AudioPreviewEngine {
     );
 
     for (const slot of ['intro', 'outro'] as const) {
+      const asset = slot === 'intro' ? state.introBgm : state.outroBgm;
+      const effectivePath = asset?.filePath || (slot === 'intro' ? state.bgmWavPath : undefined);
+      const resolvedBgmUrl = normalizePlayableAudioUrl(asset?.audioUrl, effectivePath, false);
+      const hasWebAudio = Boolean(resolvedBgmUrl && this.decodedAuxBuffers.has(resolvedBgmUrl));
       const bgmHolder = this.bgmTimelineElements[slot];
-      if (bgmHolder && !bgmHolder.failedFatal) {
+      if (!hasWebAudio && bgmHolder && !bgmHolder.failedFatal) {
         const bgmEl = bgmHolder.audio;
         applyPitchPreservingPlaybackRate(bgmEl, playbackRate);
         const inWindowNow =
@@ -1399,14 +1551,10 @@ class AudioPreviewEngine {
             ? rawOffsetSec
             : 0;
         this.seekHolderOnSpliceOnly(bgmHolder, bgmTarget, true);
-        if (bgmEl.paused || bgmEl.ended) {
+        if (inWindowNow && (bgmEl.paused || bgmEl.ended)) {
           bgmEl.volume = 0;
           bgmHolder.lastPlayRetryPerfMs = this.playStartPerfMs;
-          void bgmEl.play().then(() => {
-            if (!this.wasPlaying || !inWindowNow) {
-              bgmEl.pause();
-            }
-          }).catch(() => {});
+          void bgmEl.play().catch(() => {});
         }
       }
     }
@@ -1515,6 +1663,9 @@ class AudioPreviewEngine {
     if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.audio.paused) {
       this.introVoiceoverTimelineEl.audio.pause();
     }
+    this.stopWebAudioAux('intro_bgm');
+    this.stopWebAudioAux('outro_bgm');
+    this.stopWebAudioAux('intro_vo');
     for (const slot of ['intro', 'outro'] as const) {
       const b = this.bgmTimelineElements[slot];
       if (b && !b.audio.paused) {
@@ -1558,28 +1709,21 @@ class AudioPreviewEngine {
           currentPlayheadSec >= voStartSec &&
           currentPlayheadSec < voEndSec
         ) {
-          const voHolder = this.introVoiceoverTimelineEl;
-          if (voHolder && !voHolder.failedFatal) {
-            const voEl = voHolder.audio;
-            if (
-              nowPerf - Math.max(this.playStartPerfMs, voHolder.lastSeekPerfMs) < 450 &&
-              (voEl.seeking || voEl.readyState < 2)
-            ) {
-              nextPlayheadSec = currentPlayheadSec;
-            } else if (!voEl.paused && !voEl.ended && !voEl.seeking && voEl.readyState >= 2) {
-              const hwEditedSec = voStartSec + voEl.currentTime;
-              if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
-                const drift = hwEditedSec - nextPlayheadSec;
-                if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.35) {
-                  nextPlayheadSec = Math.max(
-                    currentPlayheadSec + stepSec * 0.5,
-                    nextPlayheadSec + drift * 0.25
-                  );
-                } else if (Math.abs(drift) >= 0.35 && Math.abs(drift) < 2.0) {
-                  nextPlayheadSec =
-                    drift > 0
-                      ? Math.min(voEndSec, nextPlayheadSec + drift * 0.45)
-                      : currentPlayheadSec + stepSec * 0.25;
+          // If Web Audio hardware buffer drives intro VO, keep monotonic dt clock (zero jitter)
+          if (!this.activeWebAudioAux.has('intro_vo')) {
+            const voHolder = this.introVoiceoverTimelineEl;
+            if (voHolder && !voHolder.failedFatal) {
+              const voEl = voHolder.audio;
+              if (!voEl.paused && !voEl.ended && !voEl.seeking && voEl.readyState >= 2) {
+                const hwEditedSec = voStartSec + voEl.currentTime;
+                if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
+                  const drift = hwEditedSec - nextPlayheadSec;
+                  if (Math.abs(drift) > 0.08 && Math.abs(drift) < 0.45) {
+                    nextPlayheadSec = Math.max(
+                      currentPlayheadSec + stepSec * 0.5,
+                      nextPlayheadSec + drift * 0.2
+                    );
+                  }
                 }
               }
             }
@@ -1597,12 +1741,7 @@ class AudioPreviewEngine {
           const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
           if (clipHolder && !clipHolder.failedFatal && clipTrack) {
             const el = clipHolder.audio;
-            if (
-              nowPerf - Math.max(this.playStartPerfMs, clipHolder.lastSeekPerfMs) < 450 &&
-              (el.seeking || el.readyState < 2)
-            ) {
-              nextPlayheadSec = currentPlayheadSec;
-            } else if (!el.paused && !el.ended && !el.seeking && el.readyState >= 2) {
+            if (!el.paused && !el.ended && !el.seeking && el.readyState >= 2) {
               const offsetSec =
                 state.recordingMode === 'same_room_sync'
                   ? 0
@@ -1613,49 +1752,12 @@ class AudioPreviewEngine {
               if (actualSourceSec >= hlStartSrc - 0.02 && actualSourceSec <= hlEndSrc + 0.02) {
                 const hwEditedSec = currentPlayheadSec + (actualSourceSec - preMapped.sourceSec);
                 const drift = hwEditedSec - nextPlayheadSec;
-                if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.35) {
+                if (Math.abs(drift) > 0.08 && Math.abs(drift) < 0.45) {
                   nextPlayheadSec = Math.max(
                     currentPlayheadSec + stepSec * 0.5,
-                    nextPlayheadSec + drift * 0.25
+                    nextPlayheadSec + drift * 0.2
                   );
-                } else if (Math.abs(drift) >= 0.35 && Math.abs(drift) < 2.0) {
-                  nextPlayheadSec =
-                    drift > 0
-                      ? Math.min(timeline.coldOpenDurationSec, nextPlayheadSec + drift * 0.45)
-                      : currentPlayheadSec + stepSec * 0.25;
                 }
-              }
-            }
-          }
-        } else if (state.introBgm?.enabled) {
-          const bgmHolder = this.bgmTimelineElements.intro;
-          if (bgmHolder && !bgmHolder.failedFatal) {
-            const bgmEl = bgmHolder.audio;
-            if (
-              nowPerf - Math.max(this.playStartPerfMs, bgmHolder.lastSeekPerfMs) < 450 &&
-              (bgmEl.seeking || bgmEl.readyState < 2)
-            ) {
-              nextPlayheadSec = currentPlayheadSec;
-            } else if (
-              !bgmEl.paused &&
-              !bgmEl.ended &&
-              !bgmEl.seeking &&
-              bgmEl.readyState >= 2 &&
-              bgmEl.duration &&
-              Number.isFinite(bgmEl.duration) &&
-              currentPlayheadSec < bgmEl.duration - 0.1
-            ) {
-              const drift = bgmEl.currentTime - nextPlayheadSec;
-              if (Math.abs(drift) > 0.045 && Math.abs(drift) < 0.45) {
-                nextPlayheadSec = Math.max(
-                  currentPlayheadSec + stepSec * 0.5,
-                  nextPlayheadSec + drift * 0.25
-                );
-              } else if (Math.abs(drift) >= 0.45 && Math.abs(drift) < 2.0) {
-                nextPlayheadSec =
-                  drift > 0
-                    ? Math.min(prefixSec, nextPlayheadSec + drift * 0.45)
-                    : currentPlayheadSec + stepSec * 0.25;
               }
             }
           }
@@ -1920,8 +2022,8 @@ class AudioPreviewEngine {
         clipHolder,
         targetClipSec,
         crossedCutOrScrub,
-        isPrimaryHlTrack ? 0.9 : 0.08,
-        isPrimaryHlTrack ? 1000 : 600
+        isPrimaryHlTrack ? 0.9 : 0.45,
+        isPrimaryHlTrack ? 1200 : 1500
       );
       this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
       if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
@@ -2090,38 +2192,58 @@ class AudioPreviewEngine {
       playheadSec < voEndSec;
 
     if (inFixedIntroVo && state.introVoiceover) {
-      const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}|`;
-      if (!this.introVoiceoverTimelineEl || this.introVoiceoverTimelineEl.sourceKey !== voKey) {
-        this.disposeHolder(this.introVoiceoverTimelineEl);
-        this.introVoiceoverTimelineEl = this.createManagedHolder(
-          state.introVoiceover.audioUrl,
-          state.introVoiceover.filePath,
-          '片头固定口播',
-          playbackRate,
-          false
-        );
-      }
-      const voHolder = this.introVoiceoverTimelineEl;
-      if (voHolder && !voHolder.failedFatal) {
-        const voEl = voHolder.audio;
-        applyPitchPreservingPlaybackRate(voEl, playbackRate);
-        this.applySlewedVolume(voHolder, 0.94, !this.wasPlaying);
-        const offsetInVo = Math.max(0, playheadSec - voStartSec);
-        const voNeedInitialSeek =
-          this.forceSeekPending || !this.wasPlaying || Math.abs(voEl.currentTime - offsetInVo) > 0.15;
-        this.seekHolderOnSpliceOnly(voHolder, offsetInVo, voNeedInitialSeek && crossedCutOrScrub, 0.9, 1200);
-        if (voEl.paused && !voEl.ended && !voEl.seeking && nowPerf - voHolder.lastPlayRetryPerfMs > 300) {
-          voHolder.lastPlayRetryPerfMs = nowPerf;
-          void voEl.play().catch(() => {});
+      const offsetInVo = Math.max(0, playheadSec - voStartSec);
+      const handledByWebAudio = this.syncWebAudioAux(
+        'intro_vo',
+        state.introVoiceover.audioUrl,
+        state.introVoiceover.filePath,
+        true,
+        offsetInVo,
+        playbackRate,
+        0.94,
+        false,
+        this.forceSeekPending || !this.wasPlaying
+      );
+      if (handledByWebAudio) {
+        if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.audio.paused) {
+          this.introVoiceoverTimelineEl.audio.pause();
+        }
+      } else {
+        const voKey = `${state.introVoiceover.audioUrl ?? ''}|${state.introVoiceover.filePath ?? ''}|`;
+        if (!this.introVoiceoverTimelineEl || this.introVoiceoverTimelineEl.sourceKey !== voKey) {
+          this.disposeHolder(this.introVoiceoverTimelineEl);
+          this.introVoiceoverTimelineEl = this.createManagedHolder(
+            state.introVoiceover.audioUrl,
+            state.introVoiceover.filePath,
+            '片头固定口播',
+            playbackRate,
+            false
+          );
+        }
+        const voHolder = this.introVoiceoverTimelineEl;
+        if (voHolder && !voHolder.failedFatal) {
+          const voEl = voHolder.audio;
+          applyPitchPreservingPlaybackRate(voEl, playbackRate);
+          this.applySlewedVolume(voHolder, 0.94, !this.wasPlaying);
+          const voNeedInitialSeek =
+            this.forceSeekPending || !this.wasPlaying || Math.abs(voEl.currentTime - offsetInVo) > 0.15;
+          this.seekHolderOnSpliceOnly(voHolder, offsetInVo, voNeedInitialSeek && crossedCutOrScrub, 0.9, 1200);
+          if (voEl.paused && !voEl.ended && !voEl.seeking && nowPerf - voHolder.lastPlayRetryPerfMs > 300) {
+            voHolder.lastPlayRetryPerfMs = nowPerf;
+            void voEl.play().catch(() => {});
+          }
         }
       }
-    } else if (this.introVoiceoverTimelineEl) {
-      this.applySlewedVolume(this.introVoiceoverTimelineEl, 0, true);
-      if (!this.introVoiceoverTimelineEl.audio.paused) {
-        this.introVoiceoverTimelineEl.audio.pause();
-      }
-      if (playheadSec < voStartSec) {
-        this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, 0, false, 0.25, 450);
+    } else {
+      this.stopWebAudioAux('intro_vo');
+      if (this.introVoiceoverTimelineEl) {
+        this.applySlewedVolume(this.introVoiceoverTimelineEl, 0, true);
+        if (!this.introVoiceoverTimelineEl.audio.paused) {
+          this.introVoiceoverTimelineEl.audio.pause();
+        }
+        if (playheadSec < voStartSec) {
+          this.seekHolderOnSpliceOnly(this.introVoiceoverTimelineEl, 0, false, 0.25, 450);
+        }
       }
     }
 
@@ -2135,27 +2257,15 @@ class AudioPreviewEngine {
       offsetSecInBgm: number,
       fadeFactor: number
     ) => {
+      const webAudioSlot = slot === 'intro' ? 'intro_bgm' : 'outro_bgm';
       let holder = this.bgmTimelineElements[slot];
       if (!enabled || (!bgmUrl && !bgmPath) || !activeWindow) {
+        this.stopWebAudioAux(webAudioSlot);
         if (holder && !holder.audio.paused) {
           holder.audio.pause();
         }
         return;
       }
-      const bgmKey = `${bgmUrl ?? ''}|${bgmPath ?? ''}|`;
-      if (!holder || holder.sourceKey !== bgmKey) {
-        this.disposeHolder(holder);
-        holder = this.createManagedHolder(
-          bgmUrl,
-          bgmPath,
-          slot === 'intro' ? '片头 BGM' : '片尾 BGM',
-          playbackRate,
-          true
-        );
-        this.bgmTimelineElements[slot] = holder;
-      }
-      if (!holder || holder.failedFatal) return;
-      applyPitchPreservingPlaybackRate(holder.audio, playbackRate);
 
       // 片头金句整段闪避（不考虑段内的音量连续）：
       // 在片头金句发声段（从 2.0s 前奏垫音结束，直到金句全部播放完成），全程持续闪避，不因句内停顿或句间 gap 回弹！
@@ -2175,6 +2285,41 @@ class AudioPreviewEngine {
         0,
         Math.min(1, (voiceSpeaking ? duckedBedVol : baseBedVol) * fadeFactor)
       );
+
+      // Primary: glitch-free Web Audio AudioBufferSourceNode + GainNode
+      const handledByWebAudio = this.syncWebAudioAux(
+        webAudioSlot,
+        bgmUrl,
+        bgmPath,
+        true,
+        offsetSecInBgm,
+        playbackRate,
+        targetVol,
+        true,
+        this.forceSeekPending || !this.wasPlaying
+      );
+      if (handledByWebAudio) {
+        if (holder && !holder.audio.paused) {
+          holder.audio.pause();
+        }
+        return;
+      }
+
+      const bgmKey = `${bgmUrl ?? ''}|${bgmPath ?? ''}|`;
+      if (!holder || holder.sourceKey !== bgmKey) {
+        this.disposeHolder(holder);
+        holder = this.createManagedHolder(
+          bgmUrl,
+          bgmPath,
+          slot === 'intro' ? '片头 BGM' : '片尾 BGM',
+          playbackRate,
+          true
+        );
+        this.bgmTimelineElements[slot] = holder;
+      }
+      if (!holder || holder.failedFatal) return;
+      applyPitchPreservingPlaybackRate(holder.audio, playbackRate);
+
       this.applySlewedVolume(holder, targetVol, !this.wasPlaying);
       if (holder.audio.duration && Number.isFinite(holder.audio.duration)) {
         const modTime = offsetSecInBgm % Math.max(1, holder.audio.duration);
