@@ -122,6 +122,8 @@ export interface HighlightClip {
   sourceStartMs: number;
   sourceEndMs: number;
   durationSec: number;
+  /** 片头编辑器中自定义的起始时间（秒，相对于 00:00）；未设置时按默认顺序自动拼接 */
+  introStartSec?: number;
   selectionSource: 'ai_auto' | 'manual_pick' | 'waveform_pick';
   /** 在该金句区间被完全静音的音轨 ID 列表 */
   mutedTrackIds?: string[];

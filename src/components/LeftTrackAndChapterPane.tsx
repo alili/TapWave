@@ -62,6 +62,7 @@ interface LeftTrackAndChapterPaneProps {
   onNotify: (msg: string) => void;
   onCollapsePane?: () => void;
   onOpenHighlightEditModal?: (hl: HighlightClip) => void;
+  onOpenIntroEditor?: () => void;
 }
 
 export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = React.memo(({
@@ -83,6 +84,7 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
   onNotify,
   onCollapsePane,
   onOpenHighlightEditModal,
+  onOpenIntroEditor,
 }) => {
   const [openSections, setOpenSections] = useState<{
     files: boolean;
@@ -502,7 +504,17 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                     <Sparkles className="w-3.5 h-3.5 text-purple-400" />
                     <span>片头高光与金句编排</span>
                   </div>
-                  <label className="flex items-center gap-1.5 text-zinc-300 font-medium cursor-pointer hover:text-white transition">
+                  <div className="flex items-center gap-2">
+                    {onOpenIntroEditor && (
+                      <button
+                        type="button"
+                        onClick={onOpenIntroEditor}
+                        className="px-2 py-0.5 rounded bg-purple-600/20 hover:bg-purple-600/35 border border-purple-500/40 text-purple-200 text-[10px] font-semibold cursor-pointer"
+                      >
+                        片头编辑器
+                      </button>
+                    )}
+                    <label className="flex items-center gap-1.5 text-zinc-300 font-medium cursor-pointer hover:text-white transition">
                     <input
                       type="checkbox"
                       checked={state.coldOpenEnabled}
@@ -511,8 +523,9 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                       }
                       className="rounded accent-purple-500"
                     />
-                    <span>挂载至片头 (00:00)</span>
-                  </label>
+                      <span>挂载至片头 (00:00)</span>
+                    </label>
+                  </div>
                 </div>
 
                 {/* 片头时间线结构时序示意 */}

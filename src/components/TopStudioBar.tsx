@@ -82,6 +82,7 @@ interface TopStudioBarProps {
   onToggleRightPane?: () => void;
   onOpenShortcuts?: () => void;
   onOpenGlobalAuxLibrary?: (slot?: AuxAudioSlot) => void;
+  onOpenIntroEditor?: () => void;
   onOpenDepGuide?: () => void;
   onImportBgm?: (slot: AuxAudioSlot) => void;
   onToggleBgmEnabled?: (slot: AuxAudioSlot) => void;
@@ -129,6 +130,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
   onToggleRightPane,
   onOpenShortcuts,
   onOpenGlobalAuxLibrary,
+  onOpenIntroEditor,
   onOpenDepGuide,
   onImportBgm,
   onToggleBgmEnabled,
@@ -913,6 +915,18 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                 </div>
               )}
             </div>
+
+            {onOpenIntroEditor && (
+              <button
+                type="button"
+                onClick={onOpenIntroEditor}
+                title="打开独立片头多轨编辑器（移动/缩放金句、拖动口播位置、预览BGM避让）"
+                className="px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1.5 text-purple-200 bg-purple-600/15 hover:bg-purple-600/30 border border-purple-500/35"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                <span>片头编辑器</span>
+              </button>
+            )}
           </nav>
 
           <div className="h-3.5 w-px bg-zinc-800 mx-1 shrink-0" />

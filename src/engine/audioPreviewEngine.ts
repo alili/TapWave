@@ -13,6 +13,7 @@ import {
 import {
   MappedTokenTimeline,
   PlaybackSpan,
+  resolveColdOpenClipWindows,
   resolveEffectiveHighlightGapSec,
   TimelineComputation,
 } from './timelineEngine';
@@ -160,8 +161,10 @@ export function resolveEditedPlayheadToSource(
     state.highlights.length > 0 &&
     playheadSec < timeline.coldOpenDurationSec
   ) {
-    let cursor = 2.0; // 2.0s intro swell
-    if (playheadSec < cursor) {
+    const gapSec = resolveEffectiveHighlightGapSec(state);
+    const clipWindows = resolveColdOpenClipWindows(state.highlights, gapSec);
+    const firstClipStart = clipWindows.length > 0 ? Math.min(2.0, clipWindows[0].startSec) : 2.0;
+    if (playheadSec < firstClipStart) {
       return {
         inColdOpen: true,
         inIntroOrGapSilence: true,
@@ -178,12 +181,10 @@ export function resolveEditedPlayheadToSource(
         isBleeped: false,
       };
     }
-    const gapSec = resolveEffectiveHighlightGapSec(state);
-    for (let hlIdx = 0; hlIdx < state.highlights.length; hlIdx++) {
-      const hl = state.highlights[hlIdx];
-      const end = cursor + hl.durationSec;
-      if (playheadSec >= cursor && playheadSec <= end) {
-        const offsetInClip = playheadSec - cursor;
+    for (let hlIdx = 0; hlIdx < clipWindows.length; hlIdx++) {
+      const { highlight: hl, startSec: clipStart, endSec: end } = clipWindows[hlIdx];
+      if (playheadSec >= clipStart && playheadSec <= end) {
+        const offsetInClip = playheadSec - clipStart;
         const srcSec = hl.sourceStartMs / 1000 + offsetInClip;
         const hlStartSec = hl.sourceStartMs / 1000;
         const hlEndSec = hl.sourceEndMs / 1000;
@@ -242,8 +243,8 @@ export function resolveEditedPlayheadToSource(
           activeHighlight: hl,
         };
       }
-      cursor = end + gapSec;
-      if (playheadSec < cursor) {
+      const nextStart = hlIdx + 1 < clipWindows.length ? clipWindows[hlIdx + 1].startSec : end;
+      if (playheadSec > end && playheadSec < nextStart) {
         return {
           inColdOpen: true,
           inIntroOrGapSilence: true,

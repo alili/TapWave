@@ -61,6 +61,9 @@ import { audioPreview, resolveEditedPlayheadToSource } from './engine/audioPrevi
 const LazyShownotesModal = React.lazy(() =>
   import('./components/ShownotesModal').then((m) => ({ default: m.ShownotesModal }))
 );
+const LazyIntroEditorModal = React.lazy(() =>
+  import('./components/IntroEditorModal').then((m) => ({ default: m.IntroEditorModal }))
+);
 import {
   ensureNativeAudioServerPort,
   exportMasteredPodcastAudio,
@@ -256,6 +259,7 @@ export const App: React.FC = () => {
   const isRetranscribeAbortedRef = useRef(false);
   const [depGuideModalOpen, setDepGuideModalOpen] = useState(false);
   const [globalEditingHighlight, setGlobalEditingHighlight] = useState<HighlightClip | null>(null);
+  const [introEditorOpen, setIntroEditorOpen] = useState(false);
   const [shortcutsModalOpen, setShortcutsModalOpen] = useState(false);
   const [subtitleModalOpen, setSubtitleModalOpen] = useState(false);
   const [droppedSubtitle, setDroppedSubtitle] = useState<{
@@ -3910,6 +3914,7 @@ export const App: React.FC = () => {
                   onNotify={notify}
                   onCollapsePane={stableToggleLeftPane}
                   onOpenHighlightEditModal={setGlobalEditingHighlight}
+                  onOpenIntroEditor={() => setIntroEditorOpen(true)}
                 />
               </div>
               <div
@@ -4382,6 +4387,21 @@ export const App: React.FC = () => {
           onClose={() => setGlobalEditingHighlight(null)}
           onSave={handleSaveHighlight}
         />
+      )}
+
+      {introEditorOpen && (
+        <Suspense fallback={null}>
+          <LazyIntroEditorModal
+            open={introEditorOpen}
+            state={state}
+            timeline={timeline}
+            onClose={() => setIntroEditorOpen(false)}
+            onUpdateState={mutateProject}
+            onImportBgm={(slot) => void handleImportBgm(slot)}
+            onSeekMainPlayhead={stableSeekToSec}
+            onNotify={notify}
+          />
+        </Suspense>
       )}
     </div>
   );

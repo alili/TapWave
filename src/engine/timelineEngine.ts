@@ -94,12 +94,44 @@ export function resolveEffectiveHighlightGapSec(state: PodcastProjectState): num
   return Number((state.highlightGapSec ?? 0.65).toFixed(2));
 }
 
+export interface ColdOpenClipWindow {
+  highlight: HighlightClip;
+  startSec: number;
+  endSec: number;
+}
+
+export function resolveColdOpenClipWindows(
+  highlights: HighlightClip[],
+  gapSec: number
+): ColdOpenClipWindow[] {
+  const out: ColdOpenClipWindow[] = [];
+  let cursor = 2.0;
+  for (const hl of highlights) {
+    const startSec =
+      typeof hl.introStartSec === 'number' && Number.isFinite(hl.introStartSec)
+        ? Math.max(0, hl.introStartSec)
+        : cursor;
+    const endSec = startSec + Math.max(0.05, hl.durationSec);
+    out.push({ highlight: hl, startSec, endSec });
+    cursor = endSec + gapSec;
+  }
+  return out;
+}
+
 export function computeColdOpenDurationSec(state: PodcastProjectState): number {
   if (!state.coldOpenEnabled || state.highlights.length === 0) {
     return 0;
   }
-  const clipsSum = state.highlights.reduce((acc, c) => acc + c.durationSec, 0);
   const gapSec = resolveEffectiveHighlightGapSec(state);
+  const hasCustomPos = state.highlights.some(
+    (h) => typeof h.introStartSec === 'number' && Number.isFinite(h.introStartSec)
+  );
+  if (hasCustomPos) {
+    const windows = resolveColdOpenClipWindows(state.highlights, gapSec);
+    const maxEnd = windows.reduce((m, w) => Math.max(m, w.endSec), 2.0);
+    return Number((maxEnd + 2.0).toFixed(2));
+  }
+  const clipsSum = state.highlights.reduce((acc, c) => acc + c.durationSec, 0);
   const gaps = Math.max(0, state.highlights.length - 1) * gapSec;
   // 2.0s intro swell + clips + gaps + 2.0s outro tail
   return Number((2.0 + clipsSum + gaps + 2.0).toFixed(2));

@@ -42,6 +42,7 @@ import {
   PLAYHEAD_AUTO_SCROLL_ANCHOR,
   PlaybackSpan,
   projectSourceRangesMsToEditedRatios,
+  resolveColdOpenClipWindows,
   resolveEffectiveHighlightGapSec,
   snapRangeToWordGaps,
   TimelineComputation,
@@ -257,15 +258,13 @@ function resolveEditedSecToSourceRatio(
   if (trackDurationMs <= 0) return null;
 
   if (coldOpenEnabled && coldOpenDurationSec > 0 && tSec < coldOpenDurationSec) {
-    let cursor = 2.0;
-    for (const hl of highlights) {
-      const end = cursor + hl.durationSec;
-      if (tSec >= cursor && tSec <= end) {
-        const srcMs = hl.sourceStartMs + (tSec - cursor) * 1000 - trackOffsetMs;
+    const clipWindows = resolveColdOpenClipWindows(highlights, gapSec);
+    for (const { highlight: hl, startSec, endSec } of clipWindows) {
+      if (tSec >= startSec && tSec <= endSec) {
+        const srcMs = hl.sourceStartMs + (tSec - startSec) * 1000 - trackOffsetMs;
         if (srcMs < 0 || srcMs > trackDurationMs) return null;
         return Math.max(0, Math.min(0.999999, srcMs / trackDurationMs));
       }
-      cursor = end + gapSec;
     }
     return null;
   }
@@ -1817,15 +1816,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     // 1. Map Cold Open highlight clips onto their exact speaker tracks (2.0s intro + clips with dynamic gaps)
     if (state.coldOpenEnabled && state.highlights.length > 0 && timeline.coldOpenDurationSec > 0) {
       const gapSec = resolveEffectiveHighlightGapSec(state);
-      let cursorSec = 2.0;
-      state.highlights.forEach((hl) => {
-        const r1 = cursorSec / totalSec;
-        const r2 = Math.min(timeline.coldOpenDurationSec, cursorSec + hl.durationSec) / totalSec;
+      const clipWindows = resolveColdOpenClipWindows(state.highlights, gapSec);
+      clipWindows.forEach(({ highlight: hl, startSec, endSec }) => {
+        const r1 = Math.max(0, startSec / totalSec);
+        const r2 = Math.min(timeline.coldOpenDurationSec, endSec) / totalSec;
         if (r2 > r1) {
           if (!coldClipsBySpeaker[hl.speakerId]) coldClipsBySpeaker[hl.speakerId] = [];
           coldClipsBySpeaker[hl.speakerId].push([r1, r2]);
         }
-        cursorSec += hl.durationSec + gapSec;
       });
     }
 
