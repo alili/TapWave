@@ -4195,6 +4195,7 @@ export const App: React.FC = () => {
             onCancelDuckingSelected={stableCancelDuckingSelected}
             onSetWaveformSelectionMode={stableSetWaveformSelectionMode}
             onUpdateBgmAsset={handleUpdateBgmAsset}
+            onOpenIntroEditor={() => setIntroEditorOpen(true)}
             onNotify={notify}
           />
         )}

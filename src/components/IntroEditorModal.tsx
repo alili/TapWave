@@ -3,6 +3,7 @@ import {
   Film,
   Mic,
   Minus,
+  MousePointer,
   Music,
   Pause,
   Play,
@@ -11,9 +12,10 @@ import {
   Sparkles,
   Upload,
   Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
-import { AuxAudioSlot, HighlightClip, PodcastProjectState } from '../types/podcast';
+import { AuxAudioSlot, HighlightMuteInterval, PodcastProjectState } from '../types/podcast';
 import {
   computeColdOpenDurationSec,
   computeIntroBgmDurationSec,
@@ -34,6 +36,8 @@ interface IntroEditorModalProps {
   onSeekMainPlayhead: (sec: number) => void;
   onNotify?: (msg: string) => void;
 }
+
+type EditorToolMode = 'edit' | 'mute_range';
 
 type DragAction =
   | {
@@ -65,10 +69,45 @@ type DragAction =
       origStartOffsetSec: number;
     }
   | {
+      kind: 'mute_range';
+      trackId: string;
+      startSec: number;
+      endSec: number;
+    }
+  | {
       kind: 'scrub';
       rectLeft: number;
       rectWidth: number;
     };
+
+function samplePeaksForSlice(
+  peaks: number[] | undefined,
+  durationMs: number | undefined,
+  sliceStartMs: number,
+  sliceEndMs: number,
+  numBars: number
+): number[] {
+  const out = new Array<number>(numBars).fill(0.12);
+  if (!peaks || peaks.length === 0 || !durationMs || durationMs <= 0) {
+    for (let i = 0; i < numBars; i++) {
+      out[i] = 0.2 + 0.55 * Math.abs(Math.sin(i * 0.7 + sliceStartMs * 0.001));
+    }
+    return out;
+  }
+  const spanMs = Math.max(1, sliceEndMs - sliceStartMs);
+  for (let i = 0; i < numBars; i++) {
+    const t0 = sliceStartMs + (i / numBars) * spanMs;
+    const t1 = sliceStartMs + ((i + 1) / numBars) * spanMs;
+    const idx0 = Math.max(0, Math.min(peaks.length - 1, Math.floor((t0 / durationMs) * peaks.length)));
+    const idx1 = Math.max(idx0, Math.min(peaks.length - 1, Math.floor((t1 / durationMs) * peaks.length)));
+    let maxV = 0;
+    for (let k = idx0; k <= idx1; k++) {
+      if (peaks[k] > maxV) maxV = peaks[k];
+    }
+    out[i] = Math.max(0.08, Math.min(1, maxV * 1.4));
+  }
+  return out;
+}
 
 export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   open,
@@ -81,17 +120,29 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   onNotify,
 }) => {
   const [zoom, setZoom] = useState(1);
+  const [toolMode, setToolMode] = useState<EditorToolMode>('edit');
   const [isPlaying, setIsPlaying] = useState(false);
   const [playheadSec, setPlayheadSec] = useState(0);
   const [selectedHlId, setSelectedHlId] = useState<string | null>(null);
   const [dragAction, setDragAction] = useState<DragAction | null>(null);
 
+  const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const trackAreaRef = useRef<HTMLDivElement | null>(null);
+  const playheadLineRef = useRef<HTMLDivElement | null>(null);
+  const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
   const playheadRef = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
   const timelineRef = useRef(timeline);
   timelineRef.current = timeline;
+
+  const speakerTracks = useMemo(
+    () =>
+      state.tracks.some((t) => !t.isRef)
+        ? state.tracks.filter((t) => !t.isRef)
+        : state.tracks,
+    [state.tracks]
+  );
 
   const gapSec = resolveEffectiveHighlightGapSec(state);
   const clipWindows = useMemo(
@@ -130,12 +181,21 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     audioPreview.preloadTracks(stateRef.current);
   }, [open]);
 
+  // Ultra-smooth 60fps playhead loop updating DOM directly (0 React re-renders during playback!)
   useEffect(() => {
-    if (!open || !isPlaying) {
-      return;
-    }
+    if (!open || !isPlaying) return;
     let rafId = 0;
     let lastMs = performance.now();
+
+    const updatePlayheadDom = (sec: number) => {
+      const pct = Math.max(0, Math.min(100, (sec / timelineSpanSec) * 100));
+      if (playheadLineRef.current) {
+        playheadLineRef.current.style.left = `${pct}%`;
+      }
+      if (timeReadoutRef.current) {
+        timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
+      }
+    };
 
     const tick = (nowMs: number) => {
       const dt = Math.min(0.1, Math.max(0, (nowMs - lastMs) / 1000));
@@ -155,21 +215,38 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       );
       if (nextPlayheadSec >= stopBound) {
         playheadRef.current = 0;
+        updatePlayheadDom(0);
         setPlayheadSec(0);
         setIsPlaying(false);
         audioPreview.pauseMultiTrackPlayback();
         return;
       }
       playheadRef.current = nextPlayheadSec;
-      setPlayheadSec(Number(nextPlayheadSec.toFixed(3)));
+      updatePlayheadDom(nextPlayheadSec);
       rafId = window.requestAnimationFrame(tick);
     };
 
     rafId = window.requestAnimationFrame(tick);
     return () => {
       window.cancelAnimationFrame(rafId);
+      setPlayheadSec(Number(playheadRef.current.toFixed(3)));
     };
-  }, [open, isPlaying, totalIntroSec]);
+  }, [open, isPlaying, totalIntroSec, timelineSpanSec]);
+
+  // Ctrl/Cmd + Wheel zoom inside Intro Editor
+  useEffect(() => {
+    const vp = scrollViewportRef.current;
+    if (!open || !vp) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.008);
+        setZoom((z) => Math.max(1, Math.min(16, Number((z * factor).toFixed(2)))));
+      }
+    };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    return () => vp.removeEventListener('wheel', onWheel);
+  }, [open]);
 
   useEffect(() => {
     if (!dragAction) return;
@@ -179,12 +256,19 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       if (!container) return;
       const rect = container.getBoundingClientRect();
       const pxPerSec = Math.max(1, rect.width / timelineSpanSec);
+      const snap = (v: number) => Math.round(v * 20) / 20;
 
       if (dragAction.kind === 'scrub') {
         const ratio = Math.max(0, Math.min(1, (e.clientX - dragAction.rectLeft) / Math.max(1, dragAction.rectWidth)));
         const sec = Number((ratio * timelineSpanSec).toFixed(2));
         playheadRef.current = sec;
         setPlayheadSec(sec);
+        if (playheadLineRef.current) {
+          playheadLineRef.current.style.left = `${(sec / timelineSpanSec) * 100}%`;
+        }
+        if (timeReadoutRef.current) {
+          timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
+        }
         audioPreview.requestSeek();
         if (isPlaying) {
           audioPreview.syncMultiTrackPlayback(stateRef.current, timelineRef.current, sec, true);
@@ -192,8 +276,14 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
         return;
       }
 
+      if (dragAction.kind === 'mute_range') {
+        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+        const curSec = snap(ratio * timelineSpanSec);
+        setDragAction((prev) => (prev && prev.kind === 'mute_range' ? { ...prev, endSec: curSec } : prev));
+        return;
+      }
+
       const deltaSec = (e.clientX - dragAction.startClientX) / pxPerSec;
-      const snap = (v: number) => Math.round(v * 20) / 20; // 0.05s snap
 
       if (dragAction.kind === 'move_hl') {
         const nextStart = Math.max(0, snap(dragAction.origStartSec + deltaSec));
@@ -264,6 +354,44 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     };
 
     const handleUp = () => {
+      if (dragAction.kind === 'mute_range') {
+        const rStart = Math.min(dragAction.startSec, dragAction.endSec);
+        const rEnd = Math.max(dragAction.startSec, dragAction.endSec);
+        if (rEnd - rStart >= 0.08) {
+          let applied = 0;
+          onUpdateState((prev) => {
+            const g = resolveEffectiveHighlightGapSec(prev);
+            const wins = resolveColdOpenClipWindows(prev.highlights, g);
+            return {
+              ...prev,
+              highlights: prev.highlights.map((h) => {
+                const win = wins.find((w) => w.highlight.id === h.id);
+                if (!win) return h;
+                const ovStart = Math.max(win.startSec, rStart);
+                const ovEnd = Math.min(win.endSec, rEnd);
+                if (ovEnd - ovStart < 0.05) return h;
+                applied++;
+                const pmStartMs = Math.round(h.sourceStartMs + (ovStart - win.startSec) * 1000);
+                const pmEndMs = Math.round(h.sourceStartMs + (ovEnd - win.startSec) * 1000);
+                const nextPm: HighlightMuteInterval = {
+                  id: `pm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                  trackId: dragAction.trackId,
+                  sourceStartMs: pmStartMs,
+                  sourceEndMs: pmEndMs,
+                  label: '片头段落静音',
+                };
+                return {
+                  ...h,
+                  partiallyMutedRanges: [...(h.partiallyMutedRanges ?? []), nextPm],
+                };
+              }),
+            };
+          });
+          if (applied > 0) {
+            onNotify?.(`🔇 已对该音轨选定段落 (${rStart.toFixed(1)}s–${rEnd.toFixed(1)}s) 添加静音`);
+          }
+        }
+      }
       setDragAction(null);
     };
 
@@ -273,7 +401,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-  }, [dragAction, timelineSpanSec, isPlaying, onUpdateState]);
+  }, [dragAction, timelineSpanSec, isPlaying, onUpdateState, onNotify]);
 
   if (!open) return null;
 
@@ -304,26 +432,57 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     onNotify?.('✨ 已恢复金句片段默认顺序排布');
   };
 
+  const toggleTrackSolo = (trackId: string) => {
+    onUpdateState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, solo: !t.solo } : t)),
+    }));
+  };
+
+  const toggleTrackMute = (trackId: string) => {
+    onUpdateState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((t) => (t.id === trackId ? { ...t, muted: !t.muted } : t)),
+    }));
+  };
+
+  const removePartialMuteRange = (hlId: string, pmId: string) => {
+    onUpdateState((prev) => ({
+      ...prev,
+      highlights: prev.highlights.map((h) =>
+        h.id === hlId
+          ? { ...h, partiallyMutedRanges: (h.partiallyMutedRanges ?? []).filter((p) => p.id !== pmId) }
+          : h
+      ),
+    }));
+    onNotify?.('🔊 已恢复该音轨段落声音');
+  };
+
+  const toggleHighlightTrackMute = (hlId: string, trackId: string) => {
+    onUpdateState((prev) => ({
+      ...prev,
+      highlights: prev.highlights.map((h) => {
+        if (h.id !== hlId) return h;
+        const cur = h.mutedTrackIds ?? [];
+        const next = cur.includes(trackId) ? cur.filter((id) => id !== trackId) : [...cur, trackId];
+        return { ...h, mutedTrackIds: next };
+      }),
+    }));
+  };
+
+  const visibleSec = timelineSpanSec / zoom;
+  const tickStep = visibleSec <= 4 ? 0.5 : visibleSec <= 12 ? 1 : visibleSec <= 30 ? 2 : 5;
   const rulerTicks: number[] = [];
-  const tickStep = timelineSpanSec / zoom <= 15 ? 1 : timelineSpanSec / zoom <= 40 ? 2 : 5;
-  for (let t = 0; t <= timelineSpanSec; t += tickStep) {
-    rulerTicks.push(Number(t.toFixed(1)));
+  for (let t = 0; t <= timelineSpanSec + 0.001; t += tickStep) {
+    rulerTicks.push(Number(t.toFixed(2)));
   }
 
-  // Build BGM ducking envelope polygon points across [0..introBgmDurationSec]
   const duckPct = Math.max(10, Math.min(85, 100 - Math.abs(state.bgmDuckDb ?? -18) * 2.5));
   const isSecDucked = (t: number) => {
-    if (
-      state.coldOpenEnabled &&
-      clipWindows.some((w) => t >= w.startSec && t <= w.endSec)
-    ) {
+    if (state.coldOpenEnabled && clipWindows.some((w) => t >= w.startSec && t <= w.endSec)) {
       return true;
     }
-    if (
-      state.introVoiceover?.enabled &&
-      t >= introVoStartSec &&
-      t <= introVoStartSec + introVoDurationSec
-    ) {
+    if (state.introVoiceover?.enabled && t >= introVoStartSec && t <= introVoStartSec + introVoDurationSec) {
       return true;
     }
     return false;
@@ -333,9 +492,9 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]">
+      <div className="w-full max-w-6xl bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/70">
+        <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/75">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-purple-600/20 border border-purple-500/40 flex items-center justify-center">
               <Film className="w-4 h-4 text-purple-400" />
@@ -348,7 +507,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 </span>
               </h2>
               <p className="text-[11px] text-zinc-400 mt-0.5">
-                拖拽移动金句或口播位置 · 拖拽金句左右边缘缩放修剪时长 · 实时预览片头 BGM 闪避包络
+                复用多轨波形视图 · 拖动片段移动/缩放长度 · 按住 Shift 或切换「段落静音」框选静音某音轨片段
               </p>
             </div>
           </div>
@@ -370,13 +529,15 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
         </div>
 
         {/* Transport & Controls */}
-        <div className="px-5 py-2.5 border-b border-zinc-800/80 bg-zinc-900/95 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="px-5 py-2.5 border-b border-zinc-800/80 bg-zinc-900/95 flex flex-wrap items-center justify-between gap-2.5 text-xs">
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => {
                 playheadRef.current = 0;
                 setPlayheadSec(0);
+                if (playheadLineRef.current) playheadLineRef.current.style.left = '0%';
+                if (timeReadoutRef.current) timeReadoutRef.current.textContent = '00:00.0';
                 audioPreview.requestSeek();
               }}
               title="回到 00:00"
@@ -397,12 +558,43 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               <span>{isPlaying ? '暂停预览' : '试听片头'}</span>
             </button>
             <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 font-mono text-[11px] text-zinc-200 tabular-nums">
-              {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
+              <span ref={timeReadoutRef}>
+                {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
+              </span>
               <span className="text-zinc-500 mx-1">/</span>
               <span className="text-purple-300">{totalIntroSec.toFixed(1)}s</span>
             </span>
 
-            <label className="ml-2 flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
+            {/* Edit vs Range Mute Tool Switch */}
+            <div className="ml-2 inline-flex rounded-lg bg-zinc-950 border border-zinc-800 p-0.5">
+              <button
+                type="button"
+                onClick={() => setToolMode('edit')}
+                className={`px-2 py-1 rounded-md text-[11px] font-medium flex items-center gap-1 cursor-pointer transition ${
+                  toolMode === 'edit'
+                    ? 'bg-purple-600 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <MousePointer className="w-3 h-3" />
+                <span>移动/缩放</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setToolMode('mute_range')}
+                title="在任意音轨上横向框选一段区域将其静音（可单击已静音区恢复）"
+                className={`px-2 py-1 rounded-md text-[11px] font-medium flex items-center gap-1 cursor-pointer transition ${
+                  toolMode === 'mute_range'
+                    ? 'bg-rose-600 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <VolumeX className="w-3 h-3" />
+                <span>段落静音</span>
+              </button>
+            </div>
+
+            <label className="ml-1 flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={state.coldOpenEnabled}
@@ -415,7 +607,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
             </label>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <div className="flex items-center gap-1.5 text-[11px] text-zinc-300">
               <Volume2 className="w-3.5 h-3.5 text-blue-400" />
               <span>BGM 闪避:</span>
@@ -446,17 +638,17 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
             <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg px-1.5 py-0.5">
               <button
                 type="button"
-                onClick={() => setZoom((z) => Math.max(1, Number((z / 1.4).toFixed(2))))}
+                onClick={() => setZoom((z) => Math.max(1, Number((z / 1.5).toFixed(2))))}
                 className="p-1 text-zinc-400 hover:text-white cursor-pointer"
               >
                 <Minus className="w-3 h-3" />
               </button>
-              <span className="font-mono text-[11px] text-zinc-200 w-9 text-center">
+              <span className="font-mono text-[11px] text-zinc-200 w-10 text-center">
                 {zoom.toFixed(1)}x
               </span>
               <button
                 type="button"
-                onClick={() => setZoom((z) => Math.min(6, Number((z * 1.4).toFixed(2))))}
+                onClick={() => setZoom((z) => Math.min(16, Number((z * 1.5).toFixed(2))))}
                 className="p-1 text-zinc-400 hover:text-white cursor-pointer"
               >
                 <Plus className="w-3 h-3" />
@@ -465,30 +657,69 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
           </div>
         </div>
 
-        {/* Multi-Track Intro Timeline */}
-        <div className="flex-1 overflow-auto p-4 bg-zinc-950/60">
-          <div className="flex rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden min-h-[340px]">
+        {/* Multi-Track Intro Timeline (matching main track DAW structure) */}
+        <div className="flex-1 overflow-y-auto p-4 bg-zinc-950/60">
+          <div className="flex rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden">
             {/* Left Track Headers */}
-            <div className="w-44 shrink-0 border-r border-zinc-800 bg-zinc-900/70 flex flex-col">
+            <div className="w-48 shrink-0 border-r border-zinc-800 bg-zinc-900/75 flex flex-col">
               <div className="h-7 border-b border-zinc-800 px-3 flex items-center text-[10px] font-mono text-zinc-500">
-                时间标尺 (秒)
+                时间标尺 (⌘+滚轮缩放)
               </div>
 
-              <div className="h-28 border-b border-zinc-800/80 p-3 flex flex-col justify-between">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-purple-200">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                  <span>金句高光轨</span>
+              {speakerTracks.map((tr) => (
+                <div
+                  key={tr.id}
+                  className="h-24 border-b border-zinc-800/80 px-3 py-2 flex flex-col justify-between"
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="w-1.5 h-3.5 rounded-full shrink-0"
+                        style={{ backgroundColor: tr.color }}
+                      />
+                      <span className="text-xs font-semibold text-zinc-100 truncate">
+                        {tr.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackSolo(tr.id)}
+                        title="独奏此轨 (Solo)"
+                        className={`w-4 h-4 rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
+                          tr.solo
+                            ? 'bg-amber-500 text-zinc-950'
+                            : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        S
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackMute(tr.id)}
+                        title="静音此轨 (Mute)"
+                        className={`w-4 h-4 rounded text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer ${
+                          tr.muted
+                            ? 'bg-red-500 text-white'
+                            : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        M
+                      </button>
+                    </div>
+                  </div>
+                  <span className="text-[10px] text-zinc-500 truncate">
+                    {tr.roleLabel} · {clipWindows.filter((w) => w.highlight.speakerId === tr.id).length} 条金句
+                  </span>
                 </div>
-                <span className="text-[10px] text-zinc-400 leading-tight">
-                  拖动片段移动位置，拖动左右边缩放修剪 ({state.highlights.length} 段)
-                </span>
-              </div>
+              ))}
 
-              <div className="h-24 border-b border-zinc-800/80 p-3 flex flex-col justify-between">
+              {/* Intro Voiceover Track Header */}
+              <div className="h-20 border-b border-zinc-800/80 px-3 py-2 flex flex-col justify-between">
                 <div className="flex items-center justify-between gap-1">
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-200">
                     <Mic className="w-3.5 h-3.5 text-amber-400" />
-                    <span>固定口播轨</span>
+                    <span>固定口播</span>
                   </div>
                   <button
                     type="button"
@@ -499,14 +730,15 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                     <Upload className="w-3 h-3" />
                   </button>
                 </div>
-                <span className="text-[10px] text-zinc-400 leading-tight truncate">
+                <span className="text-[10px] text-zinc-400 truncate">
                   {state.introVoiceover?.enabled
                     ? `${state.introVoiceover.fileName} (@${introVoStartSec.toFixed(1)}s)`
                     : '未开启或未上传'}
                 </span>
               </div>
 
-              <div className="h-24 p-3 flex flex-col justify-between">
+              {/* Intro BGM Track Header */}
+              <div className="h-20 px-3 py-2 flex flex-col justify-between">
                 <div className="flex items-center justify-between gap-1">
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-200">
                     <Music className="w-3.5 h-3.5 text-blue-400" />
@@ -521,7 +753,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                     <Upload className="w-3 h-3" />
                   </button>
                 </div>
-                <span className="text-[10px] text-zinc-400 leading-tight truncate">
+                <span className="text-[10px] text-zinc-400 truncate">
                   {state.introBgm?.enabled
                     ? `${state.introBgm.fileName} (${introBgmDurationSec.toFixed(1)}s)`
                     : '未开启或未上传'}
@@ -529,8 +761,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               </div>
             </div>
 
-            {/* Right Scrollable Zoomed Track Area */}
-            <div className="flex-1 overflow-x-auto relative select-none">
+            {/* Right Scrollable Zoomed Track Viewport */}
+            <div ref={scrollViewportRef} className="flex-1 overflow-x-auto relative select-none">
               <div
                 ref={trackAreaRef}
                 style={{ width: `${zoom * 100}%`, minWidth: '100%' }}
@@ -546,6 +778,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                     const sec = Number((ratio * timelineSpanSec).toFixed(2));
                     playheadRef.current = sec;
                     setPlayheadSec(sec);
+                    if (playheadLineRef.current) playheadLineRef.current.style.left = `${(sec / timelineSpanSec) * 100}%`;
+                    if (timeReadoutRef.current) timeReadoutRef.current.textContent = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
                     audioPreview.requestSeek();
                     setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
                   }}
@@ -562,101 +796,211 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   ))}
                 </div>
 
-                {/* Track 1: Highlights */}
-                <div className="h-28 border-b border-zinc-800/80 relative bg-zinc-950/80">
-                  {!state.coldOpenEnabled && (
-                    <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500 pointer-events-none">
-                      片头金句未启用（勾选上方「启用片头金句」即可编排）
-                    </div>
-                  )}
-                  {clipWindows.map(({ highlight: hl, startSec, endSec }) => {
-                    const leftPct = (startSec / timelineSpanSec) * 100;
-                    const widthPct = Math.max(0.8, ((endSec - startSec) / timelineSpanSec) * 100);
-                    const tr = trackColorBySpeaker.get(hl.speakerId);
-                    const color = tr?.color || '#a855f7';
-                    const isSelected = selectedHlId === hl.id;
-
-                    return (
+                {/* Speaker Track Lanes */}
+                {speakerTracks.map((tr) => {
+                  const isTrackMuted = tr.muted;
+                  return (
+                    <div
+                      key={tr.id}
+                      onPointerDown={(e) => {
+                        if (toolMode === 'mute_range' || e.shiftKey) {
+                          const el = trackAreaRef.current;
+                          if (!el) return;
+                          const rect = el.getBoundingClientRect();
+                          const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                          const sec = Math.round(ratio * timelineSpanSec * 20) / 20;
+                          setDragAction({ kind: 'mute_range', trackId: tr.id, startSec: sec, endSec: sec });
+                        }
+                      }}
+                      className={`h-24 border-b border-zinc-800/80 relative bg-zinc-950/80 ${
+                        toolMode === 'mute_range' ? 'cursor-crosshair' : ''
+                      }`}
+                    >
+                      {/* Center 0-crossing axis */}
                       <div
-                        key={hl.id}
-                        style={{
-                          left: `${leftPct}%`,
-                          width: `${widthPct}%`,
-                          borderColor: isSelected ? '#ffffff' : color,
-                          backgroundColor: `${color}28`,
-                        }}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          setSelectedHlId(hl.id);
-                          setDragAction({
-                            kind: 'move_hl',
-                            hlId: hl.id,
-                            startClientX: e.clientX,
-                            origStartSec: startSec,
-                          });
-                        }}
-                        className="absolute top-3 bottom-3 rounded-lg border-2 cursor-grab active:cursor-grabbing overflow-hidden group flex flex-col justify-between px-2 py-1 shadow-md"
-                      >
-                        {/* Left trim handle */}
+                        className="absolute left-0 right-0 top-1/2 h-px pointer-events-none opacity-25"
+                        style={{ backgroundColor: tr.color }}
+                      />
+
+                      {clipWindows
+                        .filter((w) => w.highlight.speakerId === tr.id)
+                        .map(({ highlight: hl, startSec, endSec }) => {
+                          const leftPct = (startSec / timelineSpanSec) * 100;
+                          const widthPct = Math.max(0.8, ((endSec - startSec) / timelineSpanSec) * 100);
+                          const isSelected = selectedHlId === hl.id;
+                          const isClipMuted = isTrackMuted || Boolean(hl.mutedTrackIds?.includes(tr.id));
+                          const bars = samplePeaksForSlice(
+                            tr.peaks,
+                            tr.durationMs,
+                            hl.sourceStartMs,
+                            hl.sourceEndMs,
+                            36
+                          );
+
+                          return (
+                            <div
+                              key={hl.id}
+                              style={{
+                                left: `${leftPct}%`,
+                                width: `${widthPct}%`,
+                                borderColor: isSelected ? '#ffffff' : tr.color,
+                                backgroundColor: isClipMuted ? 'rgba(63,63,70,0.35)' : `${tr.color}22`,
+                              }}
+                              onPointerDown={(e) => {
+                                if (toolMode === 'mute_range' || e.shiftKey) return;
+                                e.stopPropagation();
+                                setSelectedHlId(hl.id);
+                                setDragAction({
+                                  kind: 'move_hl',
+                                  hlId: hl.id,
+                                  startClientX: e.clientX,
+                                  origStartSec: startSec,
+                                });
+                              }}
+                              className={`absolute top-2 bottom-2 rounded-lg border-2 overflow-hidden flex flex-col justify-between px-2 py-1 shadow-md ${
+                                toolMode === 'mute_range'
+                                  ? 'cursor-crosshair'
+                                  : 'cursor-grab active:cursor-grabbing'
+                              }`}
+                            >
+                              {/* Left trim handle */}
+                              {toolMode === 'edit' && (
+                                <div
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedHlId(hl.id);
+                                    setDragAction({
+                                      kind: 'trim_hl_left',
+                                      hlId: hl.id,
+                                      startClientX: e.clientX,
+                                      origIntroStartSec: startSec,
+                                      origSourceStartMs: hl.sourceStartMs,
+                                      origSourceEndMs: hl.sourceEndMs,
+                                      origDurationSec: hl.durationSec,
+                                    });
+                                  }}
+                                  title="左右拖动缩放/修剪金句开头"
+                                  className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                                />
+                              )}
+
+                              {/* Right trim handle */}
+                              {toolMode === 'edit' && (
+                                <div
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedHlId(hl.id);
+                                    setDragAction({
+                                      kind: 'trim_hl_right',
+                                      hlId: hl.id,
+                                      startClientX: e.clientX,
+                                      origSourceStartMs: hl.sourceStartMs,
+                                      origDurationSec: hl.durationSec,
+                                      maxSourceMs: tr.durationMs ?? hl.sourceEndMs + 30000,
+                                    });
+                                  }}
+                                  title="左右拖动缩放/扩展金句结尾"
+                                  className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-10"
+                                />
+                              )}
+
+                              <div className="flex items-center justify-between gap-1 text-[10px] font-mono z-10 pl-1 pr-1">
+                                <span className="text-zinc-200 truncate pointer-events-none">
+                                  @{startSec.toFixed(1)}s · {hl.durationSec.toFixed(1)}s
+                                </span>
+                                <button
+                                  type="button"
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleHighlightTrackMute(hl.id, tr.id);
+                                  }}
+                                  title={isClipMuted ? '取消静音此片段' : '静音此金句片段'}
+                                  className={`px-1 rounded text-[9px] cursor-pointer ${
+                                    isClipMuted
+                                      ? 'bg-red-500/80 text-white'
+                                      : 'bg-zinc-900/70 text-zinc-300 hover:text-white'
+                                  }`}
+                                >
+                                  {isClipMuted ? '🔇' : '🔊'}
+                                </button>
+                              </div>
+
+                              {/* Bipolar Waveform */}
+                              <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none px-1">
+                                {bars.map((amp, i) => (
+                                  <div
+                                    key={i}
+                                    style={{
+                                      height: `${Math.round(amp * 100)}%`,
+                                      backgroundColor: isClipMuted ? '#71717a' : tr.color,
+                                    }}
+                                    className="flex-1 rounded-full opacity-75"
+                                  />
+                                ))}
+                              </div>
+
+                              <div className="text-[10px] text-zinc-200 truncate pointer-events-none pl-1 pr-1 z-10">
+                                “{hl.text}”
+                              </div>
+
+                              {/* Partially muted sub-ranges inside this clip */}
+                              {(hl.partiallyMutedRanges ?? [])
+                                .filter((pm) => pm.trackId === tr.id)
+                                .map((pm) => {
+                                  const pmLeftPct =
+                                    ((pm.sourceStartMs - hl.sourceStartMs) /
+                                      Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
+                                    100;
+                                  const pmWidthPct =
+                                    ((pm.sourceEndMs - pm.sourceStartMs) /
+                                      Math.max(1, hl.sourceEndMs - hl.sourceStartMs)) *
+                                    100;
+                                  return (
+                                    <button
+                                      key={pm.id}
+                                      type="button"
+                                      onPointerDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        removePartialMuteRange(hl.id, pm.id);
+                                      }}
+                                      style={{
+                                        left: `${Math.max(0, pmLeftPct)}%`,
+                                        width: `${Math.min(100, Math.max(4, pmWidthPct))}%`,
+                                      }}
+                                      title="已静音该音轨段落（点击恢复声音）"
+                                      className="absolute inset-y-0 bg-red-950/75 border-x border-red-400/80 flex items-center justify-center text-[10px] text-red-200 z-20 cursor-pointer hover:bg-red-900/80"
+                                    >
+                                      🔇
+                                    </button>
+                                  );
+                                })}
+                            </div>
+                          );
+                        })}
+
+                      {/* Active mute_range drag preview */}
+                      {dragAction?.kind === 'mute_range' && dragAction.trackId === tr.id && (
                         <div
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            setSelectedHlId(hl.id);
-                            setDragAction({
-                              kind: 'trim_hl_left',
-                              hlId: hl.id,
-                              startClientX: e.clientX,
-                              origIntroStartSec: startSec,
-                              origSourceStartMs: hl.sourceStartMs,
-                              origSourceEndMs: hl.sourceEndMs,
-                              origDurationSec: hl.durationSec,
-                            });
+                          style={{
+                            left: `${(Math.min(dragAction.startSec, dragAction.endSec) / timelineSpanSec) * 100}%`,
+                            width: `${(Math.abs(dragAction.endSec - dragAction.startSec) / timelineSpanSec) * 100}%`,
                           }}
-                          title="左右拖动裁剪金句开头"
-                          className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/70 cursor-ew-resize z-10"
+                          className="absolute inset-y-1 bg-rose-500/25 border border-rose-400 pointer-events-none z-30"
                         />
+                      )}
+                    </div>
+                  );
+                })}
 
-                        {/* Right trim handle */}
-                        <div
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            setSelectedHlId(hl.id);
-                            setDragAction({
-                              kind: 'trim_hl_right',
-                              hlId: hl.id,
-                              startClientX: e.clientX,
-                              origSourceStartMs: hl.sourceStartMs,
-                              origDurationSec: hl.durationSec,
-                              maxSourceMs: tr?.durationMs ?? hl.sourceEndMs + 30000,
-                            });
-                          }}
-                          title="左右拖动裁剪/扩展金句结尾"
-                          className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/70 cursor-ew-resize z-10"
-                        />
-
-                        <div className="flex items-center justify-between gap-1 text-[10px] font-mono pointer-events-none pl-1 pr-1">
-                          <span className="font-semibold text-zinc-100 truncate">
-                            {hl.speakerName}
-                          </span>
-                          <span className="text-zinc-300 shrink-0">
-                            @{startSec.toFixed(1)}s · {hl.durationSec.toFixed(1)}s
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-zinc-200 truncate pointer-events-none pl-1 pr-1">
-                          “{hl.text}”
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Track 2: Intro Voiceover */}
-                <div className="h-24 border-b border-zinc-800/80 relative bg-zinc-950/60">
+                {/* Intro Voiceover Lane */}
+                <div className="h-20 border-b border-zinc-800/80 relative bg-zinc-950/60">
                   {state.introVoiceover?.enabled && (state.introVoiceover.filePath || state.introVoiceover.audioUrl) ? (
                     <div
                       style={{
                         left: `${(introVoStartSec / timelineSpanSec) * 100}%`,
-                        width: `${Math.max(1, (introVoDurationSec / timelineSpanSec) * 100)}%`,
+                        width: `${Math.max(1.2, (introVoDurationSec / timelineSpanSec) * 100)}%`,
                       }}
                       onPointerDown={(e) => {
                         e.stopPropagation();
@@ -667,7 +1011,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                         });
                       }}
                       title="左右拖动调整固定口播起播时间"
-                      className="absolute top-3 bottom-3 rounded-lg border-2 border-amber-400/80 bg-amber-500/20 cursor-grab active:cursor-grabbing px-2.5 py-1.5 flex flex-col justify-between shadow-md"
+                      className="absolute top-2 bottom-2 rounded-lg border-2 border-amber-400/80 bg-amber-500/20 cursor-grab active:cursor-grabbing px-2.5 py-1 flex flex-col justify-between shadow-md"
                     >
                       <div className="flex items-center justify-between text-[10px] font-mono text-amber-200 pointer-events-none">
                         <span className="font-semibold truncate">🎙️ {state.introVoiceover.fileName}</span>
@@ -675,8 +1019,20 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                           @{introVoStartSec.toFixed(1)}s ({introVoDurationSec.toFixed(1)}s)
                         </span>
                       </div>
-                      <div className="text-[10px] text-amber-300/80 pointer-events-none truncate">
-                        左右拖动调整片头口播位置
+                      <div className="flex-1 flex items-center gap-[1.5px] pointer-events-none">
+                        {samplePeaksForSlice(
+                          state.introVoiceover.peaks,
+                          introVoDurationSec * 1000,
+                          0,
+                          introVoDurationSec * 1000,
+                          32
+                        ).map((amp, i) => (
+                          <div
+                            key={i}
+                            style={{ height: `${Math.round(amp * 100)}%` }}
+                            className="flex-1 rounded-full bg-amber-400/75"
+                          />
+                        ))}
                       </div>
                     </div>
                   ) : (
@@ -686,24 +1042,23 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   )}
                 </div>
 
-                {/* Track 3: Intro BGM with Ducking Envelope */}
-                <div className="h-24 relative bg-zinc-950/40">
+                {/* Intro BGM Lane with Live Ducking Envelope */}
+                <div className="h-20 relative bg-zinc-950/40">
                   {state.introBgm?.enabled && (state.introBgm.filePath || state.introBgm.audioUrl || state.bgmWavPath) ? (
                     <div
                       style={{
                         left: '0%',
                         width: `${Math.min(100, (introBgmDurationSec / timelineSpanSec) * 100)}%`,
                       }}
-                      className="absolute top-3 bottom-3 rounded-lg border border-blue-500/60 bg-blue-500/15 overflow-hidden px-2.5 py-1.5 flex flex-col justify-between"
+                      className="absolute top-2 bottom-2 rounded-lg border border-blue-500/60 bg-blue-500/15 overflow-hidden px-2.5 py-1 flex flex-col justify-between"
                     >
                       <div className="flex items-center justify-between text-[10px] font-mono text-blue-200 z-10 pointer-events-none">
                         <span className="font-semibold truncate">🎵 {state.introBgm.fileName}</span>
                         <span className="shrink-0">
-                          0.0s ~ {introBgmDurationSec.toFixed(1)}s (自动避让 {state.bgmDuckDb ?? -18}dB)
+                          0.0s ~ {introBgmDurationSec.toFixed(1)}s (避让 {state.bgmDuckDb ?? -18}dB)
                         </span>
                       </div>
 
-                      {/* Ducking envelope preview */}
                       <div className="relative h-8 w-full flex items-end gap-[2px] pointer-events-none">
                         {Array.from({ length: 80 }).map((_, i) => {
                           const t = ((i + 0.5) / 80) * introBgmDurationSec;
@@ -727,10 +1082,11 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                   )}
                 </div>
 
-                {/* Playhead vertical line */}
+                {/* Playhead vertical line (updated directly via ref at 60fps) */}
                 <div
+                  ref={playheadLineRef}
                   style={{ left: `${playheadPct}%` }}
-                  className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-20 shadow-[0_0_8px_rgba(239,68,68,0.8)]"
+                  className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-20 shadow-[0_0_8px_rgba(239,68,68,0.85)]"
                 >
                   <div className="w-2.5 h-2.5 -ml-[4px] bg-red-500 rotate-45 rounded-xs" />
                 </div>
@@ -741,7 +1097,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
         {/* Footer */}
         <div className="px-5 py-3 border-t border-zinc-800 bg-zinc-950/70 flex items-center justify-between text-xs text-zinc-400">
-          <span>所有修改已实时同步至主时间轴与导出配置</span>
+          <span>所有修改已实时同步至片头与导出配置 · 主音轨仅保留正文内容</span>
           <button
             type="button"
             onClick={() => {

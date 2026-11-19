@@ -106,6 +106,7 @@ interface WaveformEditorBarProps {
   onToggleBgmMute?: () => void;
   onImportBgm?: (slot: AuxAudioSlot) => void;
   onUpdateBgmAsset?: (slot: AuxAudioSlot, patch: Partial<BgmTrackAsset>) => void;
+  onOpenIntroEditor?: () => void;
   onNotify?: (message: string) => void;
   onRenameSpeakerTrack?: (trackId: string, newName?: string) => void;
   onSelectToken?: (tokenId: string, flatIndex: number, shiftKey: boolean, metaKey: boolean) => void;
@@ -1172,6 +1173,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onCancelDuckingSelected,
   onSetWaveformSelectionMode,
   onUpdateBgmAsset,
+  onOpenIntroEditor,
   onNotify,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1309,15 +1311,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         : state.tracks,
     [state.tracks]
   );
-  const hasIntroBgm = Boolean(
-    state.introBgm?.enabled !== false &&
-    (state.introBgm?.filePath || state.introBgm?.audioUrl || state.bgmWavPath || state.introBgm?.fileName)
-  );
   const hasOutroBgm = Boolean(
     state.outroBgm?.enabled !== false &&
     (state.outroBgm?.filePath || state.outroBgm?.audioUrl || state.outroBgm?.fileName)
   );
-  const hasBgmTrack = hasIntroBgm || hasOutroBgm;
+  // 片头已分离至独立片头编辑器，主音轨仅展示片尾 BGM
+  const hasIntroBgm = false;
+  const hasBgmTrack = hasOutroBgm;
 
   const anySolo = useMemo(
     () =>
@@ -1813,19 +1813,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     const laughRaw: Array<[number, number]> = [];
     const bleepRaw: Array<[number, number]> = [];
 
-    // 1. Map Cold Open highlight clips onto their exact speaker tracks (2.0s intro + clips with dynamic gaps)
-    if (state.coldOpenEnabled && state.highlights.length > 0 && timeline.coldOpenDurationSec > 0) {
-      const gapSec = resolveEffectiveHighlightGapSec(state);
-      const clipWindows = resolveColdOpenClipWindows(state.highlights, gapSec);
-      clipWindows.forEach(({ highlight: hl, startSec, endSec }) => {
-        const r1 = Math.max(0, startSec / totalSec);
-        const r2 = Math.min(timeline.coldOpenDurationSec, endSec) / totalSec;
-        if (r2 > r1) {
-          if (!coldClipsBySpeaker[hl.speakerId]) coldClipsBySpeaker[hl.speakerId] = [];
-          coldClipsBySpeaker[hl.speakerId].push([r1, r2]);
-        }
-      });
-    }
+    // 片头高光已分离至独立片头编辑器，主音轨仅映射正文语段与停顿
 
     // 2. Map Body transcript tokens onto their exact speaker tracks
     timeline.mappedTokens.forEach((m) => {
@@ -2327,104 +2315,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     ctx.lineTo(W, RULER_H + 0.5);
     ctx.stroke();
 
-    // 3. Cold Open Region Backdrop & Crisp Pill Badge
-    const coldEndRatio = timeline.coldOpenDurationSec / totalSec;
-    if (timeline.coldOpenDurationSec > 0 && coldEndRatio > viewStartRatio) {
-      const cx0 = Math.max(0, ratioToX(0));
-      const cx1 = Math.min(W, ratioToX(coldEndRatio));
-      const cw = Math.max(0, cx1 - cx0);
-      if (cw > 1) {
-        const coldGrad = ctx.createLinearGradient(0, RULER_H, 0, H);
-        coldGrad.addColorStop(0, 'rgba(168, 85, 247, 0.11)');
-        coldGrad.addColorStop(1, 'rgba(168, 85, 247, 0.03)');
-        ctx.fillStyle = coldGrad;
-        ctx.fillRect(cx0, RULER_H, cw, BODY_H);
-
-        // Cold open right boundary dashed line
-        if (cx1 < W) {
-          ctx.save();
-          ctx.setLineDash([3, 3]);
-          ctx.strokeStyle = 'rgba(192, 132, 252, 0.45)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(Math.round(cx1) + 0.5, 0);
-          ctx.lineTo(Math.round(cx1) + 0.5, H);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        // Crisp pill badge inside top ruler band
-        if (cw > 88) {
-          const badgeText = '🎬 片头高光 · BGM闪避';
-          ctx.font = wordTimelineMode
-            ? '600 9px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
-            : '600 10.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-          const tw = ctx.measureText(badgeText).width;
-          const pillW = Math.min(cw - 8, tw + 12);
-          ctx.fillStyle = 'rgba(88, 28, 135, 0.82)';
-          ctx.beginPath();
-          ctx.roundRect(cx0 + 5, topBadgeY, pillW, topBadgeH, wordTimelineMode ? 3 : 4);
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(192, 132, 252, 0.48)';
-          ctx.lineWidth = 0.75;
-          ctx.stroke();
-          ctx.fillStyle = '#f3e8ff';
-          ctx.fillText(badgeText, cx0 + 11, topBadgeCenterY);
-        }
-      }
-    }
-
-    // 3b. Fixed Intro Voiceover Region Backdrop & Crisp Pill Badge
-    const voStartSec = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
-    const voStartRatio = voStartSec / totalSec;
-    const prefixEndRatio =
-      (voStartSec + timeline.introVoiceoverDurationSec) / totalSec;
-    if (
-      timeline.introVoiceoverDurationSec > 0 &&
-      prefixEndRatio > viewStartRatio &&
-      voStartRatio < viewEndRatio
-    ) {
-      const vx0 = Math.max(0, ratioToX(voStartRatio));
-      const vx1 = Math.min(W, ratioToX(prefixEndRatio));
-      const vw = Math.max(0, vx1 - vx0);
-      if (vw > 1) {
-        const voGrad = ctx.createLinearGradient(0, RULER_H, 0, H);
-        voGrad.addColorStop(0, 'rgba(245, 158, 11, 0.12)');
-        voGrad.addColorStop(1, 'rgba(245, 158, 11, 0.03)');
-        ctx.fillStyle = voGrad;
-        ctx.fillRect(vx0, RULER_H, vw, BODY_H);
-
-        if (vx1 < W) {
-          ctx.save();
-          ctx.setLineDash([3, 3]);
-          ctx.strokeStyle = 'rgba(251, 191, 36, 0.48)';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(Math.round(vx1) + 0.5, 0);
-          ctx.lineTo(Math.round(vx1) + 0.5, H);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        if (vw > 74) {
-          const badgeText = '🎙️ 片头固定口播';
-          ctx.font = wordTimelineMode
-            ? '600 9px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
-            : '600 10.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-          const tw = ctx.measureText(badgeText).width;
-          const pillW = Math.min(vw - 8, tw + 12);
-          ctx.fillStyle = 'rgba(120, 53, 15, 0.85)';
-          ctx.beginPath();
-          ctx.roundRect(vx0 + 5, topBadgeY, pillW, topBadgeH, wordTimelineMode ? 3 : 4);
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(251, 191, 36, 0.52)';
-          ctx.lineWidth = 0.75;
-          ctx.stroke();
-          ctx.fillStyle = '#fef3c7';
-          ctx.fillText(badgeText, vx0 + 11, topBadgeCenterY);
-        }
-      }
-    }
+    // 3a/3b. 片头高光与固定口播已分离至独立片头编辑器，主音轨保持纯粹正文视图
 
     // 3d. Multi-Track Speech Overlap Zones (语音重合轨道提示带)
     if (timelineZones.allOverlapZones.length > 0) {
@@ -5587,6 +5478,22 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {onOpenIntroEditor && (
+            <button
+              type="button"
+              onClick={onOpenIntroEditor}
+              title="打开独立片头多轨编辑器（移动/缩放金句、拖动口播、段落静音、预览BGM避让）"
+              className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-600/35 to-blue-600/35 hover:from-purple-600/55 hover:to-blue-600/55 border border-purple-400/50 text-purple-100 font-semibold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs transition"
+            >
+              <Sparkles className="w-3 h-3 text-purple-300" />
+              <span>片头编辑器</span>
+              {timeline.prefixDurationSec > 0 && (
+                <span className="px-1 py-0.2 rounded bg-purple-500/30 text-[10px] font-mono text-purple-200">
+                  {timeline.prefixDurationSec.toFixed(1)}s
+                </span>
+              )}
+            </button>
+          )}
           {/* 快捷播放控制条 + 倍速切换 */}
           <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800">
             <button
