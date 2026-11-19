@@ -4037,17 +4037,12 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       if (intersectIdx >= 0) return intersectIdx;
     }
 
-    if (activeTokenTurnIdx >= 0) {
-      return activeTokenTurnIdx;
-    }
-
-    if (playheadSec < timeline.coldOpenDurationSec && activeBlockId) {
-      const coldOpenBlkIdx = turnIdxByBlockId.get(activeBlockId);
-      if (coldOpenBlkIdx !== undefined) return coldOpenBlkIdx;
-    }
-
     if (playheadSec < timeline.prefixDurationSec - 0.02) {
       return -1;
+    }
+
+    if (activeTokenTurnIdx >= 0) {
+      return activeTokenTurnIdx;
     }
 
     const activeIdx = findTurnIndexAtSec(speakerDeckTurns, playheadSec, 0.04, turnsAreMonotonic);

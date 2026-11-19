@@ -559,8 +559,10 @@ export const App: React.FC = () => {
       timelineRef.current,
       clamped
     );
-    setActiveBlockId((prev) => (prev === resolved.activeBlockId ? prev : resolved.activeBlockId));
-    setActiveTokenId((prev) => (prev === resolved.activeTokenId ? prev : resolved.activeTokenId));
+    const uiBlockId = resolved.inColdOpen ? null : resolved.activeBlockId;
+    const uiTokenId = resolved.inColdOpen ? null : resolved.activeTokenId;
+    setActiveBlockId((prev) => (prev === uiBlockId ? prev : uiBlockId));
+    setActiveTokenId((prev) => (prev === uiTokenId ? prev : uiTokenId));
     setPlayheadSec((prev) => (prev === clamped ? prev : clamped));
   }, []);
 
@@ -893,8 +895,8 @@ export const App: React.FC = () => {
       }
       prevWasBleeped = Boolean(resolved?.isBleeped);
 
-      const nextBlk = resolved?.activeBlockId ?? null;
-      const nextTok = resolved?.activeTokenId ?? null;
+      const nextBlk = resolved?.inColdOpen ? null : (resolved?.activeBlockId ?? null);
+      const nextTok = resolved?.inColdOpen ? null : (resolved?.activeTokenId ?? null);
 
       // Keep UI playhead, activeBlockId, and activeTokenId strictly locked to the exact same frame commit
       // so text highlight and waveform/scrubber playhead never drift out of sync.

@@ -894,6 +894,7 @@ class AudioPreviewEngine {
     return this.cachedAcousticProfiles;
   }
 
+  private coldOpenClipElements = new Map<string, ManagedAudioHolder>();
   private lastAutoSoloEvalPerfMs = 0;
 
   private ensureContext(): AudioContext | null {
@@ -1165,6 +1166,46 @@ class AudioPreviewEngine {
       }
     }
 
+    // Pre-warm dedicated Cold Open highlight clip elements (pre-parked at sourceStartMs so Cold Open plays with 0ms seek lag and zero main-track disruption)
+    const activeColdOpenIds = new Set(
+      state.coldOpenEnabled ? state.highlights.map((h) => h.id) : []
+    );
+    for (const [hlId, holder] of this.coldOpenClipElements.entries()) {
+      if (!activeColdOpenIds.has(hlId)) {
+        this.disposeHolder(holder);
+        this.coldOpenClipElements.delete(hlId);
+      }
+    }
+    if (state.coldOpenEnabled && state.highlights.length > 0) {
+      for (const hl of state.highlights) {
+        const tr = state.tracks.find((t) => t.id === hl.speakerId);
+        if (!tr) continue;
+        const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+        const clipStartSec = Math.max(0, hl.sourceStartMs / 1000 - effOffset);
+        const clipKey = `${hl.id}|${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|${clipStartSec.toFixed(3)}`;
+        const existing = this.coldOpenClipElements.get(hl.id);
+        if (!existing || existing.sourceKey !== clipKey || existing.failedFatal) {
+          if (existing) {
+            this.disposeHolder(existing);
+            this.coldOpenClipElements.delete(hl.id);
+          }
+          const created = this.createManagedHolder(
+            tr.audioUrl,
+            tr.filePath,
+            `片头金句_${tr.name}`,
+            rate,
+            false,
+            tr.sourceFilePath
+          );
+          if (created) {
+            created.sourceKey = clipKey;
+            this.seekHolderOnSpliceOnly(created, clipStartSec, true);
+            this.coldOpenClipElements.set(hl.id, created);
+          }
+        }
+      }
+    }
+
     // Pre-warm fixed intro voiceover element so entering intro voiceover starts with 0ms lag
     if (
       state.introVoiceover?.enabled &&
@@ -1246,6 +1287,32 @@ class AudioPreviewEngine {
         holder.audio.volume = 0;
         holder.lastPlayRetryPerfMs = this.playStartPerfMs;
         void holder.audio.play().catch(() => {});
+      }
+    }
+
+    for (const [hlId, clipHolder] of this.coldOpenClipElements.entries()) {
+      if (clipHolder.failedFatal) continue;
+      const isCurrentHl =
+        mapped.inColdOpen && !mapped.inIntroOrGapSilence && mapped.activeHighlight?.id === hlId;
+      const hl = state.highlights.find((h) => h.id === hlId);
+      const tr = hl ? state.tracks.find((t) => t.id === hl.speakerId) : undefined;
+      const effOffset =
+        tr && state.recordingMode !== 'same_room_sync' ? (tr.syncOffsetMs || 0) / 1000 : 0;
+      const clipTarget =
+        isCurrentHl && mapped.sourceSec !== null
+          ? Math.max(0, mapped.sourceSec - effOffset)
+          : hl
+          ? Math.max(0, hl.sourceStartMs / 1000 - effOffset)
+          : 0;
+      this.seekHolderOnSpliceOnly(clipHolder, clipTarget, true);
+      const clipEl = clipHolder.audio;
+      if (clipEl.paused || clipEl.ended) {
+        clipEl.volume = 0;
+        void clipEl.play().then(() => {
+          if (!isCurrentHl) {
+            clipEl.pause();
+          }
+        }).catch(() => {});
       }
     }
 
@@ -1381,6 +1448,11 @@ class AudioPreviewEngine {
         entry.audio.pause();
       }
     }
+    for (const clipEntry of this.coldOpenClipElements.values()) {
+      if (!clipEntry.audio.paused) {
+        clipEntry.audio.pause();
+      }
+    }
     if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.audio.paused) {
       this.introVoiceoverTimelineEl.audio.pause();
     }
@@ -1460,7 +1532,9 @@ class AudioPreviewEngine {
           preMapped.activeHighlight &&
           preMapped.sourceSec !== null
         ) {
-          const clipHolder = this.trackElements.get(preMapped.activeSpeakerId);
+          const clipHolder =
+            this.coldOpenClipElements.get(preMapped.activeHighlight.id) ??
+            this.trackElements.get(preMapped.activeSpeakerId);
           const clipTrack = state.tracks.find((t) => t.id === preMapped.activeSpeakerId);
           if (clipHolder && !clipHolder.failedFatal && clipTrack) {
             const el = clipHolder.audio;
@@ -1692,6 +1766,54 @@ class AudioPreviewEngine {
 
     const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
 
+    // Dedicated Cold Open highlight playback (copied/pre-parked audio clips, leaving main tracks undisturbed for body)
+    const activeColdHighlight =
+      mapped.inColdOpen && !mapped.inIntroOrGapSilence ? mapped.activeHighlight : undefined;
+    for (const [hlId, clipHolder] of this.coldOpenClipElements.entries()) {
+      if (clipHolder.failedFatal) continue;
+      const clipEl = clipHolder.audio;
+      if (!activeColdHighlight || activeColdHighlight.id !== hlId || mapped.sourceSec === null) {
+        this.applySlewedVolume(clipHolder, 0, true);
+        if (!clipEl.paused) {
+          clipEl.pause();
+        }
+        continue;
+      }
+      const tr = state.tracks.find((t) => t.id === activeColdHighlight.speakerId);
+      const effOffset =
+        tr && state.recordingMode !== 'same_room_sync' ? (tr.syncOffsetMs || 0) / 1000 : 0;
+      const targetClipSec = Math.max(0, mapped.sourceSec - effOffset);
+      const masterSrcMs = mapped.sourceSec * 1000;
+      const isMuted =
+        Boolean(tr?.muted) ||
+        (anySolo && !tr?.solo) ||
+        Boolean(
+          activeColdHighlight.mutedTrackIds?.includes(activeColdHighlight.speakerId) ||
+            activeColdHighlight.partiallyMutedRanges?.some(
+              (pm: HighlightMuteInterval) =>
+                pm.trackId === activeColdHighlight.speakerId &&
+                masterSrcMs >= pm.sourceStartMs &&
+                masterSrcMs <= pm.sourceEndMs
+            )
+        );
+      let clipGain = 1.0;
+      if (isMuted) {
+        clipGain = 0.0;
+      } else if (tr && state.loudnessAligned) {
+        const dbFactor = Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20);
+        clipGain = Math.min(1.0, 0.9 * dbFactor);
+      } else {
+        clipGain = 0.92;
+      }
+      applyPitchPreservingPlaybackRate(clipEl, playbackRate);
+      this.seekHolderOnSpliceOnly(clipHolder, targetClipSec, crossedCutOrScrub, 0.25, 450);
+      this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
+      if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
+        clipHolder.lastPlayRetryPerfMs = nowPerf;
+        void clipEl.play().catch(() => {});
+      }
+    }
+
     for (const tr of playableTracks) {
       const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}`;
       let holder = this.trackElements.get(tr.id);
@@ -1714,7 +1836,7 @@ class AudioPreviewEngine {
       const audioEl = holder.audio;
       applyPitchPreservingPlaybackRate(audioEl, playbackRate);
 
-      if (mapped.sourceSec === null || mapped.inIntroOrGapSilence) {
+      if (mapped.inColdOpen || mapped.sourceSec === null || mapped.inIntroOrGapSilence) {
         this.applySlewedVolume(holder, 0, !this.wasPlaying);
         // 静默区间保持音量为 0，不强行 pause audioEl，防止失去用户手势授权导致后续切回人声时被浏览器自动播放策略拦截
         continue;
@@ -1911,7 +2033,7 @@ class AudioPreviewEngine {
 
       // 片头金句整段闪避（不考虑段内的音量连续）：
       // 在片头金句发声段（从 2.0s 前奏垫音结束，直到金句全部播放完成），全程持续闪避，不因句内停顿或句间 gap 回弹！
-      const coldQuotesEndSec = Math.max(2.0, timeline.coldOpenDurationSec - 1.5);
+      const coldQuotesEndSec = Math.max(2.0, timeline.coldOpenDurationSec - 2.0);
       const inColdOpenQuotesSection =
         Boolean(mapped.inColdOpen) &&
         playheadSec >= 2.0 &&
