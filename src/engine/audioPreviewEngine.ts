@@ -1347,18 +1347,26 @@ class AudioPreviewEngine {
     }
 
     const playbackRate = Math.max(0.5, Math.min(3.5, state.playbackRate || 1.0));
-    const prefixTotalSec =
-      timeline.prefixDurationSec ??
-      timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec;
+    const voStartForBgm = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
+    const voiceEndForBgm = Math.max(
+      timeline.coldOpenDurationSec,
+      state.introVoiceover?.enabled && timeline.introVoiceoverDurationSec > 0
+        ? voStartForBgm + timeline.introVoiceoverDurationSec
+        : 0
+    );
     const customIntroBgmSec = state.introBgm?.customDurationSec;
+    const rawIntroBgmSec =
+      timeline.introBgmDurationSec && timeline.introBgmDurationSec > 0
+        ? timeline.introBgmDurationSec
+        : voiceEndForBgm > 0
+        ? voiceEndForBgm
+        : Math.min(10, timeline.totalEditedDurationSec * 0.35);
     const introEndSec =
       customIntroBgmSec && customIntroBgmSec > 0
         ? customIntroBgmSec
-        : timeline.introBgmDurationSec && timeline.introBgmDurationSec > 0
-        ? timeline.introBgmDurationSec
-        : prefixTotalSec > 0
-        ? prefixTotalSec
-        : Math.min(10, timeline.totalEditedDurationSec * 0.35);
+        : voiceEndForBgm > 0
+        ? Math.min(rawIntroBgmSec, voiceEndForBgm)
+        : rawIntroBgmSec;
     const customOutroSec = state.outroBgm?.customDurationSec;
     const outroWindowSec =
       typeof customOutroSec === 'number' && customOutroSec > 0
@@ -2184,16 +2192,25 @@ class AudioPreviewEngine {
       }
     };
 
-    const prefixTotalSec = timeline.prefixDurationSec ?? (timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec);
+    const voiceEndForBgm = Math.max(
+      timeline.coldOpenDurationSec,
+      state.introVoiceover?.enabled && timeline.introVoiceoverDurationSec > 0
+        ? voStartSec + timeline.introVoiceoverDurationSec
+        : 0
+    );
     const customIntroBgmSec = state.introBgm?.customDurationSec;
+    const rawIntroBgmSec =
+      timeline.introBgmDurationSec && timeline.introBgmDurationSec > 0
+        ? timeline.introBgmDurationSec
+        : voiceEndForBgm > 0
+        ? voiceEndForBgm
+        : Math.min(10, timeline.totalEditedDurationSec * 0.35);
     const introEndSec =
       customIntroBgmSec && customIntroBgmSec > 0
         ? customIntroBgmSec
-        : (timeline.introBgmDurationSec && timeline.introBgmDurationSec > 0)
-        ? timeline.introBgmDurationSec
-        : prefixTotalSec > 0
-        ? prefixTotalSec
-        : Math.min(10, timeline.totalEditedDurationSec * 0.35);
+        : voiceEndForBgm > 0
+        ? Math.min(rawIntroBgmSec, voiceEndForBgm)
+        : rawIntroBgmSec;
     const inIntroBed = playheadSec <= introEndSec;
 
     // 默认淡入淡出时间 800ms (0.8s)

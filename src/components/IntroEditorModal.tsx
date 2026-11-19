@@ -76,6 +76,12 @@ type DragAction =
       origStartOffsetSec: number;
     }
   | {
+      kind: 'trim_bgm_right';
+      startClientX: number;
+      origDurationSec: number;
+      maxDurationSec: number;
+    }
+  | {
       kind: 'mute_range';
       trackId: string;
       startSec: number;
@@ -347,6 +353,176 @@ const HiResClipWaveformCanvas: React.FC<HiResClipWaveformCanvasProps> = React.me
   }
 );
 
+interface IntroWordAnnotation {
+  text: string;
+  speakerId: string;
+  editedStartSec: number;
+  editedEndSec: number;
+  isSubCharSplit?: boolean;
+  isFiller?: boolean;
+}
+
+interface IntroWordRulerBandProps {
+  annotations: IntroWordAnnotation[];
+  totalSec: number;
+  trackColorBySpeaker: Map<string, string>;
+}
+
+const IntroWordRulerBand: React.FC<IntroWordRulerBandProps> = React.memo(
+  ({ annotations, totalSec, trackColorBySpeaker }) => {
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [boxWidth, setBoxWidth] = useState(0);
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const update = () => {
+        const w = Math.max(1, Math.round(canvas.getBoundingClientRect().width));
+        setBoxWidth((prev) => (prev === w ? prev : w));
+      };
+      update();
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(update);
+        ro.observe(canvas);
+        return () => ro.disconnect();
+      }
+    }, []);
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const W = Math.max(1, Math.round(rect.width));
+      const H = Math.max(1, Math.round(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = '#0c0c11';
+      ctx.fillRect(0, 0, W, H);
+
+      const safeTotal = Math.max(0.01, totalSec);
+      const bandTop = 1;
+      const bandBot = H - 1;
+      const barTop = H - 3;
+      const bandMidY = bandTop + (barTop - bandTop) * 0.5;
+      let lastRightX = -999;
+      let prevAnn: { ax1: number; editedEndSec: number } | null = null;
+
+      for (let idx = 0; idx < annotations.length; idx++) {
+        const ann = annotations[idx];
+        const ax0 = (ann.editedStartSec / safeTotal) * W;
+        const ax1 = (ann.editedEndSec / safeTotal) * W;
+        const nextAnn = idx + 1 < annotations.length ? annotations[idx + 1] : null;
+        const nextAx0 = nextAnn ? (nextAnn.editedStartSec / safeTotal) * W : W + 200;
+        const spColor = trackColorBySpeaker.get(ann.speakerId) ?? '#38bdf8';
+
+        if (prevAnn !== null) {
+          const gapSec = ann.editedStartSec - prevAnn.editedEndSec;
+          const gapPx = ax0 - prevAnn.ax1;
+          if (gapSec >= 0.015 && gapPx >= 36) {
+            const gLabel = gapSec < 1 ? `${Math.round(gapSec * 1000)}ms` : `${gapSec.toFixed(2)}s`;
+            ctx.font = '500 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+            ctx.textBaseline = 'middle';
+            const gtw = ctx.measureText(gLabel).width;
+            const gx = (Math.max(0, prevAnn.ax1) + Math.min(W, ax0)) * 0.5;
+            const gxLeft = gx - gtw * 0.5;
+            if (
+              gtw + 8 <= gapPx &&
+              gxLeft >= Math.max(prevAnn.ax1 + 3, lastRightX + 3) &&
+              gx + gtw * 0.5 + 3 <= ax0 &&
+              gx > 10 &&
+              gx < W - 10
+            ) {
+              ctx.fillStyle = 'rgba(161, 161, 170, 0.78)';
+              ctx.fillText(gLabel, gxLeft, bandMidY + 0.5);
+              lastRightX = Math.max(lastRightX, gx + gtw * 0.5 + 2);
+            }
+          }
+        }
+
+        const visX0 = Math.max(0, ax0);
+        const visX1 = Math.min(W, ax1);
+        const visW = visX1 - visX0;
+        if (visW >= 0.5) {
+          ctx.fillStyle = hexToRgba(spColor, ann.isFiller ? 0.16 : 0.11);
+          ctx.fillRect(visX0, bandTop, visW, Math.max(2, barTop - bandTop));
+          ctx.fillStyle = hexToRgba(spColor, ann.isFiller ? 0.52 : 0.78);
+          ctx.fillRect(visX0, barTop, visW, 2);
+        }
+
+        if (ax0 >= 0 && ax0 <= W) {
+          const tickX = Math.round(ax0) + 0.5;
+          ctx.save();
+          if (ann.isSubCharSplit) {
+            ctx.setLineDash([2, 2]);
+            ctx.strokeStyle = hexToRgba(spColor, 0.45);
+          } else {
+            ctx.strokeStyle = hexToRgba(spColor, 0.85);
+          }
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(tickX, bandTop);
+          ctx.lineTo(tickX, bandBot);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        const nextGapSec = nextAnn ? nextAnn.editedStartSec - ann.editedEndSec : Infinity;
+        if (ax1 >= 0 && ax1 <= W && nextGapSec >= 0.012) {
+          const endTickX = Math.round(ax1) - 0.5;
+          ctx.strokeStyle = hexToRgba(spColor, 0.55);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(endTickX, H - 9);
+          ctx.lineTo(endTickX, bandBot);
+          ctx.stroke();
+        }
+
+        const labelStartX = Math.max(2, ax0 + 2, lastRightX + 2);
+        const spanReachX = Math.max(ax0 + 4, ax1 - 4);
+        if (labelStartX < spanReachX && labelStartX < W - 10) {
+          const nextGapPx = nextAnn ? nextAx0 - ax1 : Infinity;
+          let maxRightX = W - 2;
+          if (nextAnn && nextAnn.speakerId !== ann.speakerId) {
+            maxRightX = Math.min(maxRightX, nextAx0 - 2);
+          } else if (nextAnn && nextGapSec >= 0.015 && nextGapPx >= 18) {
+            const gapCap = nextGapPx >= 36 ? nextAx0 - nextGapPx * 0.5 - 16 : nextAx0 - 2;
+            maxRightX = Math.min(maxRightX, Math.max(ax1 + 4, gapCap));
+          }
+          const availW = maxRightX - labelStartX;
+          if (availW >= 10) {
+            ctx.font = '600 11.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+            ctx.textBaseline = 'middle';
+            const tWidth = ctx.measureText(ann.text).width;
+            const drawW = Math.min(availW, tWidth + 1);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(labelStartX, bandTop, drawW, barTop - bandTop);
+            ctx.clip();
+            ctx.fillStyle = ann.isFiller ? '#fde68a' : '#fafafa';
+            ctx.fillText(ann.text, labelStartX, bandMidY);
+            ctx.restore();
+            lastRightX = labelStartX + Math.min(tWidth, availW);
+          }
+        }
+
+        prevAnn = prevAnn && prevAnn.editedEndSec > ann.editedEndSec ? prevAnn : { ax1, editedEndSec: ann.editedEndSec };
+      }
+
+      ctx.restore();
+    }, [annotations, totalSec, trackColorBySpeaker, boxWidth]);
+
+    return <canvas ref={canvasRef} className="w-full h-full block pointer-events-none" />;
+  }
+);
+
 export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   open,
   embedded = false,
@@ -369,12 +545,8 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const trackAreaRef = useRef<HTMLDivElement | null>(null);
-  const scrubberRef = useRef<HTMLDivElement | null>(null);
   const playheadLineRef = useRef<HTMLDivElement | null>(null);
-  const scrubberFillRef = useRef<HTMLDivElement | null>(null);
-  const scrubberThumbRef = useRef<HTMLDivElement | null>(null);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
-  const scrubberTimeRef = useRef<HTMLSpanElement | null>(null);
   const playheadRef = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -405,15 +577,86 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
       ? state.introVoiceover.startOffsetSec
       : coldDurationSec
     : coldDurationSec;
-  const introBgmDurationSec = computeIntroBgmDurationSec(state);
+
+  const voiceContentEndSec = Math.max(
+    coldDurationSec,
+    state.introVoiceover?.enabled ? introVoStartSec + introVoDurationSec : 0
+  );
+  const rawIntroBgmDurationSec = computeIntroBgmDurationSec(state);
+  const hasCustomBgmDur =
+    typeof state.introBgm?.customDurationSec === 'number' && state.introBgm.customDurationSec > 0;
+  const introBgmDurationSec =
+    !hasCustomBgmDur && voiceContentEndSec > 0
+      ? Math.min(rawIntroBgmDurationSec, voiceContentEndSec)
+      : rawIntroBgmDurationSec;
 
   const totalIntroSec = Math.max(
-    6,
+    4,
     coldDurationSec,
     state.introVoiceover?.enabled ? introVoStartSec + introVoDurationSec : 0,
     introBgmDurationSec
   );
-  const timelineSpanSec = Math.max(10, Number((totalIntroSec * 1.15).toFixed(1)));
+  const timelineSpanSec = totalIntroSec;
+
+  const introWordAnnotations = useMemo<IntroWordAnnotation[]>(() => {
+    const out: IntroWordAnnotation[] = [];
+    for (const { highlight: hl, startSec, endSec } of clipWindows) {
+      const clipDur = Math.max(0.05, endSec - startSec);
+      const srcSpanMs = Math.max(1, hl.sourceEndMs - hl.sourceStartMs);
+      const matchedTokens = state.blocks.flatMap((b) =>
+        b.tokens
+          .filter(
+            (t) =>
+              !t.deleted &&
+              t.type === 'word' &&
+              t.sourceEndMs > hl.sourceStartMs - 60 &&
+              t.sourceStartMs < hl.sourceEndMs + 60 &&
+              t.text.trim().length > 0
+          )
+          .map((t) => ({ token: t, speakerId: b.speakerId || hl.speakerId }))
+      );
+
+      if (matchedTokens.length > 0) {
+        for (const { token, speakerId } of matchedTokens) {
+          const tStartRel = Math.max(0, (token.sourceStartMs - hl.sourceStartMs) / srcSpanMs);
+          const tEndRel = Math.min(1, (token.sourceEndMs - hl.sourceStartMs) / srcSpanMs);
+          if (tEndRel <= tStartRel) continue;
+          const tStartSec = startSec + tStartRel * clipDur;
+          const tEndSec = startSec + tEndRel * clipDur;
+          const raw = token.text.trim();
+          const hasCjk = /[\u4e00-\u9fff]/.test(raw);
+          const chars = hasCjk ? Array.from(raw) : [raw];
+          const step = (tEndSec - tStartSec) / Math.max(1, chars.length);
+          for (let ci = 0; ci < chars.length; ci++) {
+            out.push({
+              text: chars[ci],
+              speakerId,
+              editedStartSec: tStartSec + ci * step,
+              editedEndSec: tStartSec + (ci + 1) * step,
+              isSubCharSplit: ci > 0,
+              isFiller: token.fillerTag === 'pure',
+            });
+          }
+        }
+      } else {
+        const cleaned = hl.text.trim();
+        const units = /[\u4e00-\u9fff]/.test(cleaned)
+          ? Array.from(cleaned).filter((c) => c.trim().length > 0)
+          : cleaned.split(/\s+/).filter(Boolean);
+        const step = clipDur / Math.max(1, units.length);
+        for (let ci = 0; ci < units.length; ci++) {
+          out.push({
+            text: units[ci],
+            speakerId: hl.speakerId,
+            editedStartSec: startSec + ci * step,
+            editedEndSec: startSec + (ci + 1) * step,
+            isSubCharSplit: ci > 0,
+          });
+        }
+      }
+    }
+    return out.sort((a, b) => a.editedStartSec - b.editedStartSec);
+  }, [clipWindows, state.blocks]);
 
   useEffect(() => {
     if (!open) {
@@ -484,22 +727,12 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const updatePlayheadDom = (sec: number) => {
     const pct = Math.max(0, Math.min(100, (sec / timelineSpanSec) * 100));
-    const introPct = Math.max(0, Math.min(100, (sec / totalIntroSec) * 100));
     if (playheadLineRef.current) {
       playheadLineRef.current.style.left = `${pct}%`;
-    }
-    if (scrubberFillRef.current) {
-      scrubberFillRef.current.style.width = `${introPct}%`;
-    }
-    if (scrubberThumbRef.current) {
-      scrubberThumbRef.current.style.left = `${introPct}%`;
     }
     const formatted = `${formatMmSs(sec)}.${Math.floor((sec % 1) * 10)}`;
     if (timeReadoutRef.current) {
       timeReadoutRef.current.textContent = formatted;
-    }
-    if (scrubberTimeRef.current) {
-      scrubberTimeRef.current.textContent = formatted;
     }
   };
 
@@ -515,10 +748,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
       const curState = stateRef.current;
       const curTl = timelineRef.current;
-      const stopBound = Math.max(
-        1,
-        curTl.prefixDurationSec > 0 ? curTl.prefixDurationSec : totalIntroSec
-      );
+      const stopBound = Math.max(1, totalIntroSec);
       const { nextPlayheadSec } = audioPreview.advanceAndSyncPlayback(
         curState,
         curTl,
@@ -683,6 +913,18 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
               }
             : prev
         );
+      } else if (dragAction.kind === 'trim_bgm_right') {
+        const nextDur = Number(
+          Math.max(1.5, Math.min(dragAction.maxDurationSec, snap(dragAction.origDurationSec + deltaSec))).toFixed(2)
+        );
+        onUpdateState((prev) =>
+          prev.introBgm
+            ? {
+                ...prev,
+                introBgm: { ...prev.introBgm, customDurationSec: nextDur },
+              }
+            : prev
+        );
       }
     };
 
@@ -835,7 +1077,6 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
   };
 
   const playheadPct = Math.max(0, Math.min(100, (playheadSec / timelineSpanSec) * 100));
-  const introProgressPct = Math.max(0, Math.min(100, (playheadSec / totalIntroSec) * 100));
 
   const wrapperClass = embedded
     ? 'flex-1 min-w-0 h-full flex flex-col bg-zinc-950 overflow-hidden px-3 py-2'
@@ -1088,50 +1329,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
           </div>
         </div>
 
-        {/* 片头进度条：与音轨视图进度条完全一致 */}
-        <div className="px-2.5 py-1 rounded-lg bg-zinc-950/90 border border-zinc-800/85 flex items-center gap-2.5 select-none shrink-0">
-          <span
-            ref={scrubberTimeRef}
-            className="font-mono tabular-nums text-[11px] text-purple-300 font-semibold w-14 shrink-0"
-          >
-            {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
-          </span>
-          <div
-            ref={scrubberRef}
-            onPointerDown={(e) => {
-              const el = scrubberRef.current;
-              if (!el) return;
-              const rect = el.getBoundingClientRect();
-              const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-              seekIntroToSec(ratio * totalIntroSec);
-            }}
-            className="relative flex-1 h-4 flex items-center cursor-pointer group"
-          >
-            <div className="relative w-full h-1.5 group-hover:h-2 transition-all rounded-full bg-zinc-800/95 overflow-hidden">
-              <div
-                ref={scrubberFillRef}
-                style={{ width: `${introProgressPct}%` }}
-                className="absolute inset-y-0 left-0 bg-gradient-to-r from-purple-600 via-purple-500 to-blue-400 rounded-full"
-              />
-            </div>
-            <div
-              ref={scrubberThumbRef}
-              style={{ left: `${introProgressPct}%` }}
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white border-2 border-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.85)] pointer-events-none"
-            />
-          </div>
-          <span className="font-mono tabular-nums text-[11px] text-purple-400 font-semibold w-16 text-right shrink-0">
-            {totalIntroSec.toFixed(1)}s
-          </span>
-        </div>
-
-        {/* 多轨 DAW 视图：左 176px 音轨头 + 右可缩放音轨画布，与音轨视图结构完全一致 */}
+        {/* 多轨 DAW 视图：左 176px 音轨头 + 右可缩放时间标尺/逐字文字带/音轨画布，与音轨视图完全一致 */}
         <div className="flex-1 min-h-0 flex rounded-xl border border-zinc-800/90 bg-zinc-950 overflow-hidden shadow-inner">
           {/* Left Track Headers (176px, matching WaveformEditorBar) */}
           <div className="w-[176px] shrink-0 border-r border-zinc-800/90 bg-zinc-900/75 flex flex-col">
             <div className="h-[22px] shrink-0 border-b border-zinc-800/90 px-2.5 flex items-center justify-between text-[10px] font-mono text-zinc-500">
               <span>音轨</span>
               <span>片头时间轴</span>
+            </div>
+            <div className="h-[24px] shrink-0 border-b border-zinc-800/90 px-2.5 flex items-center text-[10px] font-mono text-zinc-400 bg-[#0c0c11]">
+              <span>逐字文案</span>
             </div>
 
             <div className="flex-1 min-h-0 flex flex-col">
@@ -1262,6 +1469,27 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 </span>
               </div>
 
+              {/* 逐字文字带 (24px, matching WaveformEditorBar wordTimelineMode) */}
+              <div
+                onPointerDown={(e) => {
+                  const el = trackAreaRef.current;
+                  if (!el) return;
+                  const rect = el.getBoundingClientRect();
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                  const sec = Number((ratio * timelineSpanSec).toFixed(2));
+                  seekIntroToSec(sec);
+                  setDragAction({ kind: 'scrub', rectLeft: rect.left, rectWidth: rect.width });
+                }}
+                title="逐字对齐时间轴（单击或拖动定位播放游标）"
+                className="h-[24px] shrink-0 border-b border-white/10 bg-[#0c0c11] relative cursor-pointer"
+              >
+                <IntroWordRulerBand
+                  annotations={introWordAnnotations}
+                  totalSec={timelineSpanSec}
+                  trackColorBySpeaker={new Map(speakerTracks.map((t) => [t.id, t.color]))}
+                />
+              </div>
+
               <div className="flex-1 min-h-0 flex flex-col">
                 {speakerTracks.map((tr, trIdx) => {
                   const isTrackMuted = tr.muted;
@@ -1376,16 +1604,16 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                               />
                             )}
 
-                            {/* Top caption bar matching WaveformEditorBar clipCaptionsBySpeaker */}
+                            {/* Top compact clip badge (word-by-word captions rendered in top word band) */}
                             <div className="flex items-center justify-between gap-1 text-[9.5px] z-10 pl-0.5 pr-0.5 leading-tight">
                               <span
-                                className={`truncate pointer-events-none font-medium ${
-                                  isClipMuted ? 'text-zinc-400' : isPrimarySpeaker ? 'text-zinc-100' : 'text-zinc-300/80'
+                                className={`truncate pointer-events-none font-mono ${
+                                  isClipMuted ? 'text-zinc-400' : isPrimarySpeaker ? 'text-zinc-200' : 'text-zinc-400'
                                 }`}
                               >
                                 {isPrimarySpeaker
-                                  ? `🎙️ ${startSec.toFixed(1)}–${endSec.toFixed(1)}s · ${hl.text}`
-                                  : `副轨 · ${startSec.toFixed(1)}–${endSec.toFixed(1)}s`}
+                                  ? `🎙️ ${startSec.toFixed(1)}–${endSec.toFixed(1)}s`
+                                  : `副轨 ${startSec.toFixed(1)}–${endSec.toFixed(1)}s`}
                               </span>
                               <button
                                 type="button"
@@ -1521,6 +1749,24 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                       className="absolute top-1 bottom-1 rounded border border-cyan-500/45 bg-cyan-500/[0.06] overflow-hidden px-1.5 py-0.5 flex flex-col justify-between"
                     >
                       <div className="absolute top-0 left-0 right-0 h-[1.5px] bg-cyan-400/60 pointer-events-none" />
+                      {toolMode === 'edit' && (
+                        <div
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            setDragAction({
+                              kind: 'trim_bgm_right',
+                              startClientX: e.clientX,
+                              origDurationSec: introBgmDurationSec,
+                              maxDurationSec: Math.max(
+                                30,
+                                state.introBgm?.durationSec ?? introBgmDurationSec + 30
+                              ),
+                            });
+                          }}
+                          title="左右拖动调整片头 BGM 时长"
+                          className="absolute right-0 top-0 bottom-0 w-1.5 bg-cyan-300/30 hover:bg-cyan-300/80 cursor-ew-resize z-10"
+                        />
+                      )}
                       <span className="text-[9.5px] font-semibold text-cyan-300 truncate pointer-events-none z-10 leading-none">
                         🎬 片头 BGM · 固定 {introBgmDurationSec.toFixed(1)}s (智能避让 {state.bgmDuckDb ?? -18}dB)
                       </span>
