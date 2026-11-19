@@ -386,16 +386,18 @@ export function resolveEditedPlayheadToSource(
   // Find nearest non-deleted transcript token around inter-word breath gaps so UI focus stays continuous
   let nearestToken: (typeof arr)[number] | null = null;
   if (arr.length > 0) {
+    const isVisibleWord = (m: (typeof arr)[number]) =>
+      !m.token.deleted && (m.token.type !== 'silence' || m.token.durationSec >= 0.55 || Boolean(m.token.mouthClickCleaned));
     let prevTok: (typeof arr)[number] | null = null;
     for (let i = Math.min(arr.length - 1, Math.max(0, hi)); i >= 0; i--) {
-      if (!arr[i].token.deleted) {
+      if (isVisibleWord(arr[i])) {
         prevTok = arr[i];
         break;
       }
     }
     let nextTok: (typeof arr)[number] | null = null;
     for (let i = Math.max(0, Math.min(arr.length - 1, lo)); i < arr.length; i++) {
-      if (!arr[i].token.deleted) {
+      if (isVisibleWord(arr[i])) {
         nextTok = arr[i];
         break;
       }

@@ -854,6 +854,7 @@ export const App: React.FC = () => {
     let rafId = 0;
     let lastFrameMs = performance.now();
     let lastUiCommitSec = playheadRef.current;
+    let lastUiCommitTok: string | null = null;
     let prevWasBleeped = false;
 
     const tick = (nowMs: number) => {
@@ -893,13 +894,15 @@ export const App: React.FC = () => {
       prevWasBleeped = Boolean(resolved?.isBleeped);
 
       const nextBlk = resolved?.activeBlockId ?? null;
-      setActiveBlockId((prev) => (prev === nextBlk ? prev : nextBlk));
       const nextTok = resolved?.activeTokenId ?? null;
-      setActiveTokenId((prev) => (prev === nextTok ? prev : nextTok));
 
-      // Commit UI playhead at ~33fps so high-zoom waveform cursor glides smoothly with minimal main-thread React overhead
-      if (Math.abs(nextSec - lastUiCommitSec) >= 0.03) {
+      // Keep UI playhead, activeBlockId, and activeTokenId strictly locked to the exact same frame commit
+      // so text highlight and waveform/scrubber playhead never drift out of sync.
+      if (Math.abs(nextSec - lastUiCommitSec) >= 0.025 || nextTok !== lastUiCommitTok) {
         lastUiCommitSec = nextSec;
+        lastUiCommitTok = nextTok;
+        setActiveBlockId((prev) => (prev === nextBlk ? prev : nextBlk));
+        setActiveTokenId((prev) => (prev === nextTok ? prev : nextTok));
         setPlayheadSec(Number(nextSec.toFixed(3)));
       }
 

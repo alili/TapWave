@@ -692,7 +692,7 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
       >
         {isCurrent && (
           <div
-            className="pointer-events-none absolute top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-400 via-sky-400 to-blue-400 transition-[width] duration-75"
+            className="pointer-events-none absolute top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-400 via-sky-400 to-blue-400"
             style={{ width: `${(turnProgressRatio * 100).toFixed(1)}%` }}
           />
         )}
@@ -864,10 +864,11 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
               let prevEndedAsciiAlnum = false;
               return turn.tokens.map(({ mapped: m, flatIndex }) => {
                 const isActive =
-                  activeTokenIdInTurn === m.token.id ||
-                  (playheadSecInTurn !== null &&
-                    playheadSecInTurn >= m.editedStartSec &&
-                    playheadSecInTurn <= m.editedEndSec);
+                  activeTokenIdInTurn !== null
+                    ? activeTokenIdInTurn === m.token.id
+                    : playheadSecInTurn !== null &&
+                      playheadSecInTurn >= m.editedStartSec &&
+                      playheadSecInTurn <= m.editedEndSec;
                 const isSelected = selectedTokenIdsInTurn.has(m.token.id);
                 const isWaveRangeToken =
                   waveRangeStartSec !== null &&
@@ -5345,8 +5346,24 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                       turn.chapterTitle && turn.chapterTitle !== prevChapter
                     );
                     const turnSpanSec = Math.max(0.05, turn.editedEndSec - turn.editedStartSec);
+                    let effectiveTurnSec = playheadSec;
+                    if (
+                      playheadSec < timeline.coldOpenDurationSec &&
+                      idx === activeTokenTurnIdx &&
+                      activeTokenId
+                    ) {
+                      const activeTokInTurn = turn.tokens.find(
+                        (item) => item.mapped.token.id === activeTokenId
+                      );
+                      if (activeTokInTurn) {
+                        effectiveTurnSec =
+                          (activeTokInTurn.mapped.editedStartSec +
+                            activeTokInTurn.mapped.editedEndSec) *
+                          0.5;
+                      }
+                    }
                     const turnProgressRatio = isCurrent
-                      ? Math.min(1, Math.max(0, (playheadSec - turn.editedStartSec) / turnSpanSec))
+                      ? Math.min(1, Math.max(0, (effectiveTurnSec - turn.editedStartSec) / turnSpanSec))
                       : 0;
                     const turnSelection = selectedTokensByTurn.get(idx) ?? EMPTY_TOKEN_ID_SET;
                     const renderInteractiveTokens =
