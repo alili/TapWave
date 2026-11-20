@@ -25,6 +25,54 @@ import {
   TrackAcousticProfile,
 } from './waveformAligner';
 
+/**
+ * Computes a relative linear gain in (0, 0.94] for previewing multi-track audio via HTMLAudioElement.
+ * Because HTMLAudioElement.volume cannot exceed 1.0, tracks are normalized relative to the
+ * highest positive autoGainDb among all playable tracks so quieter and louder speakers align
+ * accurately during editing without clipping.
+ */
+export function computePreviewTrackLoudnessScale(
+  trackAutoGainDb: number,
+  allPlayableAutoGainDbs: number[],
+  loudnessAligned: boolean
+): number {
+  if (!loudnessAligned) return 0.92;
+  const clampedSelf = Math.min(18, Math.max(-12, trackAutoGainDb || 0));
+  const maxPositiveGainDb = allPlayableAutoGainDbs.reduce(
+    (maxDb, db) => Math.max(maxDb, Math.min(18, Math.max(-12, db || 0))),
+    0
+  );
+  const relativeDb = clampedSelf - maxPositiveGainDb;
+  const linear = Math.pow(10, relativeDb / 20);
+  return Math.max(0.05, Math.min(1.0, 0.94 * linear));
+}
+
+function appendProxyParamIfEnabled(resolvedUrl: string | undefined, useProxy: boolean): string | undefined {
+  if (!resolvedUrl || !useProxy) return resolvedUrl;
+  if (
+    resolvedUrl.startsWith('/api/audio-stream') ||
+    resolvedUrl.startsWith('http://127.0.0.1:')
+  ) {
+    if (resolvedUrl.includes('proxy=')) return resolvedUrl;
+    return `${resolvedUrl}${resolvedUrl.includes('?') ? '&' : '?'}proxy=1`;
+  }
+  return resolvedUrl;
+}
+
+const SKIM_CHUNK_DURATION_SEC = 30;
+
+function appendProxyChunkUrl(baseUrl: string | undefined, chunkIdx: number): string | undefined {
+  if (!baseUrl) return undefined;
+  if (
+    baseUrl.startsWith('/api/audio-stream') ||
+    baseUrl.startsWith('http://127.0.0.1:')
+  ) {
+    const withProxy = appendProxyParamIfEnabled(baseUrl, true)!;
+    return `${withProxy}&chunk=${chunkIdx}`;
+  }
+  return baseUrl;
+}
+
 function hashSpeakerPitch(speakerId: string): number {
   let h = 0;
   for (let i = 0; i < speakerId.length; i++) {
@@ -941,8 +989,34 @@ class AudioPreviewEngine {
     }
   >();
 
-  private preloadDecodedAuxBuffer(rawUrl: string | undefined, filePath: string | undefined): void {
-    const resolvedUrl = normalizePlayableAudioUrl(rawUrl, filePath, false);
+  private setDecodedBufferWithLru(url: string, audioBuf: AudioBuffer): void {
+    this.decodedAuxBuffers.delete(url);
+    this.decodedAuxBuffers.set(url, audioBuf);
+
+    const MAX_CACHED_BUFFERS = 24;
+    const MAX_CACHED_BYTES = 512 * 1024 * 1024;
+    const estimateBytes = (b: AudioBuffer) => b.length * b.numberOfChannels * 4;
+
+    let totalBytes = 0;
+    for (const b of this.decodedAuxBuffers.values()) {
+      totalBytes += estimateBytes(b);
+    }
+
+    while (
+      this.decodedAuxBuffers.size > 1 &&
+      (this.decodedAuxBuffers.size > MAX_CACHED_BUFFERS || totalBytes > MAX_CACHED_BYTES)
+    ) {
+      const oldestKey = this.decodedAuxBuffers.keys().next().value;
+      if (!oldestKey || oldestKey === url) break;
+      const oldestBuf = this.decodedAuxBuffers.get(oldestKey);
+      this.decodedAuxBuffers.delete(oldestKey);
+      if (oldestBuf) {
+        totalBytes -= estimateBytes(oldestBuf);
+      }
+    }
+  }
+
+  private preloadDecodedUrl(resolvedUrl: string | undefined): void {
     if (!resolvedUrl) return;
     if (this.decodedAuxBuffers.has(resolvedUrl) || this.decodingAuxUrls.has(resolvedUrl)) return;
     const ctx = this.ensureContext();
@@ -955,7 +1029,7 @@ class AudioPreviewEngine {
       })
       .then((arr) => ctx.decodeAudioData(arr))
       .then((audioBuf) => {
-        this.decodedAuxBuffers.set(resolvedUrl, audioBuf);
+        this.setDecodedBufferWithLru(resolvedUrl, audioBuf);
       })
       .catch(() => {
         // Fallback smoothly to HTMLAudioElement if decode fails
@@ -963,6 +1037,16 @@ class AudioPreviewEngine {
       .finally(() => {
         this.decodingAuxUrls.delete(resolvedUrl);
       });
+  }
+
+  private preloadDecodedAuxBuffer(
+    rawUrl: string | undefined,
+    filePath: string | undefined,
+    useProxy = false
+  ): void {
+    const baseUrl = normalizePlayableAudioUrl(rawUrl, filePath, false);
+    const resolvedUrl = appendProxyParamIfEnabled(baseUrl, useProxy);
+    this.preloadDecodedUrl(resolvedUrl);
   }
 
   private stopWebAudioAux(slot: 'intro_bgm' | 'outro_bgm' | 'intro_vo'): void {
@@ -1330,17 +1414,23 @@ class AudioPreviewEngine {
       }
     }
 
+    const useProxy = state.proxyEditingEnabled !== false;
+    this.warmupTrackBuffersForSkim(playable, useProxy);
     const rate = state.playbackRate || 1.0;
     for (const tr of playable) {
-      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}`;
+      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}`;
       const existing = this.trackElements.get(tr.id);
       if (!existing || existing.sourceKey !== sourceKey || existing.failedFatal) {
         if (existing) {
           this.disposeHolder(existing);
           this.trackElements.delete(tr.id);
         }
+        const previewAudioUrl = appendProxyParamIfEnabled(
+          normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false),
+          useProxy
+        );
         const created = this.createManagedHolder(
-          tr.audioUrl,
+          previewAudioUrl ?? tr.audioUrl,
           tr.filePath,
           tr.name,
           rate,
@@ -1459,6 +1549,11 @@ class AudioPreviewEngine {
     if (playable.length === 0) return;
 
     const mapped = resolveEditedPlayheadToSource(state, timeline, playheadSec);
+    this.warmupTrackBuffersForSkim(
+      playable,
+      state.proxyEditingEnabled !== false,
+      mapped.sourceSec ?? 0
+    );
     if (mapped.sourceSec !== null && !mapped.inIntroOrGapSilence) {
       for (const tr of playable) {
         const holder = this.trackElements.get(tr.id);
@@ -1793,6 +1888,7 @@ class AudioPreviewEngine {
     this.wasPlaying = false;
     this.forceSeekPending = true;
     this.lastSpanIndex = null;
+    this.stopWebAudioMainTracks();
     if (this.mixHolder) {
       this.mixHolder.pendingPlayAfterLoad = false;
       if (!this.mixHolder.audio.paused) {
@@ -1968,8 +2064,9 @@ class AudioPreviewEngine {
         }
 
         // 2. 在连续未切剪片段内部（避开切片首尾接缝），挑选一条正在发声的硬件音轨做温和漂移软校准
-        //    严格保证每帧至少前进 0.5 * stepSec，彻底杜绝因单轨提前 ended 或边界钳制造成游标卡死！
+        //    若当前正由 Web Audio 分块引擎驱动，硬件时钟已零漂移锁相，无需再做 <audio> 校准
         if (
+          this.activeWebAudioMainTracks.size === 0 &&
           spanHit &&
           this.lastSpanIndex === spanHit.span.spanIndex &&
           nextPlayheadSec > currentPlayheadSec
@@ -2142,6 +2239,7 @@ class AudioPreviewEngine {
     }
 
     const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
+    const playableAutoGainDbs = playableTracks.map((t) => t.autoGainDb || 0);
 
     // Dedicated Cold Open multi-track highlight playback (all tracks stay phase-locked at highlight source range)
     const inOrNearColdOpen =
@@ -2202,9 +2300,12 @@ class AudioPreviewEngine {
         if (isMuted) {
           clipGain = 0.0;
         } else {
-          if (tr && state.loudnessAligned) {
-            const dbFactor = Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20);
-            clipGain *= Math.min(1.0, 0.9 * dbFactor);
+          if (tr) {
+            clipGain *= computePreviewTrackLoudnessScale(
+              tr.autoGainDb,
+              playableAutoGainDbs,
+              state.loudnessAligned
+            );
           } else {
             clipGain *= 0.92;
           }
@@ -2271,13 +2372,65 @@ class AudioPreviewEngine {
       }
     }
 
+    const useProxy = state.proxyEditingEnabled !== false;
+    const canUseWebAudioMain =
+      useProxy &&
+      Math.abs(playbackRate - 1.0) <= 0.02 &&
+      !mapped.inColdOpen &&
+      !mapped.inIntroOrGapSilence &&
+      mapped.sourceSec !== null &&
+      this.trySyncWebAudioMainTracks(
+        state,
+        timeline,
+        playableTracks,
+        mapped.sourceSec,
+        playheadSec,
+        crossedCutOrScrub,
+        anySolo,
+        dominantSpeakerId,
+        playableAutoGainDbs,
+        nowPerf
+      );
+
+    if (canUseWebAudioMain) {
+      // 暂停 <audio> 主轨防止双声，同时保持静默不销毁已加载元素
+      for (const entry of this.trackElements.values()) {
+        if (!entry.audio.paused) {
+          entry.audio.pause();
+        }
+      }
+      // 依然保留 BGM / 辅助轨同步
+      this.syncTimelineAuxBeds(
+        state,
+        timeline,
+        playheadSec,
+        playbackRate,
+        mapped,
+        anySolo,
+        crossedCutOrScrub,
+        dominantSpeakerId,
+        coldClipWindows,
+        nowPerf
+      );
+      this.wasPlaying = true;
+      this.forceSeekPending = false;
+      this.lastSpanIndex = mapped.spanIndex;
+      return mapped;
+    }
+
+    this.stopWebAudioMainTracks();
+
     for (const tr of playableTracks) {
-      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}`;
+      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}`;
       let holder = this.trackElements.get(tr.id);
       if (!holder || holder.sourceKey !== sourceKey) {
         if (holder) this.disposeHolder(holder);
+        const previewAudioUrl = appendProxyParamIfEnabled(
+          normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false),
+          useProxy
+        );
         const created = this.createManagedHolder(
-          tr.audioUrl,
+          previewAudioUrl ?? tr.audioUrl,
           tr.filePath,
           tr.name,
           playbackRate,
@@ -2285,6 +2438,7 @@ class AudioPreviewEngine {
           tr.sourceFilePath
         );
         if (!created) continue;
+        created.sourceKey = sourceKey;
         holder = created;
         this.trackElements.set(tr.id, holder);
       }
@@ -2358,12 +2512,11 @@ class AudioPreviewEngine {
         // Explicit manual single-track mute by user
         gain = 0.0;
       } else {
-        if (state.loudnessAligned) {
-          const dbFactor = Math.pow(10, Math.min(8, Math.max(-12, tr.autoGainDb)) / 20);
-          gain *= Math.min(1.0, 0.9 * dbFactor);
-        } else {
-          gain *= 0.92;
-        }
+        gain *= computePreviewTrackLoudnessScale(
+          tr.autoGainDb,
+          playableAutoGainDbs,
+          state.loudnessAligned
+        );
 
         // Primary-Speaker Priority Auto-Ducking fallback (automatically lowers non-primary speaker tracks, including during speech overlaps!)
         const trackRecentlyOrSoonSpeaking =
@@ -2402,13 +2555,14 @@ class AudioPreviewEngine {
         }
       }
 
-      // 主轨使用宽松 0.9s 漂移保护（零卡顿）；
-      // 副轨超过 25ms 即硬对齐，10ms~25ms 内由 PLL 锁相，彻底消除多轨异步回声
+      // 仅对可听音轨在切点执行强对齐，静默/压低副轨放宽容差以消除密集剪辑段（如密集去口癖区）的多轨同步卡顿
+      const shouldForceSpliceSeek =
+        this.forceSeekPending || !this.wasPlaying || (crossedCutOrScrub && gain > 0.05);
       this.seekHolderOnSpliceOnly(
         holder,
         targetTrackSec,
-        crossedCutOrScrub,
-        isPrimarySyncTrack ? 0.9 : 0.025,
+        shouldForceSpliceSeek,
+        isPrimarySyncTrack ? 0.9 : gain > 0.05 ? 0.035 : 0.25,
         isPrimarySyncTrack ? 1000 : 350
       );
       this.applySlewedVolume(holder, gain, !this.wasPlaying || this.forceSeekPending);
@@ -2444,6 +2598,238 @@ class AudioPreviewEngine {
       }
     }
 
+    this.syncTimelineAuxBeds(
+      state,
+      timeline,
+      playheadSec,
+      playbackRate,
+      mapped,
+      anySolo,
+      crossedCutOrScrub,
+      dominantSpeakerId,
+      coldClipWindows,
+      nowPerf
+    );
+
+    this.wasPlaying = true;
+    this.forceSeekPending = false;
+    this.lastSpanIndex = mapped.spanIndex;
+    return mapped;
+  }
+
+  private activeWebAudioMainTracks: Map<
+    string,
+    {
+      source: AudioBufferSourceNode;
+      gainNode: GainNode;
+      chunkIdx: number;
+      startedCtxTime: number;
+      startedInChunkSec: number;
+    }
+  > = new Map();
+
+  private stopWebAudioMainTracks(): void {
+    if (this.activeWebAudioMainTracks.size === 0) return;
+    const ctx = this.ctx;
+    const entries = Array.from(this.activeWebAudioMainTracks.values());
+    this.activeWebAudioMainTracks.clear();
+    for (const entry of entries) {
+      this.retireSkimTrack(entry, ctx, 0.012);
+    }
+  }
+
+  private trySyncWebAudioMainTracks(
+    state: PodcastProjectState,
+    timeline: TimelineComputation,
+    playableTracks: SpeakerTrack[],
+    sourceSec: number,
+    playheadSec: number,
+    crossedCutOrScrub: boolean,
+    anySolo: boolean,
+    dominantSpeakerId: string | null,
+    playableAutoGainDbs: number[],
+    nowPerf: number
+  ): boolean {
+    const ctx = this.ensureContext();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+
+    // Verify all non-muted tracks' current 30s chunk is decoded (pre-fetching any missing chunks)
+    let allReady = true;
+    for (const tr of playableTracks) {
+      if (tr.muted || (anySolo && !tr.solo)) continue;
+      const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+      const trAbsSec = Math.max(0, sourceSec - effOffset);
+      const chunkIdx = Math.max(0, Math.floor(trAbsSec / SKIM_CHUNK_DURATION_SEC));
+      const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+      if (!chunkUrl || !this.decodedAuxBuffers.has(chunkUrl)) {
+        this.preloadDecodedUrl(chunkUrl);
+        allReady = false;
+      } else if (trAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > 18) {
+        this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1));
+      }
+    }
+    if (!allReady) return false;
+
+    const now = ctx.currentTime;
+    const masterSrcMs = sourceSec * 1000;
+    const activeIds = new Set<string>();
+
+    for (const tr of playableTracks) {
+      if (tr.muted || (anySolo && !tr.solo)) {
+        const old = this.activeWebAudioMainTracks.get(tr.id);
+        if (old) {
+          this.activeWebAudioMainTracks.delete(tr.id);
+          this.retireSkimTrack(old, ctx, 0.01);
+        }
+        continue;
+      }
+
+      const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+      const targetAbsSec = Math.max(0, sourceSec - effOffset);
+      const chunkIdx = Math.max(0, Math.floor(targetAbsSec / SKIM_CHUNK_DURATION_SEC));
+      const inChunkSec = targetAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC;
+
+      const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+      const buf = chunkUrl ? this.decodedAuxBuffers.get(chunkUrl) : undefined;
+      if (!buf || inChunkSec < 0 || inChunkSec >= buf.duration - 0.02) {
+        const old = this.activeWebAudioMainTracks.get(tr.id);
+        if (old) {
+          this.activeWebAudioMainTracks.delete(tr.id);
+          this.retireSkimTrack(old, ctx, 0.01);
+        }
+        continue;
+      }
+
+      // Compute exact track gain (loudness alignment + mute ranges + Auto-Solo ducking)
+      const inExplicitMuteRange = (state.trackMuteRanges ?? []).some(
+        (tm) =>
+          tm.trackId === tr.id &&
+          masterSrcMs >= tm.sourceStartMs &&
+          masterSrcMs <= tm.sourceEndMs
+      );
+      let gain = 1.0;
+      if (inExplicitMuteRange) {
+        gain = 0.0;
+      } else {
+        gain *= computePreviewTrackLoudnessScale(
+          tr.autoGainDb,
+          playableAutoGainDbs,
+          state.loudnessAligned
+        );
+        const trackRecentlyOrSoonSpeaking =
+          (this.speakerHoldUntilPerfMs.get(tr.id) ?? 0) > nowPerf;
+        const activeOvForTrack = timeline.overlapRegions.find(
+          (ov) =>
+            ov.secondarySpeakerId === tr.id &&
+            playheadSec >= ov.editedStartSec - 0.04 &&
+            playheadSec <= ov.editedEndSec + 0.08
+        );
+        if (activeOvForTrack?.muted) {
+          gain = 0.0;
+        } else if (
+          playableTracks.length > 1 &&
+          state.autoSoloMode !== 'off' &&
+          dominantSpeakerId &&
+          dominantSpeakerId !== tr.id &&
+          !activeOvForTrack?.keepFullVolume
+        ) {
+          if (state.autoSoloMode === 'hard_mute') {
+            gain *= 0.06;
+          } else {
+            const baseDuck = Math.max(
+              0.02,
+              Math.min(0.5, Math.pow(10, state.duckAttenuationDb / 20))
+            );
+            const overlapDuck = Math.max(0.22, Math.min(0.38, baseDuck * 2.0));
+            const silentTurnDuck =
+              state.recordingMode === 'same_room_sync'
+                ? Math.min(baseDuck, 0.04)
+                : baseDuck;
+            gain *= trackRecentlyOrSoonSpeaking || activeOvForTrack ? overlapDuck : silentTurnDuck;
+          }
+        }
+      }
+
+      const existing = this.activeWebAudioMainTracks.get(tr.id);
+      if (existing) {
+        const expectedInChunk =
+          existing.startedInChunkSec + Math.max(0, now - existing.startedCtxTime);
+        const drift = Math.abs(inChunkSec - expectedInChunk);
+        const needsResync =
+          crossedCutOrScrub ||
+          existing.chunkIdx !== chunkIdx ||
+          drift > 0.045 ||
+          expectedInChunk >= buf.duration - 0.04;
+        if (!needsResync) {
+          existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
+          activeIds.add(tr.id);
+          continue;
+        }
+        this.activeWebAudioMainTracks.delete(tr.id);
+        this.retireSkimTrack(existing, ctx, 0.008);
+      }
+
+      const source = ctx.createBufferSource();
+      source.buffer = buf;
+      source.playbackRate.value = 1.0;
+
+      const gainNode = ctx.createGain();
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.linearRampToValueAtTime(Math.max(0.0001, gain), now + 0.006);
+
+      source.connect(gainNode).connect(ctx.destination);
+      source.start(now, inChunkSec);
+
+      const entry = {
+        source,
+        gainNode,
+        chunkIdx,
+        startedCtxTime: now,
+        startedInChunkSec: inChunkSec,
+      };
+      this.activeWebAudioMainTracks.set(tr.id, entry);
+      activeIds.add(tr.id);
+
+      source.onended = () => {
+        if (this.activeWebAudioMainTracks.get(tr.id) === entry) {
+          this.activeWebAudioMainTracks.delete(tr.id);
+        }
+        try {
+          source.disconnect();
+          gainNode.disconnect();
+        } catch {
+          // Ignore disconnect errors
+        }
+      };
+    }
+
+    for (const [id, entry] of this.activeWebAudioMainTracks.entries()) {
+      if (!activeIds.has(id)) {
+        this.activeWebAudioMainTracks.delete(id);
+        this.retireSkimTrack(entry, ctx, 0.008);
+      }
+    }
+
+    return true;
+  }
+
+  private syncTimelineAuxBeds(
+    state: PodcastProjectState,
+    timeline: TimelineComputation,
+    playheadSec: number,
+    playbackRate: number,
+    mapped: ResolvedPlayheadTarget,
+    anySolo: boolean,
+    crossedCutOrScrub: boolean,
+    dominantSpeakerId: string | null,
+    coldClipWindows: ReturnType<typeof resolveColdOpenClipWindows>,
+    nowPerf: number
+  ): void {
     // Sync Fixed Intro Voiceover
     const voStartSec = timeline.introVoiceoverStartSec ?? timeline.coldOpenDurationSec;
     const voEndSec = voStartSec + timeline.introVoiceoverDurationSec;
@@ -2761,11 +3147,6 @@ class AudioPreviewEngine {
         endSec: state.outroBgm?.sourceEndSec,
       }
     );
-
-    this.wasPlaying = true;
-    this.forceSeekPending = false;
-    this.lastSpanIndex = mapped.spanIndex;
-    return mapped;
   }
 
   /** Plays standard broadcast 1000Hz Bleep (-14dBFS) with 10ms smooth cosine ramp */
@@ -2819,6 +3200,249 @@ class AudioPreviewEngine {
 
     makePhrase(0.0, 0.85, baseFreq);
     makePhrase(0.825, 0.9, baseFreq * 1.04);
+  }
+
+  private activeSkimTracks: Map<
+    string,
+    {
+      source: AudioBufferSourceNode;
+      gainNode: GainNode;
+      startedCtxTime: number;
+      startedSourceSec: number;
+      playbackRate: number;
+    }
+  > = new Map();
+
+  private retireSkimTrack(
+    entry: {
+      source: AudioBufferSourceNode;
+      gainNode: GainNode;
+    },
+    ctx: AudioContext | null,
+    fadeSec = 0.014
+  ): void {
+    try {
+      if (ctx) {
+        const now = ctx.currentTime;
+        entry.gainNode.gain.cancelScheduledValues(now);
+        entry.gainNode.gain.setValueAtTime(Math.max(0.0001, entry.gainNode.gain.value), now);
+        entry.gainNode.gain.linearRampToValueAtTime(0.0001, now + fadeSec);
+        entry.source.stop(now + fadeSec + 0.004);
+      } else {
+        entry.source.stop();
+      }
+    } catch {
+      // Ignore already-stopped source
+    }
+  }
+
+  /** Resumes Web AudioContext on user gesture (keydown / pointerdown) so skimming never stays muted */
+  public resumeContextForUserGesture(): void {
+    const ctx = this.ensureContext();
+    if (ctx && ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+  }
+
+  /** Pre-decodes the first 30s proxy chunk of each track in the background for instant skimming */
+  public warmupTrackBuffersForSkim(tracks: SpeakerTrack[], useProxy = true, aroundSec = 0): void {
+    const chunkIdx = Math.max(0, Math.floor(Math.max(0, aroundSec) / SKIM_CHUNK_DURATION_SEC));
+    for (const tr of tracks) {
+      if (tr.isRef) continue;
+      const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      if (useProxy) {
+        const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+        this.preloadDecodedUrl(chunkUrl);
+      } else {
+        this.preloadDecodedAuxBuffer(tr.audioUrl, tr.filePath, false);
+      }
+    }
+  }
+
+  /** Smoothly fades out and stops all active Web Audio skim sources */
+  public stopSkim(): void {
+    if (this.activeSkimTracks.size === 0) return;
+    const ctx = this.ctx;
+    const entries = Array.from(this.activeSkimTracks.values());
+    this.activeSkimTracks.clear();
+    for (const entry of entries) {
+      this.retireSkimTrack(entry, ctx, 0.018);
+    }
+  }
+
+  /**
+   * Continuous Phase-Steered Web Audio Skimmer (Final Cut Pro style):
+   * Maintains one continuous AudioBufferSourceNode per track while skimming forward and steers
+   * playbackRate smoothly to stay locked to the mouse cursor with zero grain stutter.
+   * Crossfades cleanly only on backward scrub or >55ms jumps.
+   */
+  public skimAtTimelineSec(
+    state: PodcastProjectState,
+    timeline: TimelineComputation,
+    playheadSec: number,
+    playbackRate: number
+  ): boolean {
+    const ctx = this.ensureContext();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+
+    const useProxy = state.proxyEditingEnabled !== false;
+    const playableTracks = state.tracks.filter((t) => !t.isRef);
+    if (playableTracks.length === 0) return false;
+
+    const mapped = resolveEditedPlayheadToSource(state, timeline, playheadSec);
+    if (mapped.sourceSec === null || mapped.inIntroOrGapSilence || mapped.isBleeped) {
+      this.stopSkim();
+      return true;
+    }
+
+    let anyDecoded = false;
+    for (const tr of playableTracks) {
+      const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      const trSec = Math.max(0, mapped.sourceSec - (tr.syncOffsetMs || 0) / 1000);
+      const chunkIdx = Math.max(0, Math.floor(trSec / SKIM_CHUNK_DURATION_SEC));
+      const url = useProxy
+        ? appendProxyChunkUrl(baseUrl, chunkIdx)
+        : appendProxyParamIfEnabled(baseUrl, false);
+      if (url && this.decodedAuxBuffers.has(url)) {
+        anyDecoded = true;
+        if (useProxy && trSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > 20) {
+          this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1));
+        }
+      } else {
+        this.preloadDecodedUrl(url);
+      }
+    }
+    if (!anyDecoded) return false;
+
+    const now = ctx.currentTime;
+    const safeRate = Math.max(0.5, Math.min(3.5, playbackRate || 1.0));
+    const anySolo = playableTracks.some((t) => t.solo);
+    const playableAutoGainDbs = playableTracks.map((t) => t.autoGainDb || 0);
+    const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
+    const activeIds = new Set<string>();
+
+    for (const tr of playableTracks) {
+      if (tr.muted || (anySolo && !tr.solo)) {
+        const old = this.activeSkimTracks.get(tr.id);
+        if (old) {
+          this.activeSkimTracks.delete(tr.id);
+          this.retireSkimTrack(old, ctx, 0.012);
+        }
+        continue;
+      }
+
+      const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      const targetAbsSec = mapped.sourceSec - (tr.syncOffsetMs || 0) / 1000;
+      if (targetAbsSec < 0) continue;
+      const chunkIdx = useProxy ? Math.max(0, Math.floor(targetAbsSec / SKIM_CHUNK_DURATION_SEC)) : 0;
+      const url = useProxy
+        ? appendProxyChunkUrl(baseUrl, chunkIdx)
+        : appendProxyParamIfEnabled(baseUrl, false);
+      if (!url) continue;
+      const buf = this.decodedAuxBuffers.get(url);
+      if (!buf) continue;
+
+      const targetSec = useProxy ? targetAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC : targetAbsSec;
+      if (targetSec < 0 || targetSec >= buf.duration - 0.02) {
+        const old = this.activeSkimTracks.get(tr.id);
+        if (old) {
+          this.activeSkimTracks.delete(tr.id);
+          this.retireSkimTrack(old, ctx, 0.012);
+        }
+        continue;
+      }
+
+      let gain = computePreviewTrackLoudnessScale(
+        tr.autoGainDb,
+        playableAutoGainDbs,
+        state.loudnessAligned
+      );
+      if (
+        playableTracks.length > 1 &&
+        state.autoSoloMode !== 'off' &&
+        dominantSpeakerId &&
+        dominantSpeakerId !== tr.id
+      ) {
+        if (state.autoSoloMode === 'hard_mute') {
+          gain *= 0.06;
+        } else {
+          const baseDuck = Math.max(
+            0.1,
+            Math.pow(10, (state.duckAttenuationDb ?? -20) / 20)
+          );
+          gain *= baseDuck;
+        }
+      }
+
+      const existing = this.activeSkimTracks.get(tr.id);
+      if (existing) {
+        const expectedSec =
+          existing.startedSourceSec + (now - existing.startedCtxTime) * existing.playbackRate;
+        const drift = targetSec - expectedSec;
+        if (drift >= -0.025 && drift <= 0.055 && expectedSec < buf.duration - 0.05) {
+          const steeredRate = Math.max(
+            0.5,
+            Math.min(3.5, safeRate + drift * 3.0)
+          );
+          existing.startedSourceSec = expectedSec;
+          existing.startedCtxTime = now;
+          existing.playbackRate = steeredRate;
+          existing.source.playbackRate.setTargetAtTime(steeredRate, now, 0.015);
+          existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
+          activeIds.add(tr.id);
+          continue;
+        }
+        this.activeSkimTracks.delete(tr.id);
+        this.retireSkimTrack(existing, ctx, 0.012);
+      }
+
+      if (gain <= 0.002) continue;
+
+      const source = ctx.createBufferSource();
+      source.buffer = buf;
+      source.playbackRate.value = safeRate;
+
+      const gainNode = ctx.createGain();
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.linearRampToValueAtTime(gain, now + 0.01);
+
+      source.connect(gainNode).connect(ctx.destination);
+      source.start(now, targetSec);
+
+      const entry = {
+        source,
+        gainNode,
+        startedCtxTime: now,
+        startedSourceSec: targetSec,
+        playbackRate: safeRate,
+      };
+      this.activeSkimTracks.set(tr.id, entry);
+      activeIds.add(tr.id);
+
+      source.onended = () => {
+        if (this.activeSkimTracks.get(tr.id) === entry) {
+          this.activeSkimTracks.delete(tr.id);
+        }
+        try {
+          source.disconnect();
+          gainNode.disconnect();
+        } catch {
+          // Ignore disconnect errors
+        }
+      };
+    }
+
+    for (const [id, entry] of this.activeSkimTracks.entries()) {
+      if (!activeIds.has(id)) {
+        this.activeSkimTracks.delete(id);
+        this.retireSkimTrack(entry, ctx, 0.012);
+      }
+    }
+
+    return true;
   }
 
   /** Auditions Cold Open BGM swell -> Auto-Ducking drop (-18dB) when speaker enters -> Outro swell */

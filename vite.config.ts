@@ -41,6 +41,52 @@ function needsPlaybackWavTranscode(filePath: string): boolean {
   );
 }
 
+function transcodeToCachedProxyWav(inputPath: string): string {
+  const stat = fs.statSync(inputPath);
+  const hash = crypto
+    .createHash('sha1')
+    .update(`${inputPath}|${stat.size}|${stat.mtimeMs}`)
+    .digest('hex')
+    .slice(0, 16);
+  const cacheDir = '/tmp/podcraft_playback_cache';
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const outWav = path.join(cacheDir, `px_${hash}.wav`);
+  if (fs.existsSync(outWav) && fs.statSync(outWav).size > 44) {
+    return outWav;
+  }
+  const tmpWav = path.join(cacheDir, `px_${hash}_${process.pid}.tmp.wav`);
+  const res = spawnSync(
+    resolveFfmpegBin(),
+    [
+      '-nostdin',
+      '-loglevel',
+      'error',
+      '-y',
+      '-threads',
+      '0',
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-sample_fmt',
+      's16',
+      tmpWav,
+    ],
+    { stdio: 'ignore' }
+  );
+  if (res.status === 0 && fs.existsSync(tmpWav)) {
+    fs.renameSync(tmpWav, outWav);
+    return outWav;
+  }
+  if (fs.existsSync(tmpWav)) {
+    fs.unlinkSync(tmpWav);
+  }
+  return inputPath;
+}
+
 function transcodeToCachedPlaybackWav(inputPath: string): string {
   const stat = fs.statSync(inputPath);
   const hash = crypto
@@ -675,6 +721,8 @@ function podcraftLocalSidecarPlugin(): Plugin {
       const reqUrl = new URL(req.url ?? '/api/audio-stream', 'http://localhost');
       const rawPath = reqUrl.searchParams.get('path') || '';
       const forceTranscode = reqUrl.searchParams.get('transcode') === 'wav';
+      const useProxy = reqUrl.searchParams.get('proxy') === '1' || reqUrl.searchParams.get('proxy') === 'true';
+      const chunkParam = reqUrl.searchParams.get('chunk');
       if (!rawPath || !fs.existsSync(rawPath)) {
         res.statusCode = 404;
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -682,10 +730,53 @@ function podcraftLocalSidecarPlugin(): Plugin {
         return;
       }
 
-      const servePath =
-        forceTranscode || needsPlaybackWavTranscode(rawPath)
+      const servePath = useProxy
+        ? transcodeToCachedProxyWav(rawPath)
+        : forceTranscode || needsPlaybackWavTranscode(rawPath)
           ? transcodeToCachedPlaybackWav(rawPath)
           : rawPath;
+
+      if (useProxy && chunkParam !== null) {
+        const chunkIdx = Math.max(0, parseInt(chunkParam, 10) || 0);
+        const hdrInfo = probeWavHeaderNode(servePath);
+        if (hdrInfo) {
+          const bytesPerSec = hdrInfo.sampleRate * hdrInfo.blockAlign;
+          const startByte = hdrInfo.dataOffset + chunkIdx * 30 * bytesPerSec;
+          const fileStat = fs.statSync(servePath);
+          if (startByte < fileStat.size) {
+            const avail = Math.min(fileStat.size - startByte, 32 * bytesPerSec);
+            const pcmBuf = Buffer.allocUnsafe(avail);
+            const fd = fs.openSync(servePath, 'r');
+            try {
+              fs.readSync(fd, pcmBuf, 0, avail, startByte);
+            } finally {
+              fs.closeSync(fd);
+            }
+            const wavHdr = Buffer.alloc(44);
+            wavHdr.write('RIFF', 0);
+            wavHdr.writeUInt32LE(36 + avail, 4);
+            wavHdr.write('WAVE', 8);
+            wavHdr.write('fmt ', 12);
+            wavHdr.writeUInt32LE(16, 16);
+            wavHdr.writeUInt16LE(1, 20);
+            wavHdr.writeUInt16LE(hdrInfo.channels, 22);
+            wavHdr.writeUInt32LE(hdrInfo.sampleRate, 24);
+            wavHdr.writeUInt32LE(bytesPerSec, 28);
+            wavHdr.writeUInt16LE(hdrInfo.blockAlign, 32);
+            wavHdr.writeUInt16LE(hdrInfo.bitsPerSample, 34);
+            wavHdr.write('data', 36);
+            wavHdr.writeUInt32LE(avail, 40);
+            const outBuf = Buffer.concat([wavHdr, pcmBuf]);
+            res.statusCode = 200;
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Content-Type', 'audio/wav');
+            res.setHeader('Content-Length', String(outBuf.length));
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+            res.end(outBuf);
+            return;
+          }
+        }
+      }
 
       const stat = fs.statSync(servePath);
       const total = stat.size;

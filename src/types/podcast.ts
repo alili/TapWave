@@ -332,6 +332,7 @@ export interface PodcastProjectState {
   autoSoloMode: AutoSoloMode;
   duckAttenuationDb: number;
   loudnessAligned: boolean;
+  proxyEditingEnabled?: boolean;
   deClickEnabled: boolean;
   deClickStrength: DeClickStrength;
   stripSilenceEnabled: boolean;

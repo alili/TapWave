@@ -69,6 +69,8 @@ import {
   TrackAcousticCalibration,
 } from '../engine/waveformEnvelopeLoader';
 import { PLAYBACK_RATES } from './TopStudioBar';
+import { audioPreview } from '../engine/audioPreviewEngine';
+import { computeHoverScrubRate, TimelineScrubSample } from '../engine/timelineScrubSpeed';
 
 interface SpeakerDeckTurn {
   turnKey: string;
@@ -104,6 +106,9 @@ interface WaveformEditorBarProps {
   onStepPlayhead: (deltaSec: number) => void;
   onChangePlaybackRate: (rate: number) => void;
   onSeekToSec: (sec: number) => void;
+  onHoverScrub?: (sec: number, rate: number) => void;
+  onHoverScrubStop?: () => void;
+  onToggleProxyEditing?: () => void;
   onWaveformCutAction: (
     startSec: number,
     endSec: number,
@@ -1269,6 +1274,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onStepPlayhead,
   onChangePlaybackRate,
   onSeekToSec: onRawSeekToSec,
+  onHoverScrub,
+  onHoverScrubStop,
+  onToggleProxyEditing,
   onWaveformCutAction: onRawWaveformCutAction,
   onToggleTrackSolo,
   onToggleTrackMute,
@@ -1358,6 +1366,111 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   );
   const onSeekToSec = (bodySec: number) => onRawSeekToSec(bodyOffsetSec + Math.max(0, bodySec));
   const lastDragAudioSeekPerfRef = useRef<number>(0);
+  const [hoverScrubEnabled, setHoverScrubEnabled] = useState<boolean>(true);
+  const [cmdKeyHeld, setCmdKeyHeld] = useState<boolean>(false);
+  const hoverScrubRateRef = useRef<number | null>(null);
+  const hoverScrubBtnLabelRef = useRef<HTMLSpanElement | null>(null);
+  const hoverScrubSampleRef = useRef<TimelineScrubSample | null>(null);
+  const hoverScrubIdleTimerRef = useRef<number | null>(null);
+
+  const syncHoverScrubBtnLabel = useCallback(
+    (rate: number | null) => {
+      const el = hoverScrubBtnLabelRef.current;
+      if (!el) return;
+      if (!hoverScrubEnabled) {
+        el.textContent = '划听已关';
+      } else if (zoomRef.current < 200) {
+        el.textContent = '⌘ 划听 (≥200x)';
+      } else if (rate !== null) {
+        el.textContent = `划听 ${rate.toFixed(1)}x`;
+      } else if (cmdKeyHeld) {
+        el.textContent = '⌘ 划听就绪';
+      } else {
+        el.textContent = '按住 ⌘ 划听';
+      }
+    },
+    [hoverScrubEnabled, cmdKeyHeld]
+  );
+
+  const stopHoverScrub = useCallback(() => {
+    if (hoverScrubIdleTimerRef.current !== null) {
+      window.clearTimeout(hoverScrubIdleTimerRef.current);
+      hoverScrubIdleTimerRef.current = null;
+    }
+    if (hoverScrubSampleRef.current !== null || hoverScrubRateRef.current !== null) {
+      hoverScrubSampleRef.current = null;
+      hoverScrubRateRef.current = null;
+      syncHoverScrubBtnLabel(null);
+      onHoverScrubStop?.();
+    }
+  }, [onHoverScrubStop, syncHoverScrubBtnLabel]);
+
+  const HOVER_SCRUB_MIN_ZOOM = 200;
+  const zoomRef = useRef<number>(1);
+
+  const triggerHoverScrubAtBodySec = useCallback(
+    (bodySec: number): number | null => {
+      if (
+        !hoverScrubEnabled ||
+        !onHoverScrub ||
+        zoomRef.current < HOVER_SCRUB_MIN_ZOOM ||
+        timeline.totalEditedDurationSec <= 0.01
+      ) {
+        return null;
+      }
+      const clampedBody = Math.max(0, Math.min(timeline.totalEditedDurationSec, bodySec));
+      const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const { rate, nextSample } = computeHoverScrubRate(
+        hoverScrubSampleRef.current,
+        clampedBody,
+        nowPerf
+      );
+      hoverScrubSampleRef.current = nextSample;
+      hoverScrubRateRef.current = rate;
+      syncHoverScrubBtnLabel(rate);
+      onHoverScrub(bodyOffsetSec + clampedBody, rate);
+
+      if (hoverScrubIdleTimerRef.current !== null) {
+        window.clearTimeout(hoverScrubIdleTimerRef.current);
+      }
+      hoverScrubIdleTimerRef.current = window.setTimeout(() => {
+        stopHoverScrub();
+      }, 110);
+      return rate;
+    },
+    [hoverScrubEnabled, onHoverScrub, timeline.totalEditedDurationSec, bodyOffsetSec, stopHoverScrub]
+  );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.key === 'Meta') {
+        audioPreview.resumeContextForUserGesture();
+        setCmdKeyHeld(true);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Meta' || !e.metaKey) {
+        setCmdKeyHeld(false);
+        stopHoverScrub();
+      }
+    };
+    const onBlur = () => {
+      setCmdKeyHeld(false);
+      stopHoverScrub();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      if (hoverScrubIdleTimerRef.current !== null) {
+        window.clearTimeout(hoverScrubIdleTimerRef.current);
+      }
+    };
+  }, [stopHoverScrub]);
+
   const seekDuringDrag = (bodySec: number) => {
     const clampedBody = Math.max(0, Math.min(timeline.totalEditedDurationSec, bodySec));
     setGlobalPlayheadSec(bodyOffsetSec + clampedBody);
@@ -1434,7 +1547,33 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const [outroTrimDragging, setOutroTrimDragging] = useState<boolean>(false);
   const [draftOutroDurationSec, setDraftOutroDurationSec] = useState<number | null>(null);
   const outroTrimActiveRef = useRef<boolean>(false);
-  const [hoverZone, setHoverZone] = useState<'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge'>('none');
+  type HoverZoneType = 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge';
+  const hoverZoneRef = useRef<HoverZoneType>('none');
+  const syncCanvasCursor = useCallback(
+    (zone: HoverZoneType, isPlayheadDrag = false, isOutroDrag = false) => {
+      const c = canvasRef.current;
+      if (!c) return;
+      if (isPlayheadDrag || zone === 'playhead') {
+        c.style.cursor = 'ew-resize';
+      } else if (isOutroDrag || zone === 'outro_trim_handle') {
+        c.style.cursor = 'col-resize';
+      } else if (zone === 'ruler' || zone === 'cut_badge') {
+        c.style.cursor = 'pointer';
+      } else {
+        c.style.cursor = 'crosshair';
+      }
+    },
+    []
+  );
+  const setHoverZoneFast = useCallback(
+    (nextZone: HoverZoneType) => {
+      if (hoverZoneRef.current === nextZone) return;
+      hoverZoneRef.current = nextZone;
+      syncCanvasCursor(nextZone, playheadDragging, outroTrimDragging);
+      scheduleOverlayDraw();
+    },
+    [playheadDragging, outroTrimDragging, syncCanvasCursor]
+  );
   const cutBadgeHitBoxesRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; editedSec: number }>>([]);
   const scrubHoverTooltipRef = useRef<HTMLDivElement | null>(null);
   const hoverRatioRef = useRef<number | null>(null);
@@ -1489,6 +1628,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   }>({ width: 0, height: 0, dpr: 1 });
 
   const [zoom, setZoom] = useState<number>(1);
+  zoomRef.current = zoom;
+  const canHoverScrubAtZoom = zoom >= HOVER_SCRUB_MIN_ZOOM;
+
+  useEffect(() => {
+    if (!canHoverScrubAtZoom) {
+      stopHoverScrub();
+    }
+  }, [canHoverScrubAtZoom, stopHoverScrub]);
   const [viewStartRatio, setViewStartRatio] = useState<number>(0);
   const [dragging, setDragging] = useState(false);
   const dragRawStartRatioRef = useRef<number | null>(null);
@@ -1736,6 +1883,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       nextStart = anchor - nextSpan * PLAYHEAD_AUTO_SCROLL_ANCHOR;
     }
     const maxStart = Math.max(0, 1 - nextSpan);
+    if (typeof customAnchorRatio === 'number') {
+      waveformManualPanUntilRef.current = Date.now() + 900;
+    }
     setZoom(clampedZoom);
     setViewStartRatio(Math.max(0, Math.min(maxStart, nextStart)));
   };
@@ -1874,37 +2024,66 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    let zoomRafId: number | null = null;
+    let pendingZoomFactor = 1;
+    let pendingZoomAnchor: number | undefined = undefined;
+    let panRafId: number | null = null;
+    let pendingPanDeltaPx = 0;
+
     const handleNativeWheel = (e: WheelEvent) => {
       const { zoom: curZ, viewStartRatio: curStart } = zoomViewRef.current;
 
-      // Trackpad two-finger pinch OR Ctrl/⌘ + mouse wheel -> cursor-anchored zoom!
+      // Trackpad two-finger pinch OR Ctrl/⌘ + mouse wheel -> RAF-coalesced cursor-anchored zoom!
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const rect = canvas.getBoundingClientRect();
         const localX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
         const normInView = rect.width > 0 ? localX / rect.width : 0.5;
-        const anchorRatio = Math.max(0, Math.min(1, curStart + normInView / curZ));
-        const factor = Math.exp(-e.deltaY * 0.0085);
-        applyZoomAtAnchor(curZ * factor, anchorRatio);
+        pendingZoomAnchor = Math.max(0, Math.min(1, curStart + normInView / curZ));
+        pendingZoomFactor *= Math.exp(-e.deltaY * 0.0085);
+        waveformManualPanUntilRef.current = Date.now() + 900;
+        if (zoomRafId === null) {
+          zoomRafId = window.requestAnimationFrame(() => {
+            zoomRafId = null;
+            const factor = pendingZoomFactor;
+            const anchor = pendingZoomAnchor;
+            pendingZoomFactor = 1;
+            pendingZoomAnchor = undefined;
+            applyZoomAtAnchor(zoomViewRef.current.zoom * factor, anchor);
+          });
+        }
         return;
       }
 
-      // Horizontal pan when zoomed in (trackpad swipe deltaX, Shift+wheel, or plain wheel over waveform)
+      // Horizontal pan when zoomed in (RAF-coalesced)
       if (curZ > 1) {
         const rawDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
         if (rawDelta !== 0) {
           e.preventDefault();
           waveformManualPanUntilRef.current = Date.now() + 2500;
-          const maxStart = Math.max(0, 1 - 1 / curZ);
-          setViewStartRatio((prev) =>
-            Math.max(0, Math.min(maxStart, prev + rawDelta / 750 / curZ))
-          );
+          pendingPanDeltaPx += rawDelta;
+          if (panRafId === null) {
+            panRafId = window.requestAnimationFrame(() => {
+              panRafId = null;
+              const delta = pendingPanDeltaPx;
+              pendingPanDeltaPx = 0;
+              const latestZ = zoomViewRef.current.zoom;
+              const maxStart = Math.max(0, 1 - 1 / latestZ);
+              setViewStartRatio((prev) =>
+                Math.max(0, Math.min(maxStart, prev + delta / 750 / latestZ))
+              );
+            });
+          }
         }
       }
     };
 
     canvas.addEventListener('wheel', handleNativeWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', handleNativeWheel);
+    return () => {
+      canvas.removeEventListener('wheel', handleNativeWheel);
+      if (zoomRafId !== null) window.cancelAnimationFrame(zoomRafId);
+      if (panRafId !== null) window.cancelAnimationFrame(panRafId);
+    };
   }, []);
 
   // Keyboard shortcuts: Cmd/Ctrl+Shift+Delete ripple-deletes all tracks,
@@ -1988,6 +2167,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   }, []);
 
   // Keep playhead anchored at left 1/3 during auto-scrolling (playback / scrubbing / out-of-view jump)
+  const lastAutoFollowCommitPerfRef = useRef<number>(0);
   useEffect(() => {
     const checkAutoFollow = () => {
       const wasPlaying = prevIsPlayingRef.current;
@@ -2007,6 +2187,11 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       if (dragging || playheadDragging) return;
       if (!scrubbing && Date.now() < waveformManualPanUntilRef.current) return;
 
+      const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (isPlaying && !scrubbing && nowPerf - lastAutoFollowCommitPerfRef.current < 45) {
+        return;
+      }
+
       const curPlayhead = getEffectivePlayheadSec();
       const nextStart = computeAutoScrollViewStartRatio({
         playheadSec: curPlayhead,
@@ -2017,6 +2202,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         viewportWidthPx: canvasMetrics.width,
       });
       if (Math.abs(nextStart - viewStartRatio) > 0.0005) {
+        lastAutoFollowCommitPerfRef.current = nowPerf;
         setViewStartRatio(nextStart);
       }
     };
@@ -3382,7 +3568,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           // ----------------------------------------------------
           // C. 拖拽截取手柄 (Trim Handle on the Left Edge)
           // ----------------------------------------------------
-          const isHandleHovered = hoverZone === 'outro_trim_handle';
+          const isHandleHovered = hoverZoneRef.current === 'outro_trim_handle';
           const handleW = 6;
           const handleX = Math.round(outroX0) - 2;
 
@@ -3407,7 +3593,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       // ----------------------------------------------------
       // D. 正在拖拽截取时的全局参考虚线与时间标签
       // ----------------------------------------------------
-      if (outroTrimDragging || (hoverZone === 'outro_trim_handle' && !dragging)) {
+      if (outroTrimDragging || (hoverZoneRef.current === 'outro_trim_handle' && !dragging)) {
         const trimX = Math.round(ratioToX(outroStartSec / totalSec)) + 0.5;
         if (trimX >= 0 && trimX <= W) {
           ctx.save();
@@ -4401,18 +4587,32 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       }
     }
 
-    // 7. Hover Scrub Guide Line & Timestamp Readout (shows 10ms precision at high zoom)
+    // 7. Hover Scrub / Final Cut Pro Skimmer Line & Timestamp Readout
     if (
       hoverRatio !== null &&
       !dragging &&
       hoverRatio >= viewStartRatio &&
       hoverRatio <= viewEndRatio
     ) {
+      const isSkimmingVisual =
+        hoverScrubEnabled && canHoverScrubAtZoom && (cmdKeyHeld || hoverScrubRateRef.current !== null);
       const hx = Math.round(ratioToX(hoverRatio)) + 0.5;
       ctx.save();
-      ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = 'rgba(244, 244, 245, 0.28)';
-      ctx.lineWidth = 1;
+      if (isSkimmingVisual) {
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.32)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(hx, wordTimelineMode ? topRulerBandH - 0.5 : RULER_H);
+        ctx.lineTo(hx, H);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#22d3ee';
+        ctx.lineWidth = 1.5;
+      } else {
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(244, 244, 245, 0.28)';
+        ctx.lineWidth = 1;
+      }
       ctx.beginPath();
       ctx.moveTo(hx, RULER_H);
       ctx.lineTo(hx, H);
@@ -4420,21 +4620,28 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.restore();
 
       const hoverSec = hoverRatio * totalSec;
-      const hLabel = formatPrecisionSec(hoverSec, visibleSecOverlay <= 15 ? 2 : 1);
+      const baseLabel = formatPrecisionSec(hoverSec, visibleSecOverlay <= 15 ? 2 : 1);
+      const activeSkimRate = hoverScrubRateRef.current;
+      const hLabel =
+        isSkimmingVisual && activeSkimRate !== null
+          ? `🎧 ${baseLabel} · ${activeSkimRate.toFixed(1)}x`
+          : isSkimmingVisual
+            ? `⌘ ${baseLabel}`
+            : baseLabel;
       ctx.font = wordTimelineMode
         ? '500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace'
         : '500 10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textBaseline = 'middle';
       const htw = ctx.measureText(hLabel).width;
       const pillX = Math.max(2, Math.min(W - htw - 10, hx - (htw + 8) / 2));
-      ctx.fillStyle = 'rgba(39, 39, 42, 0.94)';
+      ctx.fillStyle = isSkimmingVisual ? 'rgba(8, 51, 68, 0.96)' : 'rgba(39, 39, 42, 0.94)';
       ctx.beginPath();
       ctx.roundRect(pillX, topBadgeY, htw + 8, topBadgeH, wordTimelineMode ? 3 : 3.5);
       ctx.fill();
-      ctx.strokeStyle = 'rgba(113, 113, 122, 0.5)';
-      ctx.lineWidth = 0.75;
+      ctx.strokeStyle = isSkimmingVisual ? 'rgba(34, 211, 238, 0.85)' : 'rgba(113, 113, 122, 0.5)';
+      ctx.lineWidth = isSkimmingVisual ? 1 : 0.75;
       ctx.stroke();
-      ctx.fillStyle = '#e4e4e7';
+      ctx.fillStyle = isSkimmingVisual ? '#cffafe' : '#e4e4e7';
       ctx.fillText(hLabel, pillX + 4, topBadgeCenterY);
     }
 
@@ -4442,7 +4649,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     const playRatio = playheadSec / totalSec;
     if (playRatio >= viewStartRatio - 0.002 && playRatio <= viewEndRatio + 0.002) {
       const px = Math.max(0.5, Math.min(W - 0.5, ratioToX(playRatio)));
-      const headHighlighted = playheadDragging || hoverZone === 'playhead';
+      const headHighlighted = playheadDragging || hoverZoneRef.current === 'playhead';
       const lineStartY = wordTimelineMode ? topRulerBandH - 0.5 : RULER_H;
 
       ctx.strokeStyle = headHighlighted
@@ -4512,7 +4719,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     playheadDragging,
     outroTrimDragging,
     draftOutroDurationSec,
-    hoverZone,
     isMainStage,
     focusedTurn,
     focusedBlockOverlay,
@@ -5606,6 +5812,65 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             <span>剪辑标注{cutPoints.length > 0 ? ` (${cutPoints.length})` : ''}</span>
           </button>
 
+          <button
+            type="button"
+            onClick={() => {
+              setHoverScrubEnabled((prev) => {
+                const next = !prev;
+                if (!next) stopHoverScrub();
+                onNotify?.(
+                  next
+                    ? '🎧 已开启时间轴划听：按住 ⌘ Cmd 并在时间轴或进度条移动鼠标，即可按速度播放对应音频'
+                    : '🔇 已关闭时间轴 ⌘ 划听'
+                );
+                return next;
+              });
+            }}
+            title={
+              canHoverScrubAtZoom
+                ? '开启后，按住 ⌘ (Cmd) 并在底部进度条或波形时间轴上移动鼠标，将实时跟随鼠标位置与速度播放对应音频（松开 ⌘ 或停下自动暂停）'
+                : `需放大至 200x 以上方可使用按住 ⌘ 划听（当前 ${Math.round(zoom)}x）`
+            }
+            className={`px-2 py-0.5 rounded-md border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition ${
+              hoverScrubEnabled && canHoverScrubAtZoom
+                ? cmdKeyHeld
+                  ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200 shadow-sm'
+                  : 'bg-cyan-500/15 border-cyan-500/45 text-cyan-300 hover:bg-cyan-500/25'
+                : 'bg-zinc-900 border-zinc-700/80 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Volume2 className="w-3 h-3" />
+            <span ref={hoverScrubBtnLabelRef}>
+              {!hoverScrubEnabled
+                ? '划听已关'
+                : !canHoverScrubAtZoom
+                  ? '⌘ 划听 (≥200x)'
+                  : cmdKeyHeld
+                    ? '⌘ 划听就绪'
+                    : '按住 ⌘ 划听'}
+            </span>
+          </button>
+
+          {onToggleProxyEditing && (
+            <button
+              type="button"
+              onClick={onToggleProxyEditing}
+              title={
+                state.proxyEditingEnabled !== false
+                  ? '已开启代理文件剪辑（16kHz 轻量代理音轨，划听与加载提速 6x；最终导出仍使用原音质无损母带）'
+                  : '当前为原音质监听模式；点击切换为轻量代理文件剪辑以提升划听与多轨性能'
+              }
+              className={`px-2 py-0.5 rounded-md border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition ${
+                state.proxyEditingEnabled !== false
+                  ? 'bg-amber-500/15 border-amber-500/45 text-amber-300 hover:bg-amber-500/25'
+                  : 'bg-zinc-900 border-zinc-700/80 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>{state.proxyEditingEnabled !== false ? '代理剪辑' : '原音质'}</span>
+            </button>
+          )}
+
           {onOpenCutReportModal && (
             <button
               type="button"
@@ -5863,6 +6128,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           title="全片播放进度条：单击或左右拖动可随时跳转，单击上方文字稿任意字词也会同步跳至此位置"
           onPointerDown={(e) => {
             if (!hasLoadedTimeline || e.button !== 0) return;
+            stopHoverScrub();
             e.currentTarget.setPointerCapture(e.pointerId);
             manualScrollLockUntilRef.current = 0;
             waveformManualPanUntilRef.current = 0;
@@ -5872,14 +6138,25 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           onPointerMove={(e) => {
             const el = scrubberRef.current;
             const tooltip = scrubHoverTooltipRef.current;
-            if (el && tooltip && hasLoadedTimeline) {
+            if (el && hasLoadedTimeline) {
               const rect = el.getBoundingClientRect();
               if (rect.width > 0) {
                 const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                 const hoverTime = ratio * timeline.totalEditedDurationSec;
-                tooltip.style.display = 'block';
-                tooltip.style.left = `${ratio * 100}%`;
-                tooltip.textContent = `${formatMmSs(hoverTime)}.${Math.floor((hoverTime % 1) * 10)}`;
+                let scrubRate: number | null = null;
+                if (!scrubbing && hoverScrubEnabled && e.metaKey) {
+                  const targetBodySec = Math.max(0, hoverTime - bodyOffsetSec);
+                  scrubRate = triggerHoverScrubAtBodySec(targetBodySec);
+                } else if (!e.metaKey) {
+                  stopHoverScrub();
+                }
+                if (tooltip) {
+                  tooltip.style.display = 'block';
+                  tooltip.style.left = `${ratio * 100}%`;
+                  const baseTimeText = `${formatMmSs(hoverTime)}.${Math.floor((hoverTime % 1) * 10)}`;
+                  tooltip.textContent =
+                    scrubRate !== null ? `${baseTimeText} · 🎧 ${scrubRate.toFixed(1)}x` : baseTimeText;
+                }
               }
             }
             if (scrubbing) {
@@ -5897,8 +6174,12 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               e.currentTarget.releasePointerCapture(e.pointerId);
             }
           }}
-          onPointerCancel={() => setScrubbing(false)}
+          onPointerCancel={() => {
+            setScrubbing(false);
+            stopHoverScrub();
+          }}
           onMouseLeave={() => {
+            stopHoverScrub();
             if (!scrubbing && scrubHoverTooltipRef.current) {
               scrubHoverTooltipRef.current.style.display = 'none';
             }
@@ -6232,7 +6513,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               waveformManualPanUntilRef.current = 0;
               hoverRatioRef.current = ratio;
               setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
-              setHoverZone((prev) => (prev === zone ? prev : zone));
+              setHoverZoneFast(zone);
               scheduleOverlayDraw();
               e.currentTarget.setPointerCapture(e.pointerId);
 
@@ -6291,13 +6572,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 const clampedDragSec = Math.max(minStart, Math.min(totalSec - 1.5, dragSec));
                 const nextDuration = Math.max(1.5, totalSec - clampedDragSec);
                 setDraftOutroDurationSec(Number(nextDuration.toFixed(1)));
-                setHoverZone((prev) => (prev === 'outro_trim_handle' ? prev : 'outro_trim_handle'));
+                setHoverZoneFast('outro_trim_handle');
                 return;
               }
 
               if (playheadDragging) {
                 manualScrollLockUntilRef.current = 0;
-                setHoverZone((prev) => (prev === 'playhead' ? prev : 'playhead'));
+                setHoverZoneFast('playhead');
                 seekDuringDrag(effectiveRatio * totalSec);
                 return;
               }
@@ -6323,7 +6604,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 return;
               }
               const nextZone = detectCanvasHoverZone(localX, localY, rectWidth, rectHeight);
-              setHoverZone((prev) => (prev === nextZone ? prev : nextZone));
+              setHoverZoneFast(nextZone);
+              if (e.metaKey && hoverScrubEnabled && totalSec > 0) {
+                triggerHoverScrubAtBodySec(effectiveRatio * totalSec);
+                scheduleOverlayDraw();
+              } else {
+                stopHoverScrub();
+              }
             }}
             onPointerUp={(e) => {
               if (e.currentTarget.hasPointerCapture(e.pointerId)) {
@@ -6342,7 +6629,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                   onNotify?.(`✂️ 已截取片尾 BGM 时长为 ${draftOutroDurationSec} 秒（自动适应音量）`);
                 }
                 setDraftOutroDurationSec(null);
-                setHoverZone(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
+                setHoverZoneFast(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
                 return;
               }
 
@@ -6351,7 +6638,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 manualScrollLockUntilRef.current = 0;
                 onSeekToSec(effectiveRatio * totalSec);
                 setPlayheadDragging(false);
-                setHoverZone(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
+                setHoverZoneFast(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
                 return;
               }
               if (!dragging) return;
@@ -6385,14 +6672,15 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               setPlayheadDragging(false);
               setDragging(false);
               dragRawStartRatioRef.current = null;
-              setHoverZone('none');
+              setHoverZoneFast('none');
             }}
             onPointerLeave={() => {
+              stopHoverScrub();
               if (!playheadDragging && !dragging && !outroTrimActiveRef.current) {
                 hoverRatioRef.current = null;
                 scheduleOverlayDraw();
                 setHoverLaneIdx(null);
-                setHoverZone('none');
+                setHoverZoneFast('none');
               }
             }}
             onContextMenu={(e) => {
@@ -6431,12 +6719,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               }
             }}
             className={`block w-full h-full touch-none ${
-              playheadDragging || hoverZone === 'playhead'
+              playheadDragging
                 ? 'cursor-ew-resize'
-                : outroTrimDragging || hoverZone === 'outro_trim_handle'
+                : outroTrimDragging
                 ? 'cursor-col-resize'
-                : hoverZone === 'ruler' || hoverZone === 'cut_badge'
-                ? 'cursor-pointer'
                 : 'cursor-crosshair'
             }`}
           />

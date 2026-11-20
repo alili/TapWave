@@ -646,6 +646,112 @@ pub(crate) fn needs_wav_transcode(file_path: &str) -> bool {
         || lower.ends_with(".wma")
 }
 
+pub(crate) fn transcode_to_cached_proxy_wav(input_path: &str) -> Result<String, String> {
+    let meta = fs::metadata(input_path).map_err(|e| e.to_string())?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut hasher = DefaultHasher::new();
+    input_path.hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    mtime.hash(&mut hasher);
+    let cache_dir = PathBuf::from("/tmp/podcraft_playback_cache");
+    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+    let out_wav = cache_dir.join(format!("px_{:016x}.wav", hasher.finish()));
+    let out_str = out_wav.to_string_lossy().to_string();
+
+    if out_wav.exists() && fs::metadata(&out_wav).map(|m| m.len() > 44).unwrap_or(false) {
+        return Ok(out_str);
+    }
+
+    let tmp_wav = cache_dir.join(format!("px_{:016x}_{}.tmp.wav", hasher.finish(), std::process::id()));
+    let tmp_str = tmp_wav.to_string_lossy().to_string();
+
+    let status = Command::new(find_ffmpeg_bin())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-threads",
+            "0",
+            "-i",
+            input_path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-sample_fmt",
+            "s16",
+            &tmp_str,
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if !status.success() {
+        let _ = fs::remove_file(&tmp_wav);
+        return Err("FFmpeg 代理音频转码失败".into());
+    }
+    let _ = fs::rename(&tmp_wav, &out_wav);
+    Ok(out_str)
+}
+
+fn read_proxy_wav_chunk(proxy_wav_path: &str, chunk_idx: u64) -> Result<Vec<u8>, String> {
+    let mut f = File::open(proxy_wav_path).map_err(|e| e.to_string())?;
+    let total_len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if total_len <= 44 {
+        return Err("Invalid proxy WAV".into());
+    }
+    let mut hdr_probe = [0u8; 256];
+    let probe_len = f.read(&mut hdr_probe).unwrap_or(0);
+    let mut data_offset = 44u64;
+    if probe_len >= 44 {
+        for i in 12..probe_len.saturating_sub(8) {
+            if &hdr_probe[i..i + 4] == b"data" {
+                data_offset = (i + 8) as u64;
+                break;
+            }
+        }
+    }
+    let bytes_per_sec: u64 = 16000 * 2;
+    let start_byte = data_offset + chunk_idx * 30 * bytes_per_sec;
+    if start_byte >= total_len {
+        return Err("Chunk past EOF".into());
+    }
+    let want_bytes = 32 * bytes_per_sec;
+    let avail = (total_len - start_byte).min(want_bytes) as usize;
+    f.seek(SeekFrom::Start(start_byte)).map_err(|e| e.to_string())?;
+    let mut pcm = vec![0u8; avail];
+    f.read_exact(&mut pcm).map_err(|e| e.to_string())?;
+
+    let data_size = avail as u32;
+    let riff_size = 36u32.saturating_add(data_size);
+    let mut out = Vec::with_capacity(44 + avail);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes());  // AudioFormat = 1
+    out.extend_from_slice(&1u16.to_le_bytes());  // NumChannels = 1
+    out.extend_from_slice(&16000u32.to_le_bytes()); // SampleRate
+    out.extend_from_slice(&(16000u32 * 2).to_le_bytes()); // ByteRate
+    out.extend_from_slice(&2u16.to_le_bytes());  // BlockAlign
+    out.extend_from_slice(&16u16.to_le_bytes()); // BitsPerSample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    out.extend_from_slice(&pcm);
+    Ok(out)
+}
+
 pub(crate) fn transcode_to_cached_wav(input_path: &str) -> Result<String, String> {
     let meta = fs::metadata(input_path).map_err(|e| e.to_string())?;
     let mtime = meta
@@ -1155,15 +1261,23 @@ fn handle_audio_http_client(mut stream: TcpStream) {
         return;
     }
 
-    // Extract ?path=...&transcode=... from query string (or legacy path segment)
+    // Extract ?path=...&transcode=...&proxy=...&chunk=... from query string (or legacy path segment)
     let mut decoded_path = String::new();
     let mut force_transcode_wav = false;
+    let mut use_proxy = false;
+    let mut proxy_chunk_idx: Option<u64> = None;
     for pair in query_str.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             if k == "path" {
                 decoded_path = percent_decode_path(v);
             } else if k == "transcode" && v == "wav" {
                 force_transcode_wav = true;
+            } else if k == "proxy" && (v == "1" || v == "true") {
+                use_proxy = true;
+            } else if k == "chunk" {
+                if let Ok(idx) = v.parse::<u64>() {
+                    proxy_chunk_idx = Some(idx);
+                }
             }
         }
     }
@@ -1183,11 +1297,32 @@ fn handle_audio_http_client(mut stream: TcpStream) {
         return;
     }
 
-    let serve_path = if force_transcode_wav || needs_wav_transcode(&decoded_path) {
+    let serve_path = if use_proxy {
+        transcode_to_cached_proxy_wav(&decoded_path).unwrap_or_else(|_| decoded_path.clone())
+    } else if force_transcode_wav || needs_wav_transcode(&decoded_path) {
         transcode_to_cached_wav(&decoded_path).unwrap_or_else(|_| decoded_path.clone())
     } else {
         decoded_path
     };
+
+    if use_proxy {
+        if let Some(chunk_idx) = proxy_chunk_idx {
+            if let Ok(chunk_bytes) = read_proxy_wav_chunk(&serve_path, chunk_idx) {
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                    Access-Control-Allow-Origin: *\r\n\
+                    Content-Type: audio/wav\r\n\
+                    Content-Length: {}\r\n\
+                    Cache-Control: public, max-age=3600\r\n\
+                    Connection: close\r\n\r\n",
+                    chunk_bytes.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(&chunk_bytes);
+                return;
+            }
+        }
+    }
 
     let mut file = match File::open(&serve_path) {
         Ok(f) => f,

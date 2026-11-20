@@ -254,6 +254,7 @@ export function createEmptyProjectState(): PodcastProjectState {
     autoSoloMode: 'natural_ducking',
     duckAttenuationDb: -16,
     loudnessAligned: true,
+    proxyEditingEnabled: true,
     deClickEnabled: true,
     deClickStrength: 'medium',
     stripSilenceEnabled: false,

@@ -558,6 +558,10 @@ export const App: React.FC = () => {
     [
       state.coldOpenEnabled,
       state.highlights,
+      state.highlightGapSec,
+      state.autoHighlightGap,
+      state.targetTotalHighlightSec,
+      state.introBgm,
       state.introVoiceover,
       state.blocks,
       state.tracks,
@@ -600,6 +604,97 @@ export const App: React.FC = () => {
     const uiTokenId = resolved.inColdOpen ? null : resolved.activeTokenId;
     setActivePlaybackTarget(uiBlockId, uiTokenId);
     setGlobalPlayheadSec(clamped);
+  }, []);
+
+  const hoverScrubActiveRef = useRef<boolean>(false);
+  const wasPlayingBeforeHoverScrubRef = useRef<boolean>(false);
+  const preScrubPlayheadRef = useRef<number>(0);
+  const lastSkimSecRef = useRef<number>(0);
+  const lastHoverScrubSeekPerfRef = useRef<number>(0);
+
+  const handleHoverScrub = useCallback((sec: number, rate: number) => {
+    const maxDur = Math.max(0, timelineRef.current.totalEditedDurationSec);
+    if (maxDur <= 0) return;
+    const clamped = Math.max(0, Math.min(maxDur, Number(sec.toFixed(3))));
+    const safeRate = Math.max(0.5, Math.min(3.5, rate || 1.0));
+    const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+    if (!hoverScrubActiveRef.current) {
+      hoverScrubActiveRef.current = true;
+      wasPlayingBeforeHoverScrubRef.current = isPlayingRef.current;
+      preScrubPlayheadRef.current = playheadRef.current;
+      lastSkimSecRef.current = clamped;
+      lastHoverScrubSeekPerfRef.current = nowPerf;
+      if (isPlayingRef.current) {
+        audioPreview.pauseMultiTrackPlayback();
+      }
+      const handledByWebAudio = audioPreview.skimAtTimelineSec(
+        stateRef.current,
+        timelineRef.current,
+        clamped,
+        safeRate
+      );
+      if (!handledByWebAudio) {
+        audioPreview.requestSeek();
+        audioPreview.syncMultiTrackPlayback(
+          { ...stateRef.current, playbackRate: safeRate },
+          timelineRef.current,
+          clamped,
+          true
+        );
+        audioPreview.setLivePlaybackRate(safeRate);
+      }
+      return;
+    }
+
+    if (nowPerf - lastHoverScrubSeekPerfRef.current >= 16) {
+      const prevSkimSec = lastSkimSecRef.current;
+      lastHoverScrubSeekPerfRef.current = nowPerf;
+      lastSkimSecRef.current = clamped;
+      const handledByWebAudio = audioPreview.skimAtTimelineSec(
+        stateRef.current,
+        timelineRef.current,
+        clamped,
+        safeRate
+      );
+      if (!handledByWebAudio) {
+        audioPreview.setLivePlaybackRate(safeRate);
+        if (Math.abs(clamped - prevSkimSec) >= 0.04) {
+          audioPreview.requestSeek();
+          audioPreview.syncMultiTrackPlayback(
+            { ...stateRef.current, playbackRate: safeRate },
+            timelineRef.current,
+            clamped,
+            true
+          );
+        }
+      }
+    }
+  }, []);
+
+  const handleHoverScrubStop = useCallback(() => {
+    if (!hoverScrubActiveRef.current) return;
+    hoverScrubActiveRef.current = false;
+    audioPreview.stopSkim();
+    const baseRate = stateRef.current.playbackRate || 1.0;
+    if (wasPlayingBeforeHoverScrubRef.current) {
+      audioPreview.requestSeek();
+      audioPreview.syncMultiTrackPlayback(
+        stateRef.current,
+        timelineRef.current,
+        playheadRef.current,
+        true
+      );
+      audioPreview.setLivePlaybackRate(baseRate);
+    } else {
+      audioPreview.pauseMultiTrackPlayback();
+      audioPreview.setLivePlaybackRate(baseRate);
+      audioPreview.preSeekWhenPaused(
+        stateRef.current,
+        timelineRef.current,
+        preScrubPlayheadRef.current
+      );
+    }
   }, []);
 
   const applyRemappedPlayhead = useCallback(
@@ -897,6 +992,7 @@ export const App: React.FC = () => {
     }
   }, [
     state.tracks,
+    state.proxyEditingEnabled,
     state.introBgm,
     state.outroBgm,
     state.introVoiceover,
@@ -1012,7 +1108,7 @@ export const App: React.FC = () => {
 
   // Lightweight live playbackRate update (no seek / no AutoSolo re-eval / no buffer reset)
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && !hoverScrubActiveRef.current) {
       audioPreview.setLivePlaybackRate(state.playbackRate || 1.0);
     }
   }, [isPlaying, state.playbackRate]);
@@ -3579,6 +3675,17 @@ export const App: React.FC = () => {
   const stableSelectRange = useLatestCallback(handleSelectRange);
   const stableClearSelection = useLatestCallback(() => setSelectedIds(new Set()));
   const stableSeekToSec = useLatestCallback(seekToSec);
+  const stableHoverScrub = useLatestCallback(handleHoverScrub);
+  const stableHoverScrubStop = useLatestCallback(handleHoverScrubStop);
+  const stableToggleProxyEditing = useLatestCallback(() => {
+    const nextVal = stateRef.current.proxyEditingEnabled === false;
+    mutateProject((p) => ({ ...p, proxyEditingEnabled: nextVal }));
+    notify(
+      nextVal
+        ? '⚡ 已开启代理文件剪辑（16kHz 轻量代理音轨，划听与多轨加载提速 6x，最终导出仍用原音质）'
+        : '🎧 已切换为原音质监听模式（直接加载原始高采样率音频）'
+    );
+  });
   const stableInsertSilenceAtPlayhead = useLatestCallback((durSec: number) => {
     const atSec = playheadRef.current;
     mutateProject((prev) => insertSilenceAtPlayhead(prev, atSec, durSec));
@@ -4327,6 +4434,9 @@ export const App: React.FC = () => {
             onStepPlayhead={stableStepPlayhead}
             onChangePlaybackRate={stableChangePlaybackRate}
             onSeekToSec={stableSeekToSec}
+            onHoverScrub={stableHoverScrub}
+            onHoverScrubStop={stableHoverScrubStop}
+            onToggleProxyEditing={stableToggleProxyEditing}
             onWaveformCutAction={stableWaveformCutAction}
             onToggleTrackSolo={stableToggleTrackSolo}
             onToggleTrackMute={stableToggleTrackMute}
@@ -4448,6 +4558,9 @@ export const App: React.FC = () => {
           onStepPlayhead={stableStepPlayhead}
           onChangePlaybackRate={stableChangePlaybackRate}
           onSeekToSec={stableSeekToSec}
+          onHoverScrub={stableHoverScrub}
+          onHoverScrubStop={stableHoverScrubStop}
+          onToggleProxyEditing={stableToggleProxyEditing}
           onWaveformCutAction={stableWaveformCutAction}
           onToggleTrackSolo={stableToggleTrackSolo}
           onToggleTrackMute={stableToggleTrackMute}
