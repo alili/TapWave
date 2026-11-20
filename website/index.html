@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>点波 TapWave — 多轨 AI 播客剪辑桌面工作站</title>
+    <meta
+      name="description"
+      content="专为 macOS Apple Silicon 打造的文档与波形双驱动多轨播客精剪、表达教练与全渠道内容衍生工作站。支持 GCC-PHAT 多轨校准、文稿波形双向精剪、-16 LUFS 响度对齐与 60fps 微信群聊短视频导出。"
+    />
+    <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Ambient Background -->
+    <div class="ambient-bg" aria-hidden="true">
+      <div class="ambient-orb orb-cyan"></div>
+      <div class="ambient-orb orb-violet"></div>
+      <div class="acoustic-grid"></div>
+    </div>
+
+    <!-- Navigation -->
+    <header class="navbar" id="navbar">
+      <div class="container nav-inner">
+        <a href="#top" class="brand">
+          <img src="./assets/icon.svg" alt="点波 TapWave Logo" class="brand-logo" />
+          <div class="brand-text">
+            <span class="brand-name">点波 TapWave</span>
+            <span class="brand-badge">v2.2.1</span>
+          </div>
+        </a>
+
+        <nav class="nav-links" aria-label="主导航">
+          <a href="#features">核心特性</a>
+          <a href="#workbench">工作台演示</a>
+          <a href="#architecture">技术架构</a>
+          <a href="#releases">更新日志</a>
+          <a href="#download">下载与构建</a>
+        </nav>
+
+        <div class="nav-actions">
+          <a
+            href="https://github.com/alili/TapWave"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-ghost btn-sm"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+              />
+            </svg>
+            GitHub
+          </a>
+          <a href="#download" class="btn btn-primary btn-sm">下载 macOS 版</a>
+        </div>
+
+        <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="打开菜单" aria-expanded="false">
+          <span></span>
+          <span></span>
+        </button>
+      </div>
+
+      <!-- Mobile Drawer -->
+      <div class="mobile-drawer" id="mobileDrawer">
+        <a href="#features">核心特性</a>
+        <a href="#workbench">工作台演示</a>
+        <a href="#architecture">技术架构</a>
+        <a href="#releases">更新日志</a>
+        <a href="#download">下载与构建</a>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- Hero Section -->
+      <section class="hero">
+        <div class="container">
+          <div class="hero-content">
+            <div class="pill-badge">
+              <span class="pulse-dot"></span>
+              <span>PodCraft Studio Pro v2.2.1 · Apple Silicon 原生 · Tauri v2 + Rust DSP</span>
+            </div>
+
+            <h1 class="hero-title">
+              文档与波形双驱动的<br />
+              <span class="gradient-text">多轨 AI 播客精剪工作站</span>
+            </h1>
+
+            <p class="hero-subtitle">
+              专为 macOS（<code>arm64</code>）播客创作者打造。从 GCC-PHAT 毫秒级多轨校准、文稿与多轨波形双向精剪，到
+              <code>-16 LUFS</code> 广播级响度对齐与 <code>60fps</code> 微信群聊竖版短视频合成，让每一期长谈都拥有唱片级听感。
+            </p>
+
+            <div class="hero-cta">
+              <a href="#download" class="btn btn-primary btn-lg">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                下载 macOS 原生版 (v2.2.1)
+              </a>
+              <a href="#interactive-demo" class="btn btn-secondary btn-lg">体验文稿×波形交互剪辑</a>
+            </div>
+
+            <div class="hero-metrics">
+              <div class="metric-item">
+                <span class="metric-val mono">±20ms</span>
+                <span class="metric-label">过零点与能量谷值吸附</span>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-item">
+                <span class="metric-val mono">-16.0 LUFS</span>
+                <span class="metric-label">分轨有效语音响度对齐</span>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-item">
+                <span class="metric-val mono">60 fps</span>
+                <span class="metric-label">VideoToolbox 硬件视频渲染</span>
+              </div>
+              <div class="metric-divider"></div>
+              <div class="metric-item">
+                <span class="metric-val mono">.rpp</span>
+                <span class="metric-label">支持导出 Reaper 多轨工程</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Studio Mockup -->
+          <div class="studio-window" id="interactive-demo">
+            <div class="studio-titlebar">
+              <div class="studio-file">
+                <img src="./assets/icon.svg" alt="" class="studio-mini-icon" />
+                <span class="studio-filename">EP42_独立开发者的声音实验.podcraft</span>
+                <span class="studio-tag">48kHz · 3 轨 · GCC-PHAT 已校准 (0.4ms)</span>
+              </div>
+              <div class="studio-controls">
+                <div class="view-switcher" role="tablist" aria-label="文稿视图模式">
+                  <button class="switch-btn active" data-mode="timeline" role="tab" aria-selected="true">
+                    时间对话流
+                  </button>
+                  <button class="switch-btn" data-mode="speaker" role="tab" aria-selected="false">
+                    按发言人聚合
+                  </button>
+                </div>
+                <button class="action-chip" id="btnRemoveFillers" title="一键切除所有识别出的口癖词">
+                  <span class="chip-dot amber"></span>
+                  AI 一键去口癖
+                </button>
+                <button class="action-chip" id="btnPlayPreview" title="模拟播放并观察多轨衔接">
+                  <span class="play-triangle">▶</span>
+                  <span id="playBtnText">试听自然衔接</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="studio-body">
+              <!-- Transcript Panel -->
+              <div class="studio-transcript" id="demoTranscript">
+                <!-- Populated by main.js -->
+              </div>
+
+              <!-- Side Inspector -->
+              <aside class="studio-inspector">
+                <div class="inspector-card">
+                  <div class="inspector-title">剪辑状态统计</div>
+                  <div class="stat-row">
+                    <span>已切除口癖/冗余</span>
+                    <strong class="mono text-cyan" id="cutCountStat">0 处</strong>
+                  </div>
+                  <div class="stat-row">
+                    <span>节省成片时长</span>
+                    <strong class="mono text-emerald" id="savedTimeStat">0.0 s</strong>
+                  </div>
+                  <div class="stat-row">
+                    <span>自然衔接策略</span>
+                    <strong class="mono">±20ms 过零点</strong>
+                  </div>
+                </div>
+
+                <div class="inspector-card">
+                  <div class="inspector-title">标注图例（点击文稿词块即可切换切除）</div>
+                  <div class="legend-list">
+                    <div class="legend-item">
+                      <span class="demo-filler">嗯 / 那个</span>
+                      <span>口癖词（琥珀波浪线）</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="demo-typo">博客</span>
+                      <span>同音错字（无损改字不伤音频）</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="demo-corrected">播客</span>
+                      <span>AI 纠错已对齐字幕</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="inspector-card">
+                  <div class="inspector-title">动态发言人独奏 (Auto-Solo)</div>
+                  <p class="inspector-note">
+                    非主讲人轨自动压低 <code>-20dB</code> 并保留微弱环境底噪铺底，检测到重叠爆笑声自动豁免。
+                  </p>
+                </div>
+              </aside>
+            </div>
+
+            <!-- Multi-track Waveform Bar -->
+            <div class="studio-waveform">
+              <div class="waveform-header">
+                <span class="mono">MULTI-TRACK WAVEFORM · 亚字级边界修剪 ⚡</span>
+                <span class="mono text-muted" id="playheadTime">00:12.40 / 48:16.00</span>
+              </div>
+              <div class="tracks-container" id="demoTracks">
+                <div class="track-row">
+                  <div class="track-label">
+                    <span class="track-badge host">Track 1</span>
+                    <span>主持人 Alex</span>
+                  </div>
+                  <div class="track-bars" data-track="host"></div>
+                </div>
+                <div class="track-row">
+                  <div class="track-label">
+                    <span class="track-badge guest">Track 2</span>
+                    <span>嘉宾 林晚</span>
+                  </div>
+                  <div class="track-bars" data-track="guest"></div>
+                </div>
+                <div class="track-row">
+                  <div class="track-label">
+                    <span class="track-badge bgm">Aux BGM</span>
+                    <span>Auto-Ducking</span>
+                  </div>
+                  <div class="track-bars bgm-bars" data-track="bgm"></div>
+                </div>
+                <div class="playhead-line" id="playheadLine"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Core Features Bento Grid -->
+      <section class="section" id="features">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow">CORE CAPABILITIES</span>
+            <h2 class="section-title">为中文长对话而生的六大核心引擎</h2>
+            <p class="section-desc">
+              告别在传统 DAW 里放大波形找气口的繁琐，把时间留给内容判断与声音审美。
+            </p>
+          </div>
+
+          <div class="bento-grid">
+            <article class="bento-card">
+              <div class="card-icon icon-cyan">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M2 12h3l2-7 4 14 4-10 2 3h5" />
+                </svg>
+              </div>
+              <h3>同屋免校准 & GCC-PHAT 多设备校准</h3>
+              <p>
+                <strong>同屋录制模式</strong>默认多轨等长 <code>0ms</code> 秒速建轨，并开启跨轨串音门限抑制；<strong>多设备模式</strong>基于 Rust <code>rustfft</code> 广义互相关算法，以参考轨为时钟基准自动消除毫秒级启动偏差。
+              </p>
+            </article>
+
+            <article class="bento-card">
+              <div class="card-icon icon-blue">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="8" y1="13" x2="16" y2="13" />
+                  <line x1="8" y1="17" x2="12" y2="17" />
+                </svg>
+              </div>
+              <h3>文稿 × 多轨波形双向精剪</h3>
+              <p>
+                支持<strong>时间对话流</strong>与<strong>按发言人聚合</strong>双视图，按嘉宾独立清理口癖与压缩空白；底部波形支持框选「全轨波纹切除（含亚字级修剪 ⚡）」、「单轨局部静音」或「选区哔声消音」。
+              </p>
+            </article>
+
+            <article class="bento-card">
+              <div class="card-icon icon-emerald">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                </svg>
+              </div>
+              <h3>改字不伤音频 & “重说一遍”折叠</h3>
+              <p>
+                严格解耦「剪辑删音」与「改字校对」模式，结合播客专属词库精准修正同音错字并同步刷新 Shownotes 与字幕；融合瞬态拍手检测与语义重写识别，自动折叠废片。
+              </p>
+            </article>
+
+            <article class="bento-card">
+              <div class="card-icon icon-violet">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                </svg>
+              </div>
+              <h3>片头高光合成 & BGM Auto-Ducking</h3>
+              <p>
+                支持设置单片段时长（如 <code>8–20s</code>）与目标总长，收集高光至 <code>00:00</code> 片头并保留正文原处；片头曲自动下潜闪避人声，分轨响度对齐至 <code>-16 LUFS / -1.0 dBTP</code>，支持导出 Reaper (<code>.rpp</code>)。
+              </p>
+            </article>
+
+            <article class="bento-card">
+              <div class="card-icon icon-amber">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+              </div>
+              <h3>情绪能量曲线 & 表达训练教练</h3>
+              <p>
+                自动绘制全片情绪能量曲线，标记笑点、高潮与平缓区；量化拆解主持人提问与嘉宾输出控场比，生成多维发音与表达训练雷达图及改进建议卡。
+              </p>
+            </article>
+
+            <article class="bento-card">
+              <div class="card-icon icon-pink">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="7" y="2" width="10" height="20" rx="2" ry="2" />
+                  <line x1="12" y1="18" x2="12.01" y2="18" />
+                </svg>
+              </div>
+              <h3>60fps 微信群聊竖版短视频</h3>
+              <p>
+                内置仿微信群聊动态气泡渲染器，支持群聊左对齐 / 主客左右绿白气泡、深浅色皮肤、正在输入提示、笑声贴纸与消音马赛克脱敏，通过 macOS <code>h264_videotoolbox</code> 硬件加速直出 MP4。
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Interactive Workbench Showcase -->
+      <section class="section section-alt" id="workbench">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow">WORKFLOW DEEP-DIVE</span>
+            <h2 class="section-title">一站式完成从粗剪到全渠道分发</h2>
+            <p class="section-desc">点击切换不同工作模块，了解 TapWave 如何衔接剪辑、混音与内容衍生。</p>
+          </div>
+
+          <div class="tabs-wrapper">
+            <div class="tabs-nav" role="tablist" aria-label="工作模块详情">
+              <button class="tab-btn active" data-tab="align" role="tab" aria-selected="true">
+                01. 多轨校准与衔接
+              </button>
+              <button class="tab-btn" data-tab="intro" role="tab" aria-selected="false">
+                02. 片头片尾与 BGM
+              </button>
+              <button class="tab-btn" data-tab="coach" role="tab" aria-selected="false">
+                03. 情绪曲线与表达教练
+              </button>
+              <button class="tab-btn" data-tab="video" role="tab" aria-selected="false">
+                04. 微信群聊短视频导出
+              </button>
+            </div>
+
+            <div class="tab-panels">
+              <!-- Panel 1 -->
+              <div class="tab-panel active" id="panel-align">
+                <div class="panel-grid">
+                  <div class="panel-info">
+                    <h3>声学级自然衔接引擎，切完听不出剪辑痕迹</h3>
+                    <p>
+                      剪辑播客最怕“咔哒”爆音与突兀吞字。TapWave 在 Rust DSP 层实现了毫秒级声学边界处理：
+                    </p>
+                    <ul class="check-list">
+                      <li><strong>±20ms 过零点与能量谷值吸附</strong>：切点自动对齐到波形过零点，杜绝直流偏置爆音。</li>
+                      <li><strong>等功率交叉淡化 + 底噪补偿</strong>：跨句微停顿自动填充环境底噪，保持空间呼吸感一致。</li>
+                      <li><strong>动态发言人独奏 (Auto-Solo)</strong>：副轨自动压低至 <code>-20dB</code>，重叠爆笑声智能豁免。</li>
+                    </ul>
+                  </div>
+                  <div class="panel-visual">
+                    <div class="dsp-diagram">
+                      <div class="dsp-node">
+                        <span class="dsp-tag">Rust DSP</span>
+                        <strong>GCC-PHAT 广义互相关</strong>
+                        <span class="mono text-cyan">偏移修正: +14.2 ms</span>
+                      </div>
+                      <div class="dsp-arrow">→</div>
+                      <div class="dsp-node">
+                        <span class="dsp-tag">边界修剪</span>
+                        <strong>±20ms 过零点吸附</strong>
+                        <span class="mono text-emerald">0-Crossing Locked</span>
+                      </div>
+                      <div class="dsp-arrow">→</div>
+                      <div class="dsp-node">
+                        <span class="dsp-tag">响度标准</span>
+                        <strong>LUFS 二次标准化</strong>
+                        <span class="mono text-violet">-16.0 LUFS / -1.0 dBTP</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Panel 2 -->
+              <div class="tab-panel" id="panel-intro">
+                <div class="panel-grid">
+                  <div class="panel-info">
+                    <h3>金句高光片头 + 独立片尾视图 + BGM 拖拽截取</h3>
+                    <p>
+                      无需手动把片头金句复制粘贴到时间轴最前方，TapWave 让高光编排像整理歌单一样直观：
+                    </p>
+                    <ul class="check-list">
+                      <li><strong>参数化片头合成</strong>：预设单句时长范围（默认 <code>8s–20s</code>）与目标总长，精选片段自动汇总至 <code>00:00</code>，正文原处完整保留。</li>
+                      <li><strong>BGM 拖拽截取与提前避让</strong>：直接拖拽音频截取片头/片尾配乐，人声切入前自动淡出闪避（Auto-Ducking）。</li>
+                      <li><strong>Reaper 工程无缝衔接</strong>：一键导出标准 <code>.rpp</code> 多轨工程文件，满足专业混音师二次精调需求。</li>
+                    </ul>
+                  </div>
+                  <div class="panel-visual">
+                    <div class="intro-timeline-card">
+                      <div class="tl-row">
+                        <span class="tl-name">00:00 片头高光</span>
+                        <div class="tl-blocks">
+                          <span class="tl-chip cyan">金句 #1 (12s)</span>
+                          <span class="tl-chip cyan">金句 #2 (15s)</span>
+                          <span class="tl-chip blue">固定口播 (6s)</span>
+                        </div>
+                      </div>
+                      <div class="tl-row">
+                        <span class="tl-name">片头 BGM 轨</span>
+                        <div class="tl-ducking">
+                          <div class="duck-bar"></div>
+                          <span class="mono">Auto-Ducking (-18dB)</span>
+                        </div>
+                      </div>
+                      <div class="tl-row">
+                        <span class="tl-name">Shownotes</span>
+                        <div class="tl-notes">
+                          <span>00:00 开场与高光导览</span>
+                          <span>03:45 从独立开发到声音产品化</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Panel 3 -->
+              <div class="tab-panel" id="panel-coach">
+                <div class="panel-grid">
+                  <div class="panel-info">
+                    <h3>主客控场分析与个性化表达训练教练</h3>
+                    <p>
+                      好的播客不仅靠剪辑，更靠每一次录制的复盘提升。TapWave 基于声学能量与文稿语义生成多维复盘报告：
+                    </p>
+                    <ul class="check-list">
+                      <li><strong>全片情绪能量曲线</strong>：自动定位笑点密集区、观点高潮与节奏平缓段，辅助复盘节目张力。</li>
+                      <li><strong>主客问答控场比</strong>：清晰统计主持人提问占比、嘉宾有效输出时长与抢话频次。</li>
+                      <li><strong>表达训练建议卡</strong>：针对语速稳定性、口癖密度、停顿呼吸感输出可执行训练建议。</li>
+                    </ul>
+                  </div>
+                  <div class="panel-visual">
+                    <div class="coach-card">
+                      <div class="coach-header">
+                        <span>本集表达诊断 · 嘉宾 林晚</span>
+                        <span class="mono text-emerald">综合评分 89 / 100</span>
+                      </div>
+                      <div class="energy-bars">
+                        <div style="height: 35%"></div>
+                        <div style="height: 55%"></div>
+                        <div style="height: 85%" class="peak" title="观点高潮"></div>
+                        <div style="height: 45%"></div>
+                        <div style="height: 92%" class="peak" title="爆笑互动"></div>
+                        <div style="height: 60%"></div>
+                        <div style="height: 70%"></div>
+                        <div style="height: 40%"></div>
+                        <div style="height: 78%"></div>
+                        <div style="height: 50%"></div>
+                      </div>
+                      <div class="coach-metrics">
+                        <div><span>主客输出比</span><strong>28% : 72%</strong></div>
+                        <div><span>平均语速</span><strong>218 字/分</strong></div>
+                        <div><span>口癖密度</span><strong>1.4 次/分</strong></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Panel 4 -->
+              <div class="tab-panel" id="panel-video">
+                <div class="panel-grid">
+                  <div class="panel-info">
+                    <h3>60fps 微信群聊风竖版短视频，一键传播高光时刻</h3>
+                    <p>
+                      无需打开剪映或 AE 手动对齐字幕条，选定高光片段即可渲染可直接发布小红书、视频号、抖音的竖版视频：
+                    </p>
+                    <ul class="check-list">
+                      <li><strong>高还原度群聊气泡</strong>：支持群聊左对齐与主客左右绿白气泡切换，提供深浅双色皮肤。</li>
+                      <li><strong>细节动效拉满</strong>：内置「对方正在输入…」提示、笑声贴纸与敏感词消音马赛克脱敏。</li>
+                      <li><strong>Apple 硬件加速</strong>：调用 macOS <code>h264_videotoolbox</code> 硬件编码器，60fps 流畅直出 MP4。</li>
+                    </ul>
+                  </div>
+                  <div class="panel-visual">
+                    <div class="wechat-phone">
+                      <div class="phone-top">
+                        <span>9:41</span>
+                        <span>播客高光群 (3)</span>
+                        <span>•••</span>
+                      </div>
+                      <div class="phone-chat">
+                        <div class="chat-msg left">
+                          <div class="avatar">A</div>
+                          <div class="bubble white">其实很多创作者卡住的不是录音，而是回听自己声音的那一关。</div>
+                        </div>
+                        <div class="chat-msg right">
+                          <div class="bubble green">太真实了！第一次剪完 90 分钟，感觉自己说了两百个“然后”。😂</div>
+                          <div class="avatar g">林</div>
+                        </div>
+                        <div class="typing-hint">Alex 正在输入...</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Architecture & Stack -->
+      <section class="section" id="architecture">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow">ARCHITECTURE</span>
+            <h2 class="section-title">原生性能与本地 AI 隐私兼得</h2>
+            <p class="section-desc">
+              前端轻量响应、Rust 底层高并发音频处理、Apple Silicon 本地语音识别 Sidecar 三层解耦。
+            </p>
+          </div>
+
+          <div class="arch-grid">
+            <div class="arch-card">
+              <div class="arch-layer">前端交互层</div>
+              <h4>React 19 + TypeScript + Tailwind CSS</h4>
+              <p>双视图文稿编辑器、Canvas 高帧率多轨波形渲染、实时播放游标锁相。</p>
+            </div>
+            <div class="arch-card">
+              <div class="arch-layer">桌面壳与 DSP 引擎</div>
+              <h4>Tauri v2 + Rust (rustfft)</h4>
+              <p>GCC-PHAT 互相关对齐、过零点吸附、LUFS 响度测量、Reaper 工程导出与系统文件关联（<code>.podcraft</code> 双击直达）。</p>
+            </div>
+            <div class="arch-card">
+              <div class="arch-layer">AI 与视频管线</div>
+              <h4>Python Local ASR + 云端 LLM + VideoToolbox</h4>
+              <p>Apple Silicon 本地逐字时间戳识别，结合大语言模型生成大纲与纠错，硬件加速输出 60fps MP4。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Release Notes -->
+      <section class="section section-alt" id="releases">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow">CHANGELOG</span>
+            <h2 class="section-title">持续打磨的迭代记录</h2>
+            <p class="section-desc">紧贴真实播客剪辑场景高频演进，当前最新版本为 v2.2.1。</p>
+          </div>
+
+          <div class="release-list">
+            <div class="release-item current">
+              <div class="release-meta">
+                <span class="release-ver mono">v2.2.1</span>
+                <span class="release-date mono">2026-11-20</span>
+                <span class="release-badge">Latest</span>
+              </div>
+              <div class="release-notes">
+                <ul>
+                  <li>修复重叠片段及开头间隙裁剪后仍可能播放已裁剪波形的问题</li>
+                  <li>同步播放线程状态与副轨切点锁相，常规打包发布与性能优化</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="release-item">
+              <div class="release-meta">
+                <span class="release-ver mono">v2.2.0</span>
+                <span class="release-date mono">2026-11-20</span>
+              </div>
+              <div class="release-notes">
+                <ul>
+                  <li>新增独立片尾视图与 BGM 文件拖拽截取</li>
+                  <li>支持片头淡入淡出与提前避让、广播级响度对齐、音轨游标插入空白及精简操作栏</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="release-item">
+              <div class="release-meta">
+                <span class="release-ver mono">v2.1.14 ~ v2.1.16</span>
+                <span class="release-date mono">2026-11-18 ~ 19</span>
+              </div>
+              <div class="release-notes">
+                <ul>
+                  <li>增加金句智能挖掘与多维筛选工作台，默认金句时长设为 8s-20s 并支持自定义</li>
+                  <li>精简 AI 筛选弹窗，恢复工作台界面纯粹感</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="release-item">
+              <div class="release-meta">
+                <span class="release-ver mono">v2.1.0 ~ v2.1.13</span>
+                <span class="release-date mono">2026-11-17 ~ 18</span>
+              </div>
+              <div class="release-notes">
+                <ul>
+                  <li>注册 <code>.podcraft</code> 文件 macOS 系统打开方式，支持双击直达工程</li>
+                  <li>重构 Shownotes 与时间轴为段落主旨总结，升级智能大纲 3-8 分钟粒度规范</li>
+                  <li>支持导出合并音轨时执行全局二次音量标准化 (<code>-16.0 LUFS</code>)</li>
+                  <li>发布点波 TapWave 2.1.0，完善 GCC-PHAT 校准、动态独奏与微信群聊短视频导出</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Download & Developer Section -->
+      <section class="section" id="download">
+        <div class="container">
+          <div class="download-box">
+            <div class="download-left">
+              <div class="pill-badge">
+                <span>macOS 12.0+ · Apple Silicon (arm64)</span>
+              </div>
+              <h2>立即下载 点波 TapWave v2.2.1</h2>
+              <p>
+                轻量原生安装包（仅约 8 MB），内置完整多轨 DSP 音频引擎与全自动版本打包流水线。
+              </p>
+
+              <div class="download-cards">
+                <a
+                  href="https://github.com/alili/TapWave/releases"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="dl-card primary-dl"
+                >
+                  <div>
+                    <strong>标准 DMG 安装包</strong>
+                    <span class="mono">点波 TapWave_2.2.1_aarch64.dmg · 8.0 MB</span>
+                  </div>
+                  <span class="dl-arrow">↓</span>
+                </a>
+
+                <a
+                  href="https://github.com/alili/TapWave/releases"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="dl-card"
+                >
+                  <div>
+                    <strong>macOS ZIP 便携包</strong>
+                    <span class="mono">点波 TapWave_2.2.1_macOS.zip · 7.5 MB</span>
+                  </div>
+                  <span class="dl-arrow">↓</span>
+                </a>
+              </div>
+            </div>
+
+            <div class="download-right">
+              <div class="cli-card">
+                <div class="cli-header">
+                  <span class="mono">开发者本地构建与测试</span>
+                  <button class="copy-btn" data-copy="npm install && npm run tauri dev">复制命令</button>
+                </div>
+                <pre><code><span class="c-muted"># 1. 启动前端单元测试与生产构建</span>
+npm test && npm run build
+
+<span class="c-muted"># 2. 启动 macOS 原生 Tauri v2 桌面端</span>
+npm run tauri dev
+
+<span class="c-muted"># 3. 运行 Rust 音频 DSP 引擎单元测试</span>
+cd src-tauri && cargo test
+
+<span class="c-muted"># 4. (可选) 安装 Apple Silicon 本地 ASR 依赖</span>
+uv pip install -r sidecar/requirements.txt</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="container footer-inner">
+        <div class="footer-brand">
+          <img src="./assets/icon.svg" alt="点波 TapWave" width="28" height="28" />
+          <div>
+            <strong>点波 TapWave · PodCraft Studio Pro</strong>
+            <p>文档与波形双驱动的多轨 AI 播客剪辑桌面工作站</p>
+          </div>
+        </div>
+        <div class="footer-links">
+          <a href="#features">核心特性</a>
+          <a href="#workbench">工作台</a>
+          <a href="#releases">更新日志</a>
+          <a href="https://github.com/alili/TapWave" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </footer>
+
+    <script src="./main.js"></script>
+  </body>
+</html>

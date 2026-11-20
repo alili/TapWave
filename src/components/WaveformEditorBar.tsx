@@ -605,11 +605,20 @@ const PlayheadTimeText: React.FC<{
   bodyOffsetSec: number;
   className?: string;
 }> = React.memo(({ bodyOffsetSec, className }) => {
-  const rawSec = usePlayheadSec();
-  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  const spanRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!spanRef.current) return;
+      const effSec = Math.max(0, getPlayheadSec() - bodyOffsetSec);
+      spanRef.current.textContent = `${formatMmSs(effSec)}.${Math.floor((effSec % 1) * 10)}`;
+    };
+    update();
+    return subscribePlayhead(update);
+  }, [bodyOffsetSec]);
+  const initEff = Math.max(0, getPlayheadSec() - bodyOffsetSec);
   return (
-    <span className={className}>
-      {formatMmSs(effSec)}.{Math.floor((effSec % 1) * 10)}
+    <span ref={spanRef} className={className}>
+      {formatMmSs(initEff)}.{Math.floor((initEff % 1) * 10)}
     </span>
   );
 });
@@ -618,12 +627,21 @@ const ScrubberProgressFill: React.FC<{
   totalSec: number;
   bodyOffsetSec: number;
 }> = React.memo(({ totalSec, bodyOffsetSec }) => {
-  const rawSec = usePlayheadSec();
-  const effSec = Math.max(0, rawSec - bodyOffsetSec);
-  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+  const divRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!divRef.current) return;
+      const effSec = Math.max(0, getPlayheadSec() - bodyOffsetSec);
+      const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+      divRef.current.style.width = `${pct}%`;
+    };
+    update();
+    return subscribePlayhead(update);
+  }, [totalSec, bodyOffsetSec]);
   return (
     <div
-      style={{ width: `${pct}%` }}
+      ref={divRef}
+      style={{ width: '0%' }}
       className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-400 rounded-full"
     />
   );
@@ -634,12 +652,21 @@ const ScrubberThumb: React.FC<{
   bodyOffsetSec: number;
   scrubbing: boolean;
 }> = React.memo(({ totalSec, bodyOffsetSec, scrubbing }) => {
-  const rawSec = usePlayheadSec();
-  const effSec = Math.max(0, rawSec - bodyOffsetSec);
-  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+  const divRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!divRef.current) return;
+      const effSec = Math.max(0, getPlayheadSec() - bodyOffsetSec);
+      const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+      divRef.current.style.left = `${pct}%`;
+    };
+    update();
+    return subscribePlayhead(update);
+  }, [totalSec, bodyOffsetSec]);
   return (
     <div
-      style={{ left: `${pct}%` }}
+      ref={divRef}
+      style={{ left: '0%' }}
       className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-white border-2 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.85)] pointer-events-none transition-transform ${
         scrubbing ? 'w-3.5 h-3.5 scale-110' : 'w-3 h-3 group-hover:scale-110'
       }`}
@@ -651,10 +678,18 @@ const ScrubberPercentText: React.FC<{
   totalSec: number;
   bodyOffsetSec: number;
 }> = React.memo(({ totalSec, bodyOffsetSec }) => {
-  const rawSec = usePlayheadSec();
-  const effSec = Math.max(0, rawSec - bodyOffsetSec);
-  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
-  return <span className="ml-1 text-zinc-500">{Math.round(pct)}%</span>;
+  const spanRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!spanRef.current) return;
+      const effSec = Math.max(0, getPlayheadSec() - bodyOffsetSec);
+      const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+      spanRef.current.textContent = `${Math.round(pct)}%`;
+    };
+    update();
+    return subscribePlayhead(update);
+  }, [totalSec, bodyOffsetSec]);
+  return <span ref={spanRef} className="ml-1 text-zinc-500">0%</span>;
 });
 
 const TurnCardProgressBar: React.FC<{
@@ -662,14 +697,23 @@ const TurnCardProgressBar: React.FC<{
   editedEndSec: number;
   bodyOffsetSec: number;
 }> = React.memo(({ editedStartSec, editedEndSec, bodyOffsetSec }) => {
-  const rawSec = usePlayheadSec();
-  const effSec = Math.max(0, rawSec - bodyOffsetSec);
-  const span = Math.max(0.05, editedEndSec - editedStartSec);
-  const ratio = Math.min(1, Math.max(0, (effSec - editedStartSec) / span));
+  const divRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!divRef.current) return;
+      const effSec = Math.max(0, getPlayheadSec() - bodyOffsetSec);
+      const span = Math.max(0.05, editedEndSec - editedStartSec);
+      const ratio = Math.min(1, Math.max(0, (effSec - editedStartSec) / span));
+      divRef.current.style.width = `${(ratio * 100).toFixed(1)}%`;
+    };
+    update();
+    return subscribePlayhead(update);
+  }, [editedStartSec, editedEndSec, bodyOffsetSec]);
   return (
     <div
+      ref={divRef}
       className="pointer-events-none absolute top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-400 via-sky-400 to-blue-400"
-      style={{ width: `${(ratio * 100).toFixed(1)}%` }}
+      style={{ width: '0%' }}
     />
   );
 });
@@ -4481,7 +4525,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   }, [drawOverlayCanvas]);
 
   useEffect(() => {
-    const unsub = subscribePlayhead(scheduleOverlayDraw);
+    const unsub = subscribePlayhead(() => {
+      drawOverlayRef.current();
+    });
     return () => {
       unsub();
       if (overlayDrawRafRef.current !== null) {
@@ -4489,7 +4535,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         overlayDrawRafRef.current = null;
       }
     };
-  }, [scheduleOverlayDraw]);
+  }, []);
 
   const extractCanvasPos = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -4673,7 +4719,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       return;
     }
     centerFocusedTurnInDeck(playheadDragging || scrubbing ? 'auto' : 'smooth');
-  }, [isMainStage, deckCollapsed, deckFlowMode, focusTurnIdx, activeTokenId, playheadDragging, scrubbing]);
+  }, [isMainStage, deckCollapsed, deckFlowMode, focusTurnIdx, playheadDragging, scrubbing]);
 
   const resolveDeckRangeStartSec = (idxA: number, idxB: number, fallbackSec: number): number => {
     const lo = Math.min(idxA, idxB);

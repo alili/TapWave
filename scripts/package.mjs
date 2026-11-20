@@ -155,27 +155,33 @@ function getLocalDateString(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-// 检查 README.md 中指定日期是否已产生过版本记录（每天至多产生一个版本号）
+// 检查 CHANGELOG.md 中指定日期是否已产生过版本记录（每天至多产生一个版本号）
 function hasReleaseForDate(dateStr) {
-  const readmePath = path.join(ROOT_DIR, 'README.md');
-  if (!fs.existsSync(readmePath)) return false;
-  const content = fs.readFileSync(readmePath, 'utf8');
+  const changelogPath = path.join(ROOT_DIR, 'CHANGELOG.md');
+  if (!fs.existsSync(changelogPath)) return false;
+  const content = fs.readFileSync(changelogPath, 'utf8');
   const dateRegex = new RegExp(`^### \\[[^\\]]+\\] - ${dateStr}\\b`, 'm');
   return dateRegex.test(content);
 }
 
-// 更新 README.md 中的版本号和迭代记录（同版本号合并并去重）
+// 更新 README.md 中的版本号，并将迭代记录写入 CHANGELOG.md（同版本号合并并去重）
 function updateReadme(newVersion, summaryText) {
   const readmePath = path.join(ROOT_DIR, 'README.md');
-  let content = fs.readFileSync(readmePath, 'utf8');
+  if (fs.existsSync(readmePath)) {
+    let readmeContent = fs.readFileSync(readmePath, 'utf8');
+    readmeContent = readmeContent.replace(
+      /(v)[0-9]+\.[0-9]+\.[0-9]+/g,
+      `$1${newVersion}`
+    );
+    fs.writeFileSync(readmePath, readmeContent, 'utf8');
+  }
 
-  // 1. 更新顶部主标题中的版本号
-  content = content.replace(
-    /# PodCraft Studio Pro \(v[0-9.]+\)/,
-    `# PodCraft Studio Pro (v${newVersion})`
-  );
+  const changelogPath = path.join(ROOT_DIR, 'CHANGELOG.md');
+  let content = fs.existsSync(changelogPath)
+    ? fs.readFileSync(changelogPath, 'utf8')
+    : '# 版本迭代记录 (Changelog)\n\n---\n\n';
 
-  // 2. 格式化概要条目并去重
+  // 格式化概要条目并去重
   const today = getLocalDateString();
   const newLines = Array.from(
     new Set(
@@ -192,9 +198,7 @@ function updateReadme(newVersion, summaryText) {
     `(### \\[v${escapedVersion}\\] - )\\d{4}-\\d{2}-\\d{2}\\n([\\s\\S]*?)(?=\\n### \\[|$)`
   );
 
-  const headerRegex = /## 版本迭代记录 \(Release Notes\)/;
   if (existingVersionRegex.test(content)) {
-    // 合并到已存在的同版本号记录中，更新日期并去重条目
     content = content.replace(existingVersionRegex, (_match, prefix, existingBody) => {
       const existingLines = existingBody
         .split('\n')
@@ -205,21 +209,19 @@ function updateReadme(newVersion, summaryText) {
       );
       return `${prefix}${today}\n${mergedLines.join('\n')}\n`;
     });
-  } else if (headerRegex.test(content)) {
-    // 插入到已有标题正下方
+  } else if (/^---\s*\n+/m.test(content)) {
     const newReleaseEntry = `### [v${newVersion}] - ${today}\n${newLines.join('\n')}\n`;
     content = content.replace(
-      /## 版本迭代记录 \(Release Notes\)\n+/,
-      `## 版本迭代记录 (Release Notes)\n\n${newReleaseEntry}\n`
+      /^(---\s*\n+)/m,
+      `$1\n${newReleaseEntry}\n`
     );
   } else {
-    // 在最后添加迭代记录区块
     const newReleaseEntry = `### [v${newVersion}] - ${today}\n${newLines.join('\n')}\n`;
-    content = content.trimEnd() + `\n\n## 版本迭代记录 (Release Notes)\n\n${newReleaseEntry}\n`;
+    content = content.trimEnd() + `\n\n${newReleaseEntry}\n`;
   }
 
-  fs.writeFileSync(readmePath, content, 'utf8');
-  log(`✔ 已更新 README.md 标题与版本迭代记录 [v${newVersion}]`, colors.green);
+  fs.writeFileSync(changelogPath, content, 'utf8');
+  log(`✔ 已更新 README.md 版本号并写入 CHANGELOG.md [v${newVersion}]`, colors.green);
 }
 
 // 询问用户输入概要

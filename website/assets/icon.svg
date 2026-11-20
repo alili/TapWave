@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16" />
+      <stop offset="50%" stop-color="#0c1222" />
+      <stop offset="100%" stop-color="#05070d" />
+    </linearGradient>
+
+    <!-- Tap Pulse Core Gradient -->
+    <radialGradient id="pulseCore" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="30%" stop-color="#38bdf8" />
+      <stop offset="70%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Wave Stroke Gradients -->
+    <linearGradient id="waveGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#60a5fa" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+
+    <linearGradient id="waveGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" />
+      <stop offset="60%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#8b5cf6" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="coreGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Squircle / Rounded App Frame -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGrad)" stroke="#1e293b" stroke-width="2" />
+
+  <!-- Background Ambient Depth Lights -->
+  <circle cx="256" cy="256" r="140" fill="#0284c7" opacity="0.12" filter="url(#coreGlow)" />
+  <circle cx="256" cy="256" r="80" fill="#8b5cf6" opacity="0.15" filter="url(#coreGlow)" />
+
+  <!-- Outermost Wave 4: Expanding organic sound waves / ripples -->
+  <g filter="url(#softGlow)">
+    <path d="M 106 256 A 150 150 0 0 1 406 256" fill="none" stroke="url(#waveGrad1)" stroke-width="8" stroke-linecap="round" opacity="0.35" stroke-dasharray="14 18" />
+    <path d="M 106 256 A 150 150 0 0 0 406 256" fill="none" stroke="url(#waveGrad2)" stroke-width="8" stroke-linecap="round" opacity="0.25" stroke-dasharray="24 16" />
+
+    <!-- Wave 3: Strong rhythm pulse arcs -->
+    <path d="M 142 256 A 114 114 0 0 1 370 256" fill="none" stroke="url(#waveGrad2)" stroke-width="12" stroke-linecap="round" opacity="0.65" />
+    <path d="M 142 256 A 114 114 0 0 0 370 256" fill="none" stroke="url(#waveGrad1)" stroke-width="12" stroke-linecap="round" opacity="0.5" stroke-dasharray="180 30" />
+
+    <!-- Wave 2: Close acoustic ripple -->
+    <circle cx="256" cy="256" r="76" fill="none" stroke="url(#waveGrad1)" stroke-width="14" stroke-linecap="round" opacity="0.88" />
+
+    <!-- Wave 1: Immediate tap wave crest -->
+    <circle cx="256" cy="256" r="42" fill="none" stroke="#e0f2fe" stroke-width="8" stroke-linecap="round" opacity="0.95" />
+  </g>
+
+  <!-- Central Tap Point (Click focal point) -->
+  <circle cx="256" cy="256" r="32" fill="url(#pulseCore)" filter="url(#coreGlow)" />
+  <circle cx="256" cy="256" r="16" fill="#ffffff" />
+  <circle cx="256" cy="256" r="8" fill="#e0f2fe" />
+</svg>
