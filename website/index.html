@@ -6,7 +6,7 @@
     <title>点波 TapWave — 多轨 AI 播客剪辑桌面工作站</title>
     <meta
       name="description"
-      content="专为 macOS Apple Silicon 打造的文档与波形双驱动多轨播客精剪、表达教练与全渠道内容衍生工作站。支持 GCC-PHAT 多轨校准、文稿波形双向精剪、-16 LUFS 响度对齐与 60fps 微信群聊短视频导出。"
+      content="专为 macOS Apple Silicon 打造的文档与波形双驱动多轨播客精剪、表达教练与内容整理工作站。支持 GCC-PHAT 多轨校准、文稿波形双向精剪、-16 LUFS 响度对齐与 AI 智能大纲 Shownotes 生成。"
     />
     <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -37,6 +37,7 @@
         </a>
 
         <nav class="nav-links" aria-label="主导航">
+          <a href="#screenshots">界面导览</a>
           <a href="#features">核心特性</a>
           <a href="#workbench">工作台演示</a>
           <a href="#architecture">技术架构</a>
@@ -69,6 +70,7 @@
 
       <!-- Mobile Drawer -->
       <div class="mobile-drawer" id="mobileDrawer">
+        <a href="#screenshots">界面导览</a>
         <a href="#features">核心特性</a>
         <a href="#workbench">工作台演示</a>
         <a href="#architecture">技术架构</a>
@@ -94,7 +96,7 @@
 
             <p class="hero-subtitle">
               专为 macOS（<code>arm64</code>）播客创作者打造。从 GCC-PHAT 毫秒级多轨校准、文稿与多轨波形双向精剪，到
-              <code>-16 LUFS</code> 广播级响度对齐与 <code>60fps</code> 微信群聊竖版短视频合成，让每一期长谈都拥有唱片级听感。
+              <code>-16 LUFS</code> 广播级响度对齐与 AI 智能大纲 Shownotes 主旨总结，让每一期长谈都拥有唱片级听感。
             </p>
 
             <div class="hero-cta">
@@ -121,8 +123,8 @@
               </div>
               <div class="metric-divider"></div>
               <div class="metric-item">
-                <span class="metric-val mono">60 fps</span>
-                <span class="metric-label">VideoToolbox 硬件视频渲染</span>
+                <span class="metric-val mono">3-8 min</span>
+                <span class="metric-label">智能大纲划分粒度</span>
               </div>
               <div class="metric-divider"></div>
               <div class="metric-item">
@@ -228,7 +230,7 @@
                 <div class="track-row">
                   <div class="track-label">
                     <span class="track-badge guest">Track 2</span>
-                    <span>嘉宾 林晚</span>
+                    <span>嘉宾 德福</span>
                   </div>
                   <div class="track-bars" data-track="guest"></div>
                 </div>
@@ -240,6 +242,184 @@
                   <div class="track-bars bgm-bars" data-track="bgm"></div>
                 </div>
                 <div class="playhead-line" id="playheadLine"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Real Software Screenshots & Functional Zone Guide -->
+      <section class="section section-alt" id="screenshots">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow">REAL STUDIO INTERFACE</span>
+            <h2 class="section-title">真实软件界面与功能区导览</h2>
+            <p class="section-desc">
+              以下均为 点波 TapWave v2.2.1 桌面端真实运行截图，切换标签即可对照查看各功能区的布局与操作逻辑。
+            </p>
+          </div>
+
+          <div class="shot-tabs" role="tablist" aria-label="软件界面截图切换">
+            <button class="shot-tab active" data-shot="main" role="tab" aria-selected="true">
+              🎛️ 音轨视图与片头金句编排
+            </button>
+            <button class="shot-tab" data-shot="bgm" role="tab" aria-selected="false">
+              🎵 片头口播与 BGM 闪避配置
+            </button>
+            <button class="shot-tab" data-shot="asr" role="tab" aria-selected="false">
+              🤖 本地 SenseVoice / 云端 ASR 配置
+            </button>
+            <button class="shot-tab" data-shot="text" role="tab" aria-selected="false">
+              📝 沉浸式文稿视图
+            </button>
+          </div>
+
+          <div class="shot-stage">
+            <!-- Shot 1: Main Workspace -->
+            <div class="shot-view active" id="shot-main">
+              <div class="shot-frame" data-lightbox="./assets/screenshots/workspace-main.png" data-caption="点波 TapWave 主工作台（音轨视图）">
+                <img src="./assets/screenshots/workspace-main.png" alt="点波 TapWave 主工作台真实截图" loading="lazy" />
+                <span class="zoom-hint">点击放大查看原图 ↗</span>
+              </div>
+              <div class="shot-zones">
+                <div class="zone-header">
+                  <h3>音轨视图 · 全功能区说明</h3>
+                  <p>左侧编排多轨与高光片头，顶部直达核心动作，中央快速导入或恢复工程。</p>
+                </div>
+                <div class="zone-list">
+                  <div class="zone-card">
+                    <span class="zone-num">01</span>
+                    <div>
+                      <strong>顶部全局菜单与快捷动作栏</strong>
+                      <p>集成「文件 / 编辑 / 视图 / 音频与剪辑 / 片头口播与 BGM」菜单，右侧支持一键切换 <code>音轨视图</code> 与 <code>文稿视图</code>，下方提供倍速试听、生成 Shownotes 与导出 MP3 快捷入口。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">02</span>
+                    <div>
+                      <strong>左侧：导入文件与多轨校准区</strong>
+                      <p>支持「同屋录制模式（0ms 等长锁定）」与多设备参考轨 GCC-PHAT 校准，清晰管理每位发言人独立音轨。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">03</span>
+                    <div>
+                      <strong>左侧：高光片头与金句编排器</strong>
+                      <p>可视化展示片头时序结构（BGM 前导 <code>2.0s</code> + 金句整段闪避），预设 <code>8s~20s</code> 单句时长与 <code>15s~90s</code> 目标总长，支持自动均分金句间隔。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">04</span>
+                    <div>
+                      <strong>中央工作区：零预设纯净工程入口</strong>
+                      <p>支持 WAV / MP3 / M4A / FLAC 多轨流式导入提取峰值与响度，或一键打开 <code>.podcraft</code> 工程恢复完整剪辑状态与专属词库。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Shot 2: Intro & BGM -->
+            <div class="shot-view" id="shot-bgm">
+              <div class="shot-frame" data-lightbox="./assets/screenshots/intro-bgm-config.png" data-caption="片头固定口播与 BGM 垫乐配置面板">
+                <img src="./assets/screenshots/intro-bgm-config.png" alt="片头固定口播与 BGM 垫乐配置截图" loading="lazy" />
+                <span class="zoom-hint">点击放大查看原图 ↗</span>
+              </div>
+              <div class="shot-zones">
+                <div class="zone-header">
+                  <h3>片头口播与 BGM 垫乐 · 功能区说明</h3>
+                  <p>在顶部下拉菜单即可统一配置片头开场导语、片头/片尾配乐及人声闪避深度。</p>
+                </div>
+                <div class="zone-list">
+                  <div class="zone-card">
+                    <span class="zone-num">01</span>
+                    <div>
+                      <strong>片头固定口播</strong>
+                      <p>支持从全局资产库选用或本地导入固定欢迎词/栏目导语，自动插在正片最前方。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">02</span>
+                    <div>
+                      <strong>片头 BGM 垫乐与闪避深度 (Ducking)</strong>
+                      <p>仅接受本地安全音频格式（MP3 / WAV / AAC / M4A / FLAC），支持 <code>5s~60s</code> 或跟随音频时长，人声切入时自动以 <code>-12dB</code> 等预设深度平稳压低背景音乐。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">03</span>
+                    <div>
+                      <strong>片尾 BGM 垫乐与全局资产库</strong>
+                      <p>独立启用片尾收束垫乐平滑渐入，并可一键打开「固定口播与 BGM 资产库」跨工程复用常用音频。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Shot 3: Import & ASR -->
+            <div class="shot-view" id="shot-asr">
+              <div class="shot-frame" data-lightbox="./assets/screenshots/import-asr-config.png" data-caption="导入音频与 AI 识别配置弹窗">
+                <img src="./assets/screenshots/import-asr-config.png" alt="导入音频与 AI 识别配置截图" loading="lazy" />
+                <span class="zoom-hint">点击放大查看原图 ↗</span>
+              </div>
+              <div class="shot-zones">
+                <div class="zone-header">
+                  <h3>导入音频与 AI 识别配置 · 功能区说明</h3>
+                  <p>自由选择 Apple Silicon 本地离线识别或云端高精度分角色引擎，兼顾隐私与效率。</p>
+                </div>
+                <div class="zone-list">
+                  <div class="zone-card">
+                    <span class="zone-num">01</span>
+                    <div>
+                      <strong>本地多轨音频 / .podcraft 工程直达</strong>
+                      <p>顶部双主按钮直接选择多轨音频文件或打开已保存的 <code>.podcraft</code> 工程文件。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">02</span>
+                    <div>
+                      <strong>三引擎语音识别切换</strong>
+                      <p>支持 <code>本地 SenseVoice</code>（Apple Silicon 本地神经网络 + Silero VAD 零延迟免费离线）、<code>豆包语音</code>（单文件自动分角色拆轨）与 <code>DeepSeek ASR</code>。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">03</span>
+                    <div>
+                      <strong>云端大模型分析配置（可选）</strong>
+                      <p>支持填入 DeepSeek 官方 API 等大模型 Key（仅保存在本地运行内存），未填写时自动降级使用本地分析器。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Shot 4: Transcript View -->
+            <div class="shot-view" id="shot-text">
+              <div class="shot-frame" data-lightbox="./assets/screenshots/transcript-view.png" data-caption="沉浸式文稿视图">
+                <img src="./assets/screenshots/transcript-view.png" alt="点波 TapWave 文稿视图真实截图" loading="lazy" />
+                <span class="zoom-hint">点击放大查看原图 ↗</span>
+              </div>
+              <div class="shot-zones">
+                <div class="zone-header">
+                  <h3>文稿视图 · 沉浸式成稿精读与时间轴模式</h3>
+                  <p>一键隐藏左右侧边栏，显著拓宽中央文本阅读与精剪视野。</p>
+                </div>
+                <div class="zone-list">
+                  <div class="zone-card">
+                    <span class="zone-num">01</span>
+                    <div>
+                      <strong>顶栏视图无缝切换</strong>
+                      <p>在右上角 <code>🎛️ 音轨视图</code> 与 <code>📝 文稿视图</code> 之间一键切换，满足不同阶段的剪辑与校对习惯。</p>
+                    </div>
+                  </div>
+                  <div class="zone-card">
+                    <span class="zone-num">02</span>
+                    <div>
+                      <strong>聚焦自然段成稿与 AI 时间轴</strong>
+                      <p>进入文稿视图后自动收起音轨与高光侧边栏，专注审阅自然段成稿、生成 Shownotes 与导出成片。</p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -328,13 +508,17 @@
             <article class="bento-card">
               <div class="card-icon icon-pink">
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-                  <rect x="7" y="2" width="10" height="20" rx="2" ry="2" />
-                  <line x1="12" y1="18" x2="12.01" y2="18" />
+                  <line x1="8" y1="6" x2="21" y2="6" />
+                  <line x1="8" y1="12" x2="21" y2="12" />
+                  <line x1="8" y1="18" x2="21" y2="18" />
+                  <line x1="3" y1="6" x2="3.01" y2="6" />
+                  <line x1="3" y1="12" x2="3.01" y2="12" />
+                  <line x1="3" y1="18" x2="3.01" y2="18" />
                 </svg>
               </div>
-              <h3>60fps 微信群聊竖版短视频</h3>
+              <h3>AI 智能大纲与 Shownotes 总结</h3>
               <p>
-                内置仿微信群聊动态气泡渲染器，支持群聊左对齐 / 主客左右绿白气泡、深浅色皮肤、正在输入提示、笑声贴纸与消音马赛克脱敏，通过 macOS <code>h264_videotoolbox</code> 硬件加速直出 MP4。
+                遵循 <code>3–8</code> 分钟划分粒度与 <code>12–25</code> 字 Hook 标题公式生成标准时间戳，将 Shownotes 与时间轴重构为段落主旨总结，杜绝冗长原文摘抄。
               </p>
             </article>
           </div>
@@ -361,8 +545,8 @@
               <button class="tab-btn" data-tab="coach" role="tab" aria-selected="false">
                 03. 情绪曲线与表达教练
               </button>
-              <button class="tab-btn" data-tab="video" role="tab" aria-selected="false">
-                04. 微信群聊短视频导出
+              <button class="tab-btn" data-tab="shownotes" role="tab" aria-selected="false">
+                04. 智能大纲与 Shownotes
               </button>
             </div>
 
@@ -465,7 +649,7 @@
                   <div class="panel-visual">
                     <div class="coach-card">
                       <div class="coach-header">
-                        <span>本集表达诊断 · 嘉宾 林晚</span>
+                        <span>本集表达诊断 · 嘉宾 德福</span>
                         <span class="mono text-emerald">综合评分 89 / 100</span>
                       </div>
                       <div class="energy-bars">
@@ -491,36 +675,47 @@
               </div>
 
               <!-- Panel 4 -->
-              <div class="tab-panel" id="panel-video">
+              <div class="tab-panel" id="panel-shownotes">
                 <div class="panel-grid">
                   <div class="panel-info">
-                    <h3>60fps 微信群聊风竖版短视频，一键传播高光时刻</h3>
+                    <h3>智能大纲规范与 Shownotes 主旨总结，告别流水账</h3>
                     <p>
-                      无需打开剪映或 AE 手动对齐字幕条，选定高光片段即可渲染可直接发布小红书、视频号、抖音的竖版视频：
+                      基于全片语义结构提炼章节与时间轴，让听众在 10 秒内看懂整期播客的核心脉络：
                     </p>
                     <ul class="check-list">
-                      <li><strong>高还原度群聊气泡</strong>：支持群聊左对齐与主客左右绿白气泡切换，提供深浅双色皮肤。</li>
-                      <li><strong>细节动效拉满</strong>：内置「对方正在输入…」提示、笑声贴纸与敏感词消音马赛克脱敏。</li>
-                      <li><strong>Apple 硬件加速</strong>：调用 macOS <code>h264_videotoolbox</code> 硬件编码器，60fps 流畅直出 MP4。</li>
+                      <li><strong>标准时间戳大纲</strong>：统一 <code>3–8 分钟</code> 划分粒度，搭配 <code>12–25 字</code> Hook 标题公式。</li>
+                      <li><strong>纯正主旨总结</strong>：彻底杜绝原文引述与引号摘抄，直接提炼每段对话的核心观点与结论。</li>
+                      <li><strong>文稿模式一键联动</strong>：剪辑删音或无损改字后，时间轴与 Shownotes 同步刷新对齐。</li>
                     </ul>
                   </div>
                   <div class="panel-visual">
-                    <div class="wechat-phone">
-                      <div class="phone-top">
-                        <span>9:41</span>
-                        <span>播客高光群 (3)</span>
-                        <span>•••</span>
+                    <div class="shownotes-card">
+                      <div class="shownotes-head">
+                        <span>AI Shownotes · 自动生成</span>
+                        <span class="mono text-cyan">3–8 min / 章节</span>
                       </div>
-                      <div class="phone-chat">
-                        <div class="chat-msg left">
-                          <div class="avatar">A</div>
-                          <div class="bubble white">其实很多创作者卡住的不是录音，而是回听自己声音的那一关。</div>
+                      <div class="shownotes-list">
+                        <div class="sn-item">
+                          <span class="sn-time mono">00:00</span>
+                          <div>
+                            <strong>为什么独立开发者开始做播客剪辑工具？</strong>
+                            <p>复盘创作者从人工找波形气口到文稿驱动剪辑的效率痛点。</p>
+                          </div>
                         </div>
-                        <div class="chat-msg right">
-                          <div class="bubble green">太真实了！第一次剪完 90 分钟，感觉自己说了两百个“然后”。😂</div>
-                          <div class="avatar g">林</div>
+                        <div class="sn-item">
+                          <span class="sn-time mono">05:24</span>
+                          <div>
+                            <strong>GCC-PHAT 校准与自然衔接的声学秘密</strong>
+                            <p>拆解跨设备毫秒级时间差对齐及过零点防爆音处理策略。</p>
+                          </div>
                         </div>
-                        <div class="typing-hint">Alex 正在输入...</div>
+                        <div class="sn-item">
+                          <span class="sn-time mono">12:10</span>
+                          <div>
+                            <strong>从声音表达复盘到高质量长内容沉淀</strong>
+                            <p>探讨如何利用主客控场比与情绪曲线持续打磨节目质感。</p>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -554,9 +749,9 @@
               <p>GCC-PHAT 互相关对齐、过零点吸附、LUFS 响度测量、Reaper 工程导出与系统文件关联（<code>.podcraft</code> 双击直达）。</p>
             </div>
             <div class="arch-card">
-              <div class="arch-layer">AI 与视频管线</div>
-              <h4>Python Local ASR + 云端 LLM + VideoToolbox</h4>
-              <p>Apple Silicon 本地逐字时间戳识别，结合大语言模型生成大纲与纠错，硬件加速输出 60fps MP4。</p>
+              <div class="arch-layer">AI 语音与语义管线</div>
+              <h4>Python Local ASR + 云端 LLM Sidecar</h4>
+              <p>Apple Silicon 本地逐字时间戳识别，结合大语言模型完成同音纠错、智能大纲划分与 Shownotes 主旨提炼。</p>
             </div>
           </div>
         </div>
@@ -622,7 +817,7 @@
                   <li>注册 <code>.podcraft</code> 文件 macOS 系统打开方式，支持双击直达工程</li>
                   <li>重构 Shownotes 与时间轴为段落主旨总结，升级智能大纲 3-8 分钟粒度规范</li>
                   <li>支持导出合并音轨时执行全局二次音量标准化 (<code>-16.0 LUFS</code>)</li>
-                  <li>发布点波 TapWave 2.1.0，完善 GCC-PHAT 校准、动态独奏与微信群聊短视频导出</li>
+                  <li>发布点波 TapWave 2.1.0，完善 GCC-PHAT 多设备校准、文稿波形双向精剪与动态发言人独奏</li>
                 </ul>
               </div>
             </div>
@@ -714,6 +909,15 @@ uv pip install -r sidecar/requirements.txt</code></pre>
         </div>
       </div>
     </footer>
+
+    <!-- Screenshot Lightbox Modal -->
+    <div class="lightbox" id="lightbox" aria-hidden="true" role="dialog" aria-label="软件截图放大预览">
+      <button class="lightbox-close" id="lightboxClose" aria-label="关闭预览">✕</button>
+      <figure class="lightbox-content">
+        <img src="" alt="" id="lightboxImg" />
+        <figcaption id="lightboxCaption"></figcaption>
+      </figure>
+    </div>
 
     <script src="./main.js"></script>
   </body>

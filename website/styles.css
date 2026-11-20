@@ -1124,85 +1124,65 @@ code {
   font-size: 0.92rem;
 }
 
-/* WeChat Phone Mockup */
-.wechat-phone {
-  max-width: 300px;
-  margin: 0 auto;
-  background: #111827;
-  border: 2px solid #334155;
-  border-radius: 26px;
-  overflow: hidden;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+/* Shownotes Preview Card */
+.shownotes-card {
+  background: #090d16;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.phone-top {
+.shownotes-head {
   display: flex;
   justify-content: space-between;
-  padding: 10px 16px;
-  font-size: 0.75rem;
-  background: #0f172a;
-  color: var(--text-secondary);
+  align-items: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.phone-chat {
-  padding: 16px 12px;
+.shownotes-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  background: #18181b;
 }
 
-.chat-msg {
+.sn-item {
   display: flex;
+  gap: 12px;
   align-items: flex-start;
-  gap: 8px;
-}
-
-.chat-msg.right {
-  justify-content: flex-end;
-}
-
-.avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  background: var(--accent-blue);
-  color: #fff;
-  font-size: 0.75rem;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.avatar.g {
-  background: var(--accent-violet);
-}
-
-.bubble {
-  padding: 8px 11px;
+  padding: 10px 12px;
   border-radius: 10px;
+  background: rgba(15, 22, 40, 0.7);
+  border: 1px solid var(--border-subtle);
+}
+
+.sn-time {
+  font-size: 0.74rem;
+  color: var(--accent-cyan);
+  background: rgba(56, 189, 248, 0.12);
+  padding: 2px 7px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.sn-item strong {
+  display: block;
+  font-size: 0.86rem;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.sn-item p {
   font-size: 0.78rem;
-  line-height: 1.45;
-  max-width: 78%;
-}
-
-.bubble.white {
-  background: #27272a;
-  color: #f4f4f5;
-}
-
-.bubble.green {
-  background: #059669;
-  color: #ffffff;
-}
-
-.typing-hint {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  text-align: center;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
 }
 
 /* Architecture Grid */
@@ -1459,6 +1439,205 @@ code {
     border-bottom: 1px solid var(--border-subtle);
   }
   .release-item {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Real Software Screenshots & Functional Zone Guide */
+.shot-tabs {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.shot-tab {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.shot-tab:hover {
+  color: var(--text-primary);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.shot-tab.active {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.shot-view {
+  display: none;
+  grid-template-columns: 1.25fr 1fr;
+  gap: 28px;
+  align-items: start;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 26px;
+}
+
+.shot-view.active {
+  display: grid;
+  animation: fadeIn 0.25s ease;
+}
+
+.shot-frame {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: #05070d;
+  cursor: zoom-in;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+}
+
+.shot-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  transition: transform 0.3s ease;
+}
+
+.shot-frame:hover img {
+  transform: scale(1.015);
+}
+
+.zoom-hint {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  font-size: 0.74rem;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(5, 7, 13, 0.82);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  backdrop-filter: blur(8px);
+}
+
+.shot-zones {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.zone-header h3 {
+  font-size: 1.22rem;
+  margin-bottom: 6px;
+}
+
+.zone-header p {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+}
+
+.zone-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.zone-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: #090d16;
+  border: 1px solid var(--border-subtle);
+}
+
+.zone-num {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  background: rgba(56, 189, 248, 0.14);
+  padding: 3px 8px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.zone-card strong {
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+
+.zone-card p {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+}
+
+/* Lightbox Modal */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(5, 7, 13, 0.9);
+  backdrop-filter: blur(10px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.lightbox.open {
+  display: flex;
+  animation: fadeIn 0.2s ease;
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.lightbox-content {
+  max-width: 1120px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.lightbox-content img {
+  max-width: 100%;
+  max-height: 82vh;
+  border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.8);
+}
+
+.lightbox-content figcaption {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 980px) {
+  .shot-view {
     grid-template-columns: 1fr;
   }
 }
