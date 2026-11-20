@@ -8,6 +8,8 @@ import {
   TranscriptToken,
   WaveformSelectionMode,
 } from '../types/podcast';
+import { sampleTrackEnvelopeAtMs } from './waveformAligner';
+import { HiResWaveformEnvelope } from './waveformEnvelopeLoader';
 
 export interface MappedTokenTimeline {
   tokenId: string;
@@ -1271,7 +1273,9 @@ export function applyWaveformSelectionToBlocks(
       maxSrcMs = Math.max(maxSrcMs, tok.sourceEndMs);
       if (tok.type === 'word') textParts.push(tok.text);
 
-      const coverage = ovDur / Math.max(0.02, tok.durationSec);
+      const mappedDur = Math.max(0.02, mapped.editedEndSec - mapped.editedStartSec);
+      const effBaseSrcStartMs = Math.round(mapped.effectiveSourceStartSec * 1000);
+      const coverage = ovDur / mappedDur;
       const trimsLeadingEdge =
         ovStart <= mapped.editedStartSec + 0.015 && ovEnd < mapped.editedEndSec - 0.015;
 
@@ -1440,7 +1444,7 @@ export function applyWaveformSelectionToBlocks(
         }
 
         const shouldDeleteWholeToken = isFreeMode
-          ? tok.durationSec - ovDur < 0.015
+          ? mappedDur - ovDur < 0.015
           : coverage >= 0.55;
         if (shouldDeleteWholeToken) {
           fullDeletedCount++;
@@ -1452,14 +1456,12 @@ export function applyWaveformSelectionToBlocks(
             leadingTrimmedIds.add(tok.id);
           }
           const minTrimmedDur = isFreeMode ? 0.015 : 0.05;
-          const trimmedDur = Math.max(minTrimmedDur, Number((tok.durationSec - ovDur).toFixed(3)));
-          const actualCutMs = Math.max(0, Math.round((tok.durationSec - trimmedDur) * 1000));
+          const trimmedDur = Math.max(minTrimmedDur, Number((mappedDur - ovDur).toFixed(3)));
+          const actualCutMs = Math.max(0, Math.round((mappedDur - trimmedDur) * 1000));
           const rawStartMs = trimsLeadingEdge
-            ? tok.sourceStartMs + actualCutMs
-            : tok.sourceStartMs;
-          const effTokEndMs = tok.subwordTrimmed
-            ? Math.min(tok.sourceEndMs, tok.sourceStartMs + Math.round(tok.durationSec * 1000))
-            : tok.sourceEndMs;
+            ? effBaseSrcStartMs + actualCutMs
+            : effBaseSrcStartMs;
+          const effTokEndMs = effBaseSrcStartMs + Math.round(mappedDur * 1000);
           let finalStartMs = rawStartMs;
           let finalDur = trimmedDur;
           if (!isFreeMode && hasHighResPeaks) {
@@ -1472,8 +1474,8 @@ export function applyWaveformSelectionToBlocks(
                 22
               );
               finalStartMs = Math.max(
-                tok.sourceStartMs,
-                Math.min(Math.max(tok.sourceStartMs, effTokEndMs - 50), snappedStart)
+                effBaseSrcStartMs,
+                Math.min(Math.max(effBaseSrcStartMs, effTokEndMs - 50), snappedStart)
               );
               finalDur = Math.max(
                 0.05,
@@ -1598,6 +1600,18 @@ export function applyWaveformSelectionToBlocks(
                 }
               }
               blk.tokens[tIdx] = { ...tok, gapBeforeSec: keptGapSec };
+            }
+          }
+        } else if (typeof tok.gapBeforeSec === 'number' && tok.gapBeforeSec > 0) {
+          const oldCurr = oldPosById.get(tok.id);
+          if (oldCurr) {
+            const gapWinStart = Math.max(timeline.prefixDurationSec, oldCurr.editedStartSec - tok.gapBeforeSec);
+            const removedBefore = sumRemovedOverlap(gapWinStart, oldCurr.editedStartSec);
+            if (removedBefore > 0.001) {
+              blk.tokens[tIdx] = {
+                ...tok,
+                gapBeforeSec: Number(Math.max(0, tok.gapBeforeSec - removedBefore).toFixed(3)),
+              };
             }
           }
         }
@@ -1804,6 +1818,9 @@ export interface BuildWordTimelineOptions {
   highlights?: HighlightClip[];
   blocks?: TranscriptBlock[];
   charWidthPx?: number;
+  tracks?: SpeakerTrack[];
+  hiResEnvelopes?: Map<string, HiResWaveformEnvelope>;
+  recordingMode?: RecordingMode;
 }
 
 /**
@@ -1878,6 +1895,8 @@ export function buildVisibleWordTimelineAnnotations(
     text: string;
     editedStartSec: number;
     editedEndSec: number;
+    sourceStartMs?: number;
+    sourceEndMs?: number;
     isFiller?: boolean;
     isLaughter?: boolean;
     isSubwordTrimmed?: boolean;
@@ -1931,6 +1950,8 @@ export function buildVisibleWordTimelineAnnotations(
               text: txt,
               editedStartSec: es,
               editedEndSec: ee,
+              sourceStartMs: clippedStartMs,
+              sourceEndMs: clippedEndMs,
               isFiller: tok.fillerTag === 'pure',
               isLaughter,
               isSubwordTrimmed: tok.subwordTrimmed,
@@ -1982,6 +2003,8 @@ export function buildVisibleWordTimelineAnnotations(
       text: txt,
       editedStartSec: m.editedStartSec,
       editedEndSec: m.editedEndSec,
+      sourceStartMs: m.effectiveSourceStartSec * 1000,
+      sourceEndMs: (m.effectiveSourceStartSec + (m.editedEndSec - m.editedStartSec)) * 1000,
       isFiller: m.token.fillerTag === 'pure',
       isLaughter,
       isSubwordTrimmed: m.token.subwordTrimmed,
@@ -1995,6 +2018,11 @@ export function buildVisibleWordTimelineAnnotations(
   const pxPerSec = Math.max(1, options.viewportWidthPx) / visibleDur;
   const charW = options.charWidthPx ?? 11.5;
   const out: TimelineWordAnnotation[] = [];
+
+  const trackMap = options.tracks
+    ? new Map<string, SpeakerTrack>(options.tracks.map((t) => [t.id, t]))
+    : null;
+  const recMode = options.recordingMode ?? 'same_room_sync';
 
   for (const item of rawItems) {
     const units = item.isLaughter ? [item.text] : splitLexicalUnits(item.text);
@@ -2031,16 +2059,71 @@ export function buildVisibleWordTimelineAnnotations(
       return 1.0;
     });
     const totalWeight = weights.reduce((s, w) => s + w, 0) || units.length;
-    let acc = 0;
+
+    // Build proportional split points, then refine internal boundaries to local acoustic valleys when waveform data exists
+    const splitEdits: number[] = [item.editedStartSec];
+    const tr = trackMap?.get(item.speakerId);
+    const hiRes = options.hiResEnvelopes?.get(item.speakerId);
+    const hasAcousticSource = Boolean(
+      tr &&
+        item.sourceStartMs !== undefined &&
+        item.sourceEndMs !== undefined &&
+        item.sourceEndMs - item.sourceStartMs >= 80 &&
+        ((hiRes && hiRes.numBins >= 32) || (tr.peaks.length >= 32 && (tr.durationMs ?? 0) > 0))
+    );
+
+    if (hasAcousticSource && tr && item.sourceStartMs !== undefined && item.sourceEndMs !== undefined) {
+      const srcStart = item.sourceStartMs;
+      const srcEnd = item.sourceEndMs;
+      const srcDur = srcEnd - srcStart;
+      const avgUnitMs = srcDur / units.length;
+      const minUnitMs = Math.max(25, Math.min(45, avgUnitMs * 0.42));
+      const searchHalfMs = Math.max(15, avgUnitMs * 0.36);
+
+      // Measure local peak across token to normalize the gentle proportional tie-breaker
+      let localMax = 0;
+      for (let t = srcStart; t <= srcEnd; t += 10) {
+        const v = sampleTrackEnvelopeAtMs(tr, t, recMode, hiRes);
+        if (v > localMax) localMax = v;
+      }
+
+      let acc = 0;
+      let prevSrcMs = srcStart;
+      for (let idx = 0; idx < units.length - 1; idx++) {
+        acc += weights[idx];
+        const estSrcMs = srcStart + (acc / totalWeight) * srcDur;
+        const remainingUnits = units.length - 1 - idx;
+        const winStart = Math.max(prevSrcMs + minUnitMs, estSrcMs - searchHalfMs);
+        const winEnd = Math.min(srcEnd - remainingUnits * minUnitMs, estSrcMs + searchHalfMs);
+
+        let chosenSrcMs = Math.max(winStart, Math.min(winEnd, estSrcMs));
+        if (localMax > 0.015 && winEnd > winStart + 5) {
+          let bestScore = Infinity;
+          for (let t = winStart; t <= winEnd; t += 5) {
+            const env = sampleTrackEnvelopeAtMs(tr, t, recMode, hiRes);
+            const distPenalty = (0.04 * localMax * Math.abs(t - estSrcMs)) / Math.max(1, searchHalfMs);
+            const score = env + distPenalty;
+            if (score < bestScore) {
+              bestScore = score;
+              chosenSrcMs = t;
+            }
+          }
+        }
+        prevSrcMs = chosenSrcMs;
+        splitEdits.push(item.editedStartSec + ((chosenSrcMs - srcStart) / srcDur) * tokenDur);
+      }
+    } else {
+      let acc = 0;
+      for (let idx = 0; idx < units.length - 1; idx++) {
+        acc += weights[idx];
+        splitEdits.push(item.editedStartSec + (acc / totalWeight) * tokenDur);
+      }
+    }
+    splitEdits.push(item.editedEndSec);
 
     for (let idx = 0; idx < units.length; idx++) {
-      const w = weights[idx];
-      const subStart = item.editedStartSec + (acc / totalWeight) * tokenDur;
-      acc += w;
-      const subEnd =
-        idx === units.length - 1
-          ? item.editedEndSec
-          : item.editedStartSec + (acc / totalWeight) * tokenDur;
+      const subStart = splitEdits[idx];
+      const subEnd = splitEdits[idx + 1];
       if (subEnd < options.viewStartSec || subStart > options.viewEndSec) continue;
 
       out.push({

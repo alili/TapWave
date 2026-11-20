@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "podcraft-studio"
-version = "2.1.16"
+version = "2.2.1"
 dependencies = [
  "base64 0.22.1",
  "hound",

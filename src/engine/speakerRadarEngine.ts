@@ -62,13 +62,22 @@ export interface SpeakerHabitInsight {
   evidences: HabitEvidenceAnchor[];
 }
 
+export interface PaceBreathPoint {
+  timeSec: number;
+  timeFormatted: string;
+  cpm: number;
+  breathPct: number;
+}
+
 export interface SpeakerRadarProfile {
   speakerId: string;
   overallScore: number;
+  avgCpm: number;
   dimensions: RadarDimensionScore[];
   microMetrics: SpeakerHabitMicroMetrics;
   topHabitPhrases: HabitPhraseItem[];
   habitInsights: SpeakerHabitInsight[];
+  paceBreathSeries: PaceBreathPoint[];
 }
 
 export interface SpeakerRadarComputationParams {
@@ -364,6 +373,7 @@ export function computeSpeakerRadarProfiles(
       result.set(tr.id, {
         speakerId: tr.id,
         overallScore: 0,
+        avgCpm: 0,
         dimensions: emptyScores,
         microMetrics: {
           mergedTurnCount: 0,
@@ -377,6 +387,7 @@ export function computeSpeakerRadarProfiles(
         },
         topHabitPhrases: [],
         habitInsights: [],
+        paceBreathSeries: [],
       });
       continue;
     }
@@ -631,63 +642,43 @@ export function computeSpeakerRadarProfiles(
       dimensions.reduce((sum, d) => sum + d.score, 0) / dimensions.length
     );
 
-    // 六维详细诊断卡片生成
+    // 诊断卡片生成
     const habitInsights: SpeakerHabitInsight[] = [];
     const isHostRole = tr.role === 'host' || tr.role === 'co_host';
 
-    // 1. 口癖与启动垫词习惯
-    const topCrutch = topHabitPhrases[0];
-    if (crutchesPerMin >= 3.2) {
-      habitInsights.push({
-        id: 'filler_fingerprint',
-        category: '口头禅与垫词习惯',
-        status: 'alert',
-        metricBadge: `${crutchesPerMin.toFixed(1)} 处/分`,
-        summary: `口头禅密度偏高，高频词为「${topCrutch?.word ?? '语气词'}」`,
-        detail: isHostRole
-          ? '【主持提问】：注意精简句首“然后/就是说”，提问直奔议题，气场更干练。'
-          : '【嘉宾作答】：作答前可用 0.5s 自然停顿代替起手垫词，直接给观点。',
-        evidences: topCrutch
-          ? [
-              {
-                label: `高频词「${topCrutch.word}」首次出现`,
-                timeSec: topCrutch.firstTimeSec,
-                timeFormatted: topCrutch.firstTimeFormatted,
-              },
-            ]
-          : [],
-      });
-    } else if (crutchesPerMin >= 1.5) {
-      habitInsights.push({
-        id: 'filler_fingerprint',
-        category: '口头禅与垫词习惯',
-        status: 'warn',
-        metricBadge: `${crutchesPerMin.toFixed(1)} 处/分`,
-        summary: `语流整体流畅，有少量习惯起手词（如「${topCrutch?.word ?? '垫词'}」）`,
-        detail: '思考间隙建议以自然呼吸停顿替代句首垫词，信息传达更紧凑。',
-        evidences: topCrutch
-          ? [
-              {
-                label: `习惯词「${topCrutch.word}」`,
-                timeSec: topCrutch.firstTimeSec,
-                timeFormatted: topCrutch.firstTimeFormatted,
-              },
-            ]
-          : [],
-      });
-    } else {
-      habitInsights.push({
-        id: 'filler_fingerprint',
-        category: '口头禅与垫词习惯',
-        status: 'good',
-        metricBadge: `${crutchesPerMin.toFixed(1)} 处/分`,
-        summary: '用词干练利落，废话垫词极少',
-        detail: '语流干净利落，几乎无冗余口头禅干扰听感，表现优秀。',
-        evidences: [],
-      });
-    }
+    // 计算全程语速波动与气息能量曲线数据点
+    const trackPeakFloor =
+      tr.peaks.length > 0
+        ? Math.max(0.08, Math.max(...tr.peaks.map((v) => Math.abs(v))))
+        : 1;
+    const paceBreathSeries: PaceBreathPoint[] = spTurns.map((t) => {
+      let breathPct = 76;
+      if (tr.peaks.length > 0 && tr.durationMs && tr.durationMs > 0) {
+        const totalTrackSec = tr.durationMs / 1000;
+        const sIdx = Math.max(
+          0,
+          Math.min(tr.peaks.length - 1, Math.floor((t.startSec / totalTrackSec) * tr.peaks.length))
+        );
+        const eIdx = Math.max(
+          sIdx + 1,
+          Math.min(tr.peaks.length, Math.ceil((t.endSec / totalTrackSec) * tr.peaks.length))
+        );
+        let sum = 0;
+        for (let k = sIdx; k < eIdx; k++) {
+          sum += Math.abs(tr.peaks[k] ?? 0);
+        }
+        const avgAmp = sum / Math.max(1, eIdx - sIdx);
+        breathPct = Math.round(Math.max(12, Math.min(100, (avgAmp / (trackPeakFloor * 0.55)) * 100)));
+      }
+      return {
+        timeSec: Number(t.startSec.toFixed(1)),
+        timeFormatted: formatMmSs(t.startSec),
+        cpm: t.cpm,
+        breathPct,
+      };
+    });
 
-    // 2. 语速波动与发声气息
+    // 1. 语速波动与发声气息
     if (paceStdCpm >= 55) {
       const fastTurn = spTurns.reduce((prev, curr) =>
         curr.cpm > prev.cpm ? curr : prev
@@ -851,10 +842,12 @@ export function computeSpeakerRadarProfiles(
     result.set(tr.id, {
       speakerId: tr.id,
       overallScore,
+      avgCpm,
       dimensions,
       microMetrics,
       topHabitPhrases,
       habitInsights,
+      paceBreathSeries,
     });
   }
 

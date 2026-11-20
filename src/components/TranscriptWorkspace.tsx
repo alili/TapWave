@@ -43,6 +43,7 @@ import {
   TimelineComputation,
 } from '../engine/timelineEngine';
 import { audioPreview } from '../engine/audioPreviewEngine';
+import { useActiveBlockId, useActiveTokenId } from '../engine/playheadStore';
 import {
   analyzeTranscriptOutlines,
   isSecondaryOverlapShortBlock,
@@ -548,8 +549,8 @@ export const TranscriptWorkspace: React.FC<TranscriptWorkspaceProps> = React.mem
     state,
     timeline,
     selectedIds,
-    activeBlockId,
-    activeTokenId,
+    activeBlockId: activeBlockIdProp,
+    activeTokenId: activeTokenIdProp,
     canUndo,
     onSelectToken,
     onSelectRange,
@@ -595,6 +596,10 @@ export const TranscriptWorkspace: React.FC<TranscriptWorkspaceProps> = React.mem
     onTogglePlay,
     onSeekAndPlay,
   }) => {
+    const storeActiveBlockId = useActiveBlockId();
+    const storeActiveTokenId = useActiveTokenId();
+    const activeBlockId = activeBlockIdProp ?? storeActiveBlockId;
+    const activeTokenId = activeTokenIdProp ?? storeActiveTokenId;
     const [isCompact, setIsCompact] = useState<boolean>(() => {
       try {
         return localStorage.getItem('podcraft_compact_transcript') !== 'false';

@@ -31,6 +31,7 @@ interface RightAiWorkbenchProps {
   onSeekToSec: (sec: number) => void;
   onExportAudio: (format: 'mp3') => void;
   onOpenShownotes?: () => void;
+  onOpenCutReportModal?: (tab?: 'cuts' | 'report' | 'profile') => void;
   onNotify: (msg: string) => void;
   onCollapsePane?: () => void;
 }
@@ -77,6 +78,7 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
   onSeekToSec,
   onExportAudio,
   onOpenShownotes,
+  onOpenCutReportModal,
   onNotify,
   onCollapsePane,
 }) => {
@@ -518,6 +520,21 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
       {/* Tab 1: 情绪能量曲线 + 主持人提问区分发言人 + 发言习惯与五维雷达教练 */}
       {activeTab === 'coach' && (
         <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0">
+          {onOpenCutReportModal && (
+            <div className="p-2.5 rounded-xl border border-blue-500/30 bg-blue-500/10 flex items-center justify-between gap-2">
+              <div className="text-[11px] text-blue-200 leading-snug">
+                <div className="font-semibold">剪辑分析与表达诊断</div>
+                <div className="text-[10px] text-blue-300/80">查看全部剪辑处、嘉宾建议、导出报告图与脱敏习惯配置</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenCutReportModal('report')}
+                className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition"
+              >
+                打开报告中心
+              </button>
+            </div>
+          )}
           {/* 1. 声学与语流情绪能量曲线 */}
           <div className="p-3 rounded-xl border border-zinc-800 bg-zinc-950 space-y-2">
             <div className="flex items-center justify-between text-xs gap-2">
@@ -1140,11 +1157,11 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
                       </div>
                     )}
 
-                    {/* 模块四：六维可溯源诊断卡片流 (支持 @MM:SS 点击跳转) */}
+                    {/* 模块四：可溯源诊断卡片流 (支持 @MM:SS 点击跳转) */}
                     {activeRadarProfile && activeRadarProfile.habitInsights.length > 0 && (
                       <div className="space-y-1.5">
                         <div className="text-[11px] font-semibold text-zinc-400">
-                          表达习惯深度诊断（垫词 · 气息 · 话轮 · 气口 · 具象度 · 控场）
+                          表达习惯深度诊断（气息 · 话轮 · 气口 · 具象度 · 控场）
                         </div>
                         {activeRadarProfile.habitInsights.map((insight) => (
                           <div
@@ -1186,6 +1203,110 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
                             <div className="text-[11px] text-zinc-400 leading-relaxed">
                               {insight.detail}
                             </div>
+                            {insight.id === 'pace_prosody' &&
+                              activeRadarProfile.paceBreathSeries.length >= 2 &&
+                              (() => {
+                                const pts = activeRadarProfile.paceBreathSeries;
+                                const W = 280;
+                                const H = 84;
+                                const padL = 8;
+                                const padR = 8;
+                                const padT = 10;
+                                const padB = 14;
+                                const innerW = W - padL - padR;
+                                const innerH = H - padT - padB;
+                                const minT = pts[0].timeSec;
+                                const maxT = Math.max(minT + 1, pts[pts.length - 1].timeSec);
+                                const maxCpm = Math.max(320, ...pts.map((p) => p.cpm));
+                                const minCpm = Math.min(80, ...pts.map((p) => p.cpm));
+                                const cpmSpan = Math.max(60, maxCpm - minCpm);
+                                const toX = (t: number) =>
+                                  padL + ((t - minT) / (maxT - minT)) * innerW;
+                                const toCpmY = (cpm: number) =>
+                                  padT + innerH - ((cpm - minCpm) / cpmSpan) * innerH;
+                                const toBreathY = (pct: number) =>
+                                  padT + innerH - (Math.max(0, Math.min(100, pct)) / 100) * innerH;
+                                const cpmPath = pts
+                                  .map((p, idx) => `${idx === 0 ? 'M' : 'L'}${toX(p.timeSec).toFixed(1)},${toCpmY(p.cpm).toFixed(1)}`)
+                                  .join(' ');
+                                const breathPath = pts
+                                  .map((p, idx) => `${idx === 0 ? 'M' : 'L'}${toX(p.timeSec).toFixed(1)},${toBreathY(p.breathPct).toFixed(1)}`)
+                                  .join(' ');
+                                const avgY = toCpmY(activeRadarProfile.avgCpm || 200);
+                                return (
+                                  <div className="mt-1.5 rounded-lg bg-zinc-950/90 border border-zinc-800/90 p-2 space-y-1">
+                                    <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                                      <div className="flex items-center gap-2.5">
+                                        <span className="inline-flex items-center gap-1 text-sky-300">
+                                          <span className="w-2 h-0.5 bg-sky-400 inline-block rounded-full" />
+                                          语速 (字/分)
+                                        </span>
+                                        <span className="inline-flex items-center gap-1 text-purple-300">
+                                          <span className="w-2 h-0.5 bg-purple-400 inline-block rounded-full" />
+                                          气息饱满度 (%)
+                                        </span>
+                                      </div>
+                                      <span className="font-mono text-[9.5px] text-zinc-500">
+                                        均速 {activeRadarProfile.avgCpm} 字/分
+                                      </span>
+                                    </div>
+                                    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[84px] overflow-visible">
+                                      <line
+                                        x1={padL}
+                                        y1={avgY}
+                                        x2={W - padR}
+                                        y2={avgY}
+                                        stroke="rgba(56,189,248,0.28)"
+                                        strokeDasharray="3 3"
+                                        strokeWidth={1}
+                                      />
+                                      <path
+                                        d={breathPath}
+                                        fill="none"
+                                        stroke="#c084fc"
+                                        strokeWidth={1.5}
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        opacity={0.85}
+                                      />
+                                      <path
+                                        d={cpmPath}
+                                        fill="none"
+                                        stroke="#38bdf8"
+                                        strokeWidth={1.75}
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                      {pts.map((p, idx) => (
+                                        <circle
+                                          key={idx}
+                                          cx={toX(p.timeSec)}
+                                          cy={toCpmY(p.cpm)}
+                                          r={2.5}
+                                          fill="#38bdf8"
+                                          className="cursor-pointer hover:r-[4]"
+                                          onClick={() => onSeekToSec(p.timeSec)}
+                                        >
+                                          <title>{`@${p.timeFormatted} · 语速 ${p.cpm} 字/分 · 气息 ${p.breathPct}%（点击跳转）`}</title>
+                                        </circle>
+                                      ))}
+                                      <text x={padL} y={H - 2} fontSize="8.5" fill="#71717a" fontFamily="monospace">
+                                        {pts[0].timeFormatted}
+                                      </text>
+                                      <text
+                                        x={W - padR}
+                                        y={H - 2}
+                                        fontSize="8.5"
+                                        fill="#71717a"
+                                        fontFamily="monospace"
+                                        textAnchor="end"
+                                      >
+                                        {pts[pts.length - 1].timeFormatted}
+                                      </text>
+                                    </svg>
+                                  </div>
+                                );
+                              })()}
                             {insight.evidences && insight.evidences.length > 0 && (
                               <div className="pt-1 flex flex-wrap items-center gap-1.5 border-t border-zinc-800/80">
                                 <span className="text-[10px] text-zinc-400">典型处：</span>

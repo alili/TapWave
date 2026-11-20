@@ -500,6 +500,82 @@ function triggerBrowserBlobDownload(filename: string, blob: Blob): void {
 }
 
 /**
+ * 保存文本或 JSON 文件（Tauri 弹出原生保存框，浏览器自动触发下载）。
+ */
+export async function saveTextOrJsonFile(
+  defaultFilename: string,
+  content: string,
+  filterName = 'JSON 配置文件',
+  extensions: string[] = ['json']
+): Promise<string | null> {
+  if (isTauriRuntime()) {
+    const { save: saveDialog } = await import('@tauri-apps/plugin-dialog');
+    const chosen = await saveDialog({
+      defaultPath: defaultFilename,
+      filters: [{ name: filterName, extensions }],
+    });
+    if (!chosen) return null;
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+    await writeTextFile(chosen, content);
+    return chosen;
+  }
+
+  triggerBrowserBlobDownload(
+    defaultFilename,
+    new Blob([content], { type: 'application/json;charset=utf-8' })
+  );
+  return defaultFilename;
+}
+
+/**
+ * 将 PNG DataURL 保存为本地图片文件。
+ */
+export async function savePngDataUrlFile(
+  defaultFilename: string,
+  dataUrl: string
+): Promise<string | null> {
+  const base64 = dataUrl.split(',')[1] ?? '';
+  const binStr = atob(base64);
+  const bytes = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) {
+    bytes[i] = binStr.charCodeAt(i);
+  }
+
+  if (isTauriRuntime()) {
+    const { save: saveDialog } = await import('@tauri-apps/plugin-dialog');
+    const chosen = await saveDialog({
+      defaultPath: defaultFilename,
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    });
+    if (!chosen) return null;
+    const { writeFile } = await import('@tauri-apps/plugin-fs');
+    await writeFile(chosen, bytes);
+    return chosen;
+  }
+
+  triggerBrowserBlobDownload(
+    defaultFilename,
+    new Blob([bytes], { type: 'image/png' })
+  );
+  return defaultFilename;
+}
+
+/**
+ * 打开并读取本地 JSON 配置文件（Tauri 弹出原生文件框，浏览器返回 null 以便走 <input type="file">）。
+ */
+export async function openJsonConfigFileNative(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+  const selected = await openDialog({
+    multiple: false,
+    filters: [{ name: '剪辑习惯配置文件', extensions: ['json'] }],
+  });
+  if (!selected || Array.isArray(selected)) return null;
+  const { readTextFile } = await import('@tauri-apps/plugin-fs');
+  return await readTextFile(selected);
+}
+
+/**
  * Saves current project as a .podcraft file (supports Save in-place & Save As in Tauri,
  * or .podcraft file download in Browser). Returns saved path/filename, or null if user cancelled.
  */

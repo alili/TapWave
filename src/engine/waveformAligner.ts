@@ -4,6 +4,7 @@ import {
   TranscriptBlock,
   TranscriptToken,
 } from '../types/podcast';
+import { HiResWaveformEnvelope } from './waveformEnvelopeLoader';
 
 export interface TrackAcousticProfile {
   trackId: string;
@@ -22,16 +23,43 @@ function percentileFromSorted(sorted: number[], p: number): number {
   return sorted[idx];
 }
 
+const INV_U16 = 1 / 65535;
+
+function readHiResBinEnergy(hiRes: HiResWaveformEnvelope, binIdx: number): number {
+  const base = binIdx * 3;
+  const pos = hiRes.triples[base] * INV_U16;
+  const neg = hiRes.triples[base + 1] * INV_U16;
+  const rms = hiRes.triples[base + 2] * INV_U16;
+  const pk = pos > neg ? pos : neg;
+  return 0.65 * pk + 0.35 * rms;
+}
+
 /**
- * Builds a dynamic noise-floor and vocal-level acoustic profile from a track's waveform peaks.
+ * Builds a dynamic noise-floor and vocal-level acoustic profile from a track's waveform peaks
+ * (preferring 5ms HiResWaveformEnvelope when available).
  * Adapts automatically to quiet microphones, loud mastered stems, or close-talk dynamic mics.
  */
-export function buildTrackAcousticProfile(track: SpeakerTrack): TrackAcousticProfile {
-  const peaks = track.peaks ?? [];
-  const durationMs = Math.max(1000, track.durationMs || 60000);
-  const binDurationMs = peaks.length > 1 ? durationMs / peaks.length : 50;
+export function buildTrackAcousticProfile(
+  track: SpeakerTrack,
+  hiRes?: HiResWaveformEnvelope
+): TrackAcousticProfile {
+  let samples: number[];
+  let binDurationMs: number;
 
-  if (peaks.length === 0) {
+  if (hiRes && hiRes.numBins >= 32) {
+    binDurationMs = Math.max(1, hiRes.binMs);
+    const stride = Math.max(1, Math.floor(hiRes.numBins / 8192));
+    samples = [];
+    for (let i = 0; i < hiRes.numBins; i += stride) {
+      samples.push(readHiResBinEnergy(hiRes, i));
+    }
+  } else {
+    samples = track.peaks ?? [];
+    const durationMs = Math.max(1000, track.durationMs || 60000);
+    binDurationMs = samples.length > 1 ? durationMs / samples.length : 50;
+  }
+
+  if (samples.length === 0) {
     return {
       trackId: track.id,
       binDurationMs: 50,
@@ -43,7 +71,7 @@ export function buildTrackAcousticProfile(track: SpeakerTrack): TrackAcousticPro
     };
   }
 
-  const sortedAll = [...peaks].sort((a, b) => a - b);
+  const sortedAll = [...samples].sort((a, b) => a - b);
   const noiseFloor = Math.max(0.003, Math.min(0.12, percentileFromSorted(sortedAll, 0.16)));
 
   const nonSilent = sortedAll.filter((v) => v > Math.max(0.015, noiseFloor * 1.6));
@@ -66,11 +94,12 @@ export function buildTrackAcousticProfile(track: SpeakerTrack): TrackAcousticPro
 }
 
 export function buildAcousticProfileMap(
-  tracks: SpeakerTrack[]
+  tracks: SpeakerTrack[],
+  hiResEnvelopes?: Map<string, HiResWaveformEnvelope>
 ): Map<string, TrackAcousticProfile> {
   const map = new Map<string, TrackAcousticProfile>();
   for (const tr of tracks) {
-    map.set(tr.id, buildTrackAcousticProfile(tr));
+    map.set(tr.id, buildTrackAcousticProfile(tr, hiResEnvelopes?.get(tr.id)));
   }
   return map;
 }
@@ -82,14 +111,29 @@ export function buildAcousticProfileMap(
 export function sampleTrackEnvelopeAtMs(
   track: SpeakerTrack | undefined,
   timelineSourceMs: number,
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiRes?: HiResWaveformEnvelope
 ): number {
-  if (!track || !track.peaks || track.peaks.length === 0) return 0;
-  const durMs = Math.max(100, track.durationMs || 0);
-  if (durMs <= 0) return 0;
-
+  if (!track) return 0;
   const offsetMs = recordingMode === 'same_room_sync' ? 0 : track.syncOffsetMs || 0;
   const trackLocalMs = timelineSourceMs - offsetMs;
+
+  if (hiRes && hiRes.numBins >= 16) {
+    if (trackLocalMs < 0 || trackLocalMs > hiRes.durationMs) return 0;
+    if (hiRes.numBins === 1) return readHiResBinEnergy(hiRes, 0);
+    const exactIdx = Math.max(
+      0,
+      Math.min(hiRes.numBins - 1, trackLocalMs / Math.max(1, hiRes.binMs))
+    );
+    const i0 = Math.floor(exactIdx);
+    const i1 = Math.min(hiRes.numBins - 1, i0 + 1);
+    const frac = exactIdx - i0;
+    return readHiResBinEnergy(hiRes, i0) * (1 - frac) + readHiResBinEnergy(hiRes, i1) * frac;
+  }
+
+  if (!track.peaks || track.peaks.length === 0) return 0;
+  const durMs = Math.max(100, track.durationMs || 0);
+  if (durMs <= 0) return 0;
   if (trackLocalMs < 0 || trackLocalMs > durMs) return 0;
 
   const peaks = track.peaks;
@@ -109,12 +153,14 @@ export function measureTrackWindowStats(
   track: SpeakerTrack | undefined,
   startMs: number,
   endMs: number,
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiRes?: HiResWaveformEnvelope
 ): { peak: number; mean: number; median: number; activeRatio: number } {
-  if (!track || !track.peaks || track.peaks.length === 0 || endMs <= startMs) {
+  const useHiRes = Boolean(hiRes && hiRes.numBins >= 16);
+  if (!track || (!useHiRes && (!track.peaks || track.peaks.length === 0)) || endMs <= startMs) {
     return { peak: 0, mean: 0, median: 0, activeRatio: 0 };
   }
-  const durMs = Math.max(100, track.durationMs || endMs);
+  const durMs = useHiRes ? hiRes!.durationMs : Math.max(100, track.durationMs || endMs);
   const offsetMs = recordingMode === 'same_room_sync' ? 0 : track.syncOffsetMs || 0;
   const localStart = Math.max(0, startMs - offsetMs);
   const localEnd = Math.min(durMs, Math.max(localStart + 10, endMs - offsetMs));
@@ -122,12 +168,16 @@ export function measureTrackWindowStats(
     return { peak: 0, mean: 0, median: 0, activeRatio: 0 };
   }
 
-  const maxIdx = track.peaks.length - 1;
-  const i0 = Math.max(0, Math.floor((localStart / durMs) * maxIdx));
-  const i1 = Math.min(maxIdx, Math.ceil((localEnd / durMs) * maxIdx));
+  const maxIdx = useHiRes ? hiRes!.numBins - 1 : track.peaks.length - 1;
+  const i0 = useHiRes
+    ? Math.max(0, Math.min(maxIdx, Math.floor(localStart / Math.max(1, hiRes!.binMs))))
+    : Math.max(0, Math.floor((localStart / durMs) * maxIdx));
+  const i1 = useHiRes
+    ? Math.max(i0, Math.min(maxIdx, Math.ceil(localEnd / Math.max(1, hiRes!.binMs))))
+    : Math.min(maxIdx, Math.ceil((localEnd / durMs) * maxIdx));
 
   if (i1 <= i0) {
-    const v = sampleTrackEnvelopeAtMs(track, (startMs + endMs) * 0.5, recordingMode);
+    const v = sampleTrackEnvelopeAtMs(track, (startMs + endMs) * 0.5, recordingMode, hiRes);
     return { peak: v, mean: v, median: v, activeRatio: v > 0.03 ? 1 : 0 };
   }
 
@@ -136,7 +186,7 @@ export function measureTrackWindowStats(
   let peak = 0;
   let activeCnt = 0;
   for (let i = i0; i <= i1; i++) {
-    const v = track.peaks[i];
+    const v = useHiRes ? readHiResBinEnergy(hiRes!, i) : track.peaks[i];
     vals.push(v);
     sum += v;
     if (v > peak) peak = v;
@@ -186,13 +236,17 @@ export function isLikelyCrossTrackBleedToken(
   profiles: Map<string, TrackAcousticProfile>,
   startMs: number,
   endMs: number,
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiResEnvelopes?: Map<string, HiResWaveformEnvelope>
 ): boolean {
-  if (allSpeakerTracks.length <= 1 || speakerTrack.peaks.length < 16) return false;
+  const myHiRes = hiResEnvelopes?.get(speakerTrack.id);
+  if (allSpeakerTracks.length <= 1 || ((!myHiRes || myHiRes.numBins < 16) && speakerTrack.peaks.length < 16)) {
+    return false;
+  }
   const myProfile = profiles.get(speakerTrack.id);
   if (!myProfile) return false;
 
-  const myStats = measureTrackWindowStats(speakerTrack, startMs, endMs, recordingMode);
+  const myStats = measureTrackWindowStats(speakerTrack, startMs, endMs, recordingMode, myHiRes);
   const mySpan = Math.max(0.04, myProfile.speechRef - myProfile.noiseFloor);
   const myNorm = Math.max(0, (myStats.peak * 0.65 + myStats.mean * 0.35 - myProfile.noiseFloor) / mySpan);
 
@@ -203,10 +257,17 @@ export function isLikelyCrossTrackBleedToken(
 
   let strongestOtherNorm = 0;
   for (const other of allSpeakerTracks) {
-    if (other.id === speakerTrack.id || other.isRef || other.peaks.length < 16) continue;
+    const otherHiRes = hiResEnvelopes?.get(other.id);
+    if (
+      other.id === speakerTrack.id ||
+      other.isRef ||
+      ((!otherHiRes || otherHiRes.numBins < 16) && other.peaks.length < 16)
+    ) {
+      continue;
+    }
     const otherProf = profiles.get(other.id);
     if (!otherProf) continue;
-    const otherStats = measureTrackWindowStats(other, startMs, endMs, recordingMode);
+    const otherStats = measureTrackWindowStats(other, startMs, endMs, recordingMode, otherHiRes);
     const otherSpan = Math.max(0.04, otherProf.speechRef - otherProf.noiseFloor);
     const otherNorm = Math.max(
       0,
@@ -229,15 +290,17 @@ export function hasAudibleVoiceInInterval(
   profiles: Map<string, TrackAcousticProfile>,
   startMs: number,
   endMs: number,
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiResEnvelopes?: Map<string, HiResWaveformEnvelope>
 ): boolean {
   const speakerTracks = tracks.some((t) => !t.isRef) ? tracks.filter((t) => !t.isRef) : tracks;
   if (endMs - startMs < 120) return false;
 
   for (const tr of speakerTracks) {
-    if (tr.muted || tr.peaks.length < 16) continue;
-    const prof = profiles.get(tr.id) ?? buildTrackAcousticProfile(tr);
-    const stats = measureTrackWindowStats(tr, startMs + 35, endMs - 35, recordingMode);
+    const hiRes = hiResEnvelopes?.get(tr.id);
+    if (tr.muted || ((!hiRes || hiRes.numBins < 16) && tr.peaks.length < 16)) continue;
+    const prof = profiles.get(tr.id) ?? buildTrackAcousticProfile(tr, hiRes);
+    const stats = measureTrackWindowStats(tr, startMs + 35, endMs - 35, recordingMode, hiRes);
     const span = Math.max(0.04, prof.speechRef - prof.noiseFloor);
     const normMean = (stats.mean - prof.noiseFloor) / span;
     const normPeak = (stats.peak - prof.noiseFloor) / span;
@@ -264,29 +327,31 @@ export function snapTokenBoundsToWaveform(
   maxEndMs: number,
   track: SpeakerTrack | undefined,
   profile: TrackAcousticProfile | undefined,
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiRes?: HiResWaveformEnvelope
 ): { startMs: number; endMs: number } {
   const safeStart = Math.max(minStartMs, rawStartMs);
   const safeEnd = Math.min(maxEndMs, Math.max(safeStart + 50, rawEndMs));
 
-  // Only refine when we have sufficiently fine real waveform peaks (<= ~85ms per bin)
+  const hasHiRes = Boolean(hiRes && hiRes.numBins >= 32);
+  // Only refine when we have sufficiently fine real waveform peaks (<= ~85ms per bin) or hiRes envelope
   if (
     !track ||
     !profile ||
-    track.peaks.length < 32 ||
-    profile.binDurationMs > 90 ||
+    (!hasHiRes && (track.peaks.length < 32 || profile.binDurationMs > 90)) ||
     safeEnd - safeStart < 60
   ) {
     return { startMs: safeStart, endMs: safeEnd };
   }
 
-  const stepMs = 10;
+  const stepMs = hasHiRes && hiRes!.binMs <= 10 ? 5 : 10;
   // Measure peak inside the candidate word window (+ small search margin) to calibrate local threshold
   const innerStats = measureTrackWindowStats(
     track,
     Math.max(minStartMs, safeStart - 50),
     Math.min(maxEndMs, safeEnd + 60),
-    recordingMode
+    recordingMode,
+    hiRes
   );
 
   // If the entire region is quiet (e.g. very soft whisper), preserve original ASR timestamps safely
@@ -307,13 +372,13 @@ export function snapTokenBoundsToWaveform(
   let refinedStart = safeStart;
   let refinedEnd = safeEnd;
 
-  const envAtStart = sampleTrackEnvelopeAtMs(track, safeStart, recordingMode);
+  const envAtStart = sampleTrackEnvelopeAtMs(track, safeStart, recordingMode, hiRes);
   if (envAtStart < localOnsetThresh) {
     // Leading edge is currently sitting in silence -> scan forward inside token to find real vocal onset!
     const maxForwardMs = Math.min(safeEnd - 65, safeStart + 440);
     let foundRiseMs: number | null = null;
     for (let t = safeStart; t <= maxForwardMs; t += stepMs) {
-      if (sampleTrackEnvelopeAtMs(track, t, recordingMode) >= localOnsetThresh) {
+      if (sampleTrackEnvelopeAtMs(track, t, recordingMode, hiRes) >= localOnsetThresh) {
         foundRiseMs = t;
         break;
       }
@@ -328,7 +393,7 @@ export function snapTokenBoundsToWaveform(
     const lookbackLimit = Math.max(minStartMs, safeStart - 90);
     let onsetValleyMs = safeStart;
     for (let t = safeStart - stepMs; t >= lookbackLimit; t -= stepMs) {
-      const v = sampleTrackEnvelopeAtMs(track, t, recordingMode);
+      const v = sampleTrackEnvelopeAtMs(track, t, recordingMode, hiRes);
       if (v < localOnsetThresh) {
         onsetValleyMs = Math.max(lookbackLimit, t);
         break;
@@ -340,13 +405,13 @@ export function snapTokenBoundsToWaveform(
 
   // Now refine trailing edge `refinedEnd`
   const minWordDurMs = 65;
-  const envAtEnd = sampleTrackEnvelopeAtMs(track, refinedEnd, recordingMode);
+  const envAtEnd = sampleTrackEnvelopeAtMs(track, refinedEnd, recordingMode, hiRes);
   if (envAtEnd < localTailThresh && refinedEnd - refinedStart > 130) {
     // Trailing edge sits in silence -> scan backward to find where voice actually finished
     const minBackLimit = Math.max(refinedStart + minWordDurMs, refinedEnd - 440);
     let lastActiveMs: number | null = null;
     for (let t = refinedEnd; t >= minBackLimit; t -= stepMs) {
-      if (sampleTrackEnvelopeAtMs(track, t, recordingMode) >= localTailThresh) {
+      if (sampleTrackEnvelopeAtMs(track, t, recordingMode, hiRes) >= localTailThresh) {
         lastActiveMs = t;
         break;
       }
@@ -361,7 +426,7 @@ export function snapTokenBoundsToWaveform(
     const lookaheadLimit = Math.min(maxEndMs, refinedEnd + 130);
     let tailEndMs = refinedEnd;
     for (let t = refinedEnd + stepMs; t <= lookaheadLimit; t += stepMs) {
-      const v = sampleTrackEnvelopeAtMs(track, t, recordingMode);
+      const v = sampleTrackEnvelopeAtMs(track, t, recordingMode, hiRes);
       if (v < localTailThresh) {
         tailEndMs = Math.min(lookaheadLimit, t + 12);
         break;
@@ -389,14 +454,19 @@ export function snapTokenBoundsToWaveform(
 export function refineProjectBlocksWithWaveform(
   blocks: TranscriptBlock[],
   tracks: SpeakerTrack[],
-  recordingMode: RecordingMode = 'same_room_sync'
+  recordingMode: RecordingMode = 'same_room_sync',
+  hiResEnvelopes?: Map<string, HiResWaveformEnvelope>
 ): TranscriptBlock[] {
   if (blocks.length === 0 || tracks.length === 0) return blocks;
-  const hasRealPeaks = tracks.some((t) => (t.peaks?.length ?? 0) >= 32 && (t.durationMs ?? 0) > 0);
+  const hasRealPeaks = tracks.some(
+    (t) =>
+      (hiResEnvelopes?.get(t.id)?.numBins ?? 0) >= 32 ||
+      ((t.peaks?.length ?? 0) >= 32 && (t.durationMs ?? 0) > 0)
+  );
   if (!hasRealPeaks) return blocks;
 
   const trackMap = new Map<string, SpeakerTrack>(tracks.map((t) => [t.id, t]));
-  const profiles = buildAcousticProfileMap(tracks);
+  const profiles = buildAcousticProfileMap(tracks, hiResEnvelopes);
 
   // Flatten references to non-deleted tokens in timeline order to enforce strict non-overlapping bounds
   interface FlatRef {
@@ -437,7 +507,8 @@ export function refineProjectBlocksWithWaveform(
 
     const tr = trackMap.get(ref.speakerId);
     const prof = profiles.get(ref.speakerId);
-    if (!tr || !prof || tr.peaks.length < 32) continue;
+    const hiRes = hiResEnvelopes?.get(ref.speakerId);
+    if (!tr || !prof || ((!hiRes || hiRes.numBins < 32) && tr.peaks.length < 32)) continue;
 
     const prevRef = i > 0 ? flat[i - 1] : null;
     const nextRef = i + 1 < flat.length ? flat[i + 1] : null;
@@ -473,7 +544,8 @@ export function refineProjectBlocksWithWaveform(
       maxEndMs,
       tr,
       prof,
-      recordingMode
+      recordingMode,
+      hiRes
     );
 
     if (
@@ -515,7 +587,14 @@ export function refineProjectBlocksWithWaveform(
     // Clear any false mouthClickCleaned flag if this pause actually contains audible vocal speech!
     if (
       silTok.mouthClickCleaned &&
-      hasAudibleVoiceInInterval(tracks, profiles, silTok.sourceStartMs, silTok.sourceEndMs, recordingMode)
+      hasAudibleVoiceInInterval(
+        tracks,
+        profiles,
+        silTok.sourceStartMs,
+        silTok.sourceEndMs,
+        recordingMode,
+        hiResEnvelopes
+      )
     ) {
       silTok.mouthClickCleaned = false;
       silTok.trackMuted = false;

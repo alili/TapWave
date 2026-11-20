@@ -40,10 +40,11 @@ import {
 import {
   computeSharedReferenceCeiling,
   computeTrackLinearGain,
+  HiResWaveformEnvelope,
   parseWaveformEnvelopeBinary,
   sampleCalibratedWaveformPoint,
 } from '../engine/waveformEnvelopeLoader';
-import { PodcastProjectState } from '../types/podcast';
+import { PodcastProjectState, SpeakerTrack, TranscriptBlock } from '../types/podcast';
 
 function createTestFixtureState(): PodcastProjectState {
   const base = createEmptyProjectState();
@@ -2906,5 +2907,268 @@ describe('PodCraft Clean Workspace, Project Persistence & Timeline Engine', () =
     };
     const restoredFallback = parsePodcraftProjectJson(JSON.stringify(legacyWithoutPauseJump));
     expect(restoredFallback.pauseCutJumpEnabled).toBe(true);
+  });
+
+  it('refines token bounds using 5ms HiResWaveformEnvelope even when legacy peaks are coarse (>90ms/bin)', () => {
+    const durationMs = 240_000; // 4 minutes -> 1200 peaks = 200ms/bin (>90ms limit for legacy peaks)
+    const coarsePeaks = new Array(1200).fill(0.01);
+    const binMs = 5;
+    const numBins = durationMs / binMs;
+    const triples = new Uint16Array(numBins * 3);
+    // Background noise floor ~ 0.01
+    for (let b = 0; b < numBins; b++) {
+      triples[b * 3] = Math.round(0.01 * 65535);
+      triples[b * 3 + 1] = Math.round(0.01 * 65535);
+      triples[b * 3 + 2] = Math.round(0.006 * 65535);
+    }
+    // Real speech burst only during [1200ms, 1450ms] (bins 240..290)
+    for (let b = 240; b < 290; b++) {
+      triples[b * 3] = Math.round(0.52 * 65535);
+      triples[b * 3 + 1] = Math.round(0.50 * 65535);
+      triples[b * 3 + 2] = Math.round(0.32 * 65535);
+    }
+
+    const hiRes: HiResWaveformEnvelope = {
+      binMs,
+      numBins,
+      durationMs,
+      triples,
+      noiseFloorPeak: 0.01,
+      noiseFloorRms: 0.006,
+      p95Peak: 0.52,
+      p992Peak: 0.52,
+    };
+
+    const baseTrack = createTestFixtureState().tracks[0];
+    const tracks: SpeakerTrack[] = [
+      {
+        ...baseTrack,
+        id: 'sp_1',
+        name: '主播',
+        color: '#38bdf8',
+        role: 'host',
+        durationMs,
+        peaks: coarsePeaks,
+      },
+    ];
+
+    const rawBlocks: TranscriptBlock[] = [
+      {
+        blockId: 'blk_1',
+        speakerId: 'sp_1',
+        chapterTitle: '测试',
+        tokens: [
+          {
+            id: 't_1',
+            type: 'word',
+            text: '你好',
+            // Raw ASR timestamp has 180ms leading silence and 150ms trailing silence
+            sourceStartMs: 1020,
+            sourceEndMs: 1600,
+            durationSec: 0.58,
+            origDurationSec: 0.58,
+          },
+        ],
+      },
+    ];
+
+    // Without hiRes, coarse peaks (>90ms/bin) cannot refine
+    const withoutHiRes = refineProjectBlocksWithWaveform(rawBlocks, tracks, 'same_room_sync');
+    expect(withoutHiRes[0].tokens[0].sourceStartMs).toBe(1020);
+    expect(withoutHiRes[0].tokens[0].sourceEndMs).toBe(1600);
+
+    // With hiRes, bounds snap tightly around [1200ms, 1450ms]
+    const hiResMap = new Map<string, HiResWaveformEnvelope>([['sp_1', hiRes]]);
+    const withHiRes = refineProjectBlocksWithWaveform(rawBlocks, tracks, 'same_room_sync', hiResMap);
+    expect(withHiRes[0].tokens[0].sourceStartMs).toBeGreaterThanOrEqual(1170);
+    expect(withHiRes[0].tokens[0].sourceStartMs).toBeLessThanOrEqual(1210);
+    expect(withHiRes[0].tokens[0].sourceEndMs).toBeGreaterThanOrEqual(1440);
+    expect(withHiRes[0].tokens[0].sourceEndMs).toBeLessThanOrEqual(1485);
+  });
+
+  it('subdivides multi-character tokens at acoustic valleys when HiResWaveformEnvelope is provided', () => {
+    const durationMs = 2000;
+    const binMs = 5;
+    const numBins = durationMs / binMs;
+    const triples = new Uint16Array(numBins * 3);
+    for (let b = 0; b < numBins; b++) {
+      triples[b * 3] = Math.round(0.01 * 65535);
+      triples[b * 3 + 1] = Math.round(0.01 * 65535);
+      triples[b * 3 + 2] = Math.round(0.005 * 65535);
+    }
+    // Token spans [0ms, 900ms] with 3 chars "大家好":
+    // Char 1 ("大") strong at [0..180ms], valley at 195ms,
+    // Char 2 ("家") strong at [210..560ms], valley at 585ms,
+    // Char 3 ("好") strong at [600..900ms]
+    const setActive = (startMs: number, endMs: number, amp = 0.55) => {
+      for (let b = Math.floor(startMs / binMs); b < Math.floor(endMs / binMs); b++) {
+        triples[b * 3] = Math.round(amp * 65535);
+        triples[b * 3 + 1] = Math.round(amp * 65535);
+        triples[b * 3 + 2] = Math.round(amp * 0.6 * 65535);
+      }
+    };
+    setActive(0, 180);
+    setActive(210, 560);
+    setActive(600, 900);
+
+    const hiRes: HiResWaveformEnvelope = {
+      binMs,
+      numBins,
+      durationMs,
+      triples,
+      noiseFloorPeak: 0.01,
+      noiseFloorRms: 0.005,
+      p95Peak: 0.55,
+      p992Peak: 0.55,
+    };
+
+    const state = createTestFixtureState();
+    state.coldOpenEnabled = false;
+    state.highlights = [];
+    state.introVoiceover = undefined;
+    state.tracks = [
+      {
+        ...state.tracks[0],
+        id: 'sp_host',
+        name: '主播',
+        color: '#38bdf8',
+        role: 'host',
+        durationMs,
+        peaks: new Array(40).fill(0.2),
+      },
+    ];
+    state.blocks = [
+      {
+        blockId: 'blk_val',
+        speakerId: 'sp_host',
+        chapterTitle: '测试',
+        tokens: [
+          {
+            id: 'tok_3char',
+            type: 'word',
+            text: '大家好',
+            sourceStartMs: 0,
+            sourceEndMs: 900,
+            durationSec: 0.9,
+            origDurationSec: 0.9,
+          },
+        ],
+      },
+    ];
+
+    const tl = computeEditedTimeline(state);
+    const anns = buildVisibleWordTimelineAnnotations(tl, {
+      viewStartSec: 0,
+      viewEndSec: 1.0,
+      viewportWidthPx: 1000,
+      totalSec: tl.totalEditedDurationSec,
+      tracks: state.tracks,
+      hiResEnvelopes: new Map([['sp_host', hiRes]]),
+      recordingMode: 'same_room_sync',
+    });
+
+    expect(anns.map((a) => a.text)).toEqual(['大', '家', '好']);
+    // Uniform split would be 0.30s and 0.60s; acoustic valleys are around ~0.195s and ~0.585s
+    expect(anns[0].editedEndSec).toBeLessThan(0.23);
+    expect(anns[1].editedStartSec).toBeLessThan(0.23);
+    expect(anns[1].editedEndSec).toBeGreaterThanOrEqual(0.56);
+    expect(anns[1].editedEndSec).toBeLessThanOrEqual(0.60);
+  });
+
+  it('never replays overlapped or cut source audio when trimming an overlapped token or leading gap', () => {
+    const state = createTestFixtureState();
+    state.coldOpenEnabled = false;
+    state.highlights = [];
+    state.introVoiceover = undefined;
+    state.blocks = [
+      {
+        blockId: 'b_ov_1',
+        speakerId: 'host',
+        chapterTitle: '测试',
+        tokens: [
+          {
+            id: 't_host',
+            type: 'word',
+            text: '主持人',
+            sourceStartMs: 0,
+            sourceEndMs: 5000,
+            durationSec: 5.0,
+            origDurationSec: 5.0,
+          },
+        ],
+      },
+      {
+        blockId: 'b_ov_2',
+        speakerId: 'guest',
+        chapterTitle: '测试',
+        tokens: [
+          {
+            id: 't_guest',
+            type: 'word',
+            text: '嘉宾接话',
+            sourceStartMs: 2000,
+            sourceEndMs: 6000,
+            durationSec: 4.0,
+            origDurationSec: 4.0,
+          },
+        ],
+      },
+    ];
+
+    // Before cut: t_host [0..5s], t_guest visible edited [5..6s] (source [5..6s])
+    const cutRes = applyWaveformSelectionToBlocks(state, 4.5, 5.5, 'ripple_all', undefined, {
+      mode: 'free',
+    });
+    const nextState: PodcastProjectState = { ...state, blocks: cutRes.nextBlocks };
+    const nextTl = computeEditedTimeline(nextState);
+
+    // Total edited duration must be 5.0s (4.5s + 0.5s), NEVER 8.0s (replaying 2.5..5.5s)!
+    expect(nextTl.totalEditedDurationSec).toBeCloseTo(5.0, 2);
+    expect(nextTl.playbackSpans).toHaveLength(2);
+    expect(nextTl.playbackSpans[0].sourceStartSec).toBeCloseTo(0, 2);
+    expect(nextTl.playbackSpans[0].sourceEndSec).toBeCloseTo(4.5, 2);
+    expect(nextTl.playbackSpans[1].sourceStartSec).toBeCloseTo(5.5, 2);
+    expect(nextTl.playbackSpans[1].sourceEndSec).toBeCloseTo(6.0, 2);
+
+    // Leading gap cut when first token is deleted and next token has gapBeforeSec
+    const gapState = createTestFixtureState();
+    gapState.coldOpenEnabled = false;
+    gapState.highlights = [];
+    gapState.introVoiceover = undefined;
+    gapState.blocks = [
+      {
+        blockId: 'b_gap',
+        speakerId: 'host',
+        chapterTitle: '测试',
+        tokens: [
+          {
+            id: 't_0',
+            type: 'word',
+            text: '第一句',
+            sourceStartMs: 0,
+            sourceEndMs: 1000,
+            durationSec: 1.0,
+            origDurationSec: 1.0,
+          },
+          {
+            id: 't_1',
+            type: 'word',
+            text: '第二句',
+            sourceStartMs: 1500,
+            sourceEndMs: 2500,
+            durationSec: 1.0,
+            origDurationSec: 1.0,
+            gapBeforeSec: 0.5,
+          },
+        ],
+      },
+    ];
+    const gapCut = applyWaveformSelectionToBlocks(gapState, 0.0, 1.3, 'ripple_all', undefined, {
+      mode: 'free',
+    });
+    const gapNextTl = computeEditedTimeline({ ...gapState, blocks: gapCut.nextBlocks });
+    expect(gapNextTl.totalEditedDurationSec).toBeCloseTo(1.2, 2);
+    expect(gapNextTl.playbackSpans[0].sourceStartSec).toBeCloseTo(1.3, 2);
+    expect(gapNextTl.playbackSpans[0].sourceEndSec).toBeCloseTo(2.5, 2);
   });
 });

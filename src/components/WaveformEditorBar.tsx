@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
+  BarChart3,
   Check,
   Cloud,
   Columns3,
@@ -27,6 +28,15 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { AuxAudioSlot, BgmTrackAsset, HighlightClip, PodcastProjectState, WaveformSelectionMode } from '../types/podcast';
+import { CutPointItem } from '../engine/cutAnalysisEngine';
+import {
+  getPlayheadSec,
+  setPlayheadSec as setGlobalPlayheadSec,
+  subscribePlayhead,
+  useActiveBlockId,
+  useActiveTokenId,
+  usePlayheadSec,
+} from '../engine/playheadStore';
 import {
   buildVisibleWordTimelineAnnotations,
   coalesceChronologicalBlocks,
@@ -80,7 +90,7 @@ interface SpeakerDeckTurn {
 interface WaveformEditorBarProps {
   state: PodcastProjectState;
   timeline: TimelineComputation;
-  playheadSec: number;
+  playheadSec?: number;
   isPlaying: boolean;
   isMainStage?: boolean;
   selectedTokenIds?: Set<string>;
@@ -157,6 +167,9 @@ interface WaveformEditorBarProps {
     }
   ) => void;
   onSetWaveformSelectionMode?: (mode: WaveformSelectionMode) => void;
+  cutPoints?: CutPointItem[];
+  onInspectCutPoint?: (cut: CutPointItem, anchorPos?: { x: number; y: number }) => void;
+  onOpenCutReportModal?: (tab?: 'cuts' | 'report' | 'profile') => void;
 }
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -588,6 +601,79 @@ interface DeckTurnCallbacks {
   onCutOverlapRange: (startSec: number, endSec: number) => void;
 }
 
+const PlayheadTimeText: React.FC<{
+  bodyOffsetSec: number;
+  className?: string;
+}> = React.memo(({ bodyOffsetSec, className }) => {
+  const rawSec = usePlayheadSec();
+  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  return (
+    <span className={className}>
+      {formatMmSs(effSec)}.{Math.floor((effSec % 1) * 10)}
+    </span>
+  );
+});
+
+const ScrubberProgressFill: React.FC<{
+  totalSec: number;
+  bodyOffsetSec: number;
+}> = React.memo(({ totalSec, bodyOffsetSec }) => {
+  const rawSec = usePlayheadSec();
+  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+  return (
+    <div
+      style={{ width: `${pct}%` }}
+      className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-400 rounded-full"
+    />
+  );
+});
+
+const ScrubberThumb: React.FC<{
+  totalSec: number;
+  bodyOffsetSec: number;
+  scrubbing: boolean;
+}> = React.memo(({ totalSec, bodyOffsetSec, scrubbing }) => {
+  const rawSec = usePlayheadSec();
+  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+  return (
+    <div
+      style={{ left: `${pct}%` }}
+      className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-white border-2 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.85)] pointer-events-none transition-transform ${
+        scrubbing ? 'w-3.5 h-3.5 scale-110' : 'w-3 h-3 group-hover:scale-110'
+      }`}
+    />
+  );
+});
+
+const ScrubberPercentText: React.FC<{
+  totalSec: number;
+  bodyOffsetSec: number;
+}> = React.memo(({ totalSec, bodyOffsetSec }) => {
+  const rawSec = usePlayheadSec();
+  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  const pct = totalSec > 0.01 ? Math.max(0, Math.min(100, (effSec / totalSec) * 100)) : 0;
+  return <span className="ml-1 text-zinc-500">{Math.round(pct)}%</span>;
+});
+
+const TurnCardProgressBar: React.FC<{
+  editedStartSec: number;
+  editedEndSec: number;
+  bodyOffsetSec: number;
+}> = React.memo(({ editedStartSec, editedEndSec, bodyOffsetSec }) => {
+  const rawSec = usePlayheadSec();
+  const effSec = Math.max(0, rawSec - bodyOffsetSec);
+  const span = Math.max(0.05, editedEndSec - editedStartSec);
+  const ratio = Math.min(1, Math.max(0, (effSec - editedStartSec) / span));
+  return (
+    <div
+      className="pointer-events-none absolute top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-400 via-sky-400 to-blue-400"
+      style={{ width: `${(ratio * 100).toFixed(1)}%` }}
+    />
+  );
+});
+
 interface DeckTurnCardProps {
   turn: SpeakerDeckTurn;
   idx: number;
@@ -596,9 +682,8 @@ interface DeckTurnCardProps {
   isRangeHit: boolean;
   showChapter: boolean;
   deckFlowMode: 'horizontal' | 'vertical';
-  turnProgressRatio: number;
+  bodyOffsetSec: number;
   activeTokenIdInTurn: string | null;
-  playheadSecInTurn: number | null;
   selectedTokenIdsInTurn: Set<string>;
   waveRangeStartSec: number | null;
   waveRangeEndSec: number | null;
@@ -623,9 +708,8 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
     isRangeHit,
     showChapter,
     deckFlowMode,
-    turnProgressRatio,
+    bodyOffsetSec,
     activeTokenIdInTurn,
-    playheadSecInTurn,
     selectedTokenIdsInTurn,
     waveRangeStartSec,
     waveRangeEndSec,
@@ -692,9 +776,10 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
         }`}
       >
         {isCurrent && (
-          <div
-            className="pointer-events-none absolute top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-400 via-sky-400 to-blue-400"
-            style={{ width: `${(turnProgressRatio * 100).toFixed(1)}%` }}
+          <TurnCardProgressBar
+            editedStartSec={turn.editedStartSec}
+            editedEndSec={turn.editedEndSec}
+            bodyOffsetSec={bodyOffsetSec}
           />
         )}
         <div
@@ -865,11 +950,7 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
               let prevEndedAsciiAlnum = false;
               return turn.tokens.map(({ mapped: m, flatIndex }) => {
                 const isActive =
-                  activeTokenIdInTurn !== null
-                    ? activeTokenIdInTurn === m.token.id
-                    : playheadSecInTurn !== null &&
-                      playheadSecInTurn >= m.editedStartSec &&
-                      playheadSecInTurn <= m.editedEndSec;
+                  activeTokenIdInTurn !== null && activeTokenIdInTurn === m.token.id;
                 const isSelected = selectedTokenIdsInTurn.has(m.token.id);
                 const isWaveRangeToken =
                   waveRangeStartSec !== null &&
@@ -1134,8 +1215,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   isPlaying,
   isMainStage = false,
   selectedTokenIds,
-  activeBlockId,
-  activeTokenId,
+  activeBlockId: activeBlockIdProp,
+  activeTokenId: activeTokenIdProp,
   canUndo = false,
   rightPaneCollapsed = false,
   onToggleRightPane,
@@ -1177,7 +1258,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onOpenIntroEditor,
   onInsertSilenceAtPlayhead,
   onNotify,
+  cutPoints = [],
+  onInspectCutPoint,
+  onOpenCutReportModal,
 }) => {
+  const storeActiveBlockId = useActiveBlockId();
+  const storeActiveTokenId = useActiveTokenId();
+  const activeBlockId = activeBlockIdProp ?? storeActiveBlockId;
+  const activeTokenId = activeTokenIdProp ?? storeActiveTokenId;
   // 主音轨视图严格从正片 00:00 开始（片头高光/口播/片头BGM已分离至独立片头编辑器）
   const bodyOffsetSec = Math.max(0, rawTimeline.prefixDurationSec || 0);
   const timeline = useMemo(() => {
@@ -1220,8 +1308,21 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     };
   }, [rawTimeline, bodyOffsetSec]);
 
-  const playheadSec = Math.max(0, rawPlayheadSec - bodyOffsetSec);
+  const getEffectivePlayheadSec = useCallback(
+    () => Math.max(0, (rawPlayheadSec ?? getPlayheadSec()) - bodyOffsetSec),
+    [rawPlayheadSec, bodyOffsetSec]
+  );
   const onSeekToSec = (bodySec: number) => onRawSeekToSec(bodyOffsetSec + Math.max(0, bodySec));
+  const lastDragAudioSeekPerfRef = useRef<number>(0);
+  const seekDuringDrag = (bodySec: number) => {
+    const clampedBody = Math.max(0, Math.min(timeline.totalEditedDurationSec, bodySec));
+    setGlobalPlayheadSec(bodyOffsetSec + clampedBody);
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - lastDragAudioSeekPerfRef.current >= 80) {
+      lastDragAudioSeekPerfRef.current = now;
+      onRawSeekToSec(bodyOffsetSec + clampedBody);
+    }
+  };
   const onWaveformCutAction = (
     startBodySec: number,
     endBodySec: number,
@@ -1289,8 +1390,19 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const [outroTrimDragging, setOutroTrimDragging] = useState<boolean>(false);
   const [draftOutroDurationSec, setDraftOutroDurationSec] = useState<number | null>(null);
   const outroTrimActiveRef = useRef<boolean>(false);
-  const [hoverZone, setHoverZone] = useState<'none' | 'playhead' | 'ruler' | 'outro_trim_handle'>('none');
-  const [scrubHoverRatio, setScrubHoverRatio] = useState<number | null>(null);
+  const [hoverZone, setHoverZone] = useState<'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge'>('none');
+  const cutBadgeHitBoxesRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; editedSec: number }>>([]);
+  const scrubHoverTooltipRef = useRef<HTMLDivElement | null>(null);
+  const hoverRatioRef = useRef<number | null>(null);
+  const overlayDrawRafRef = useRef<number | null>(null);
+  const drawOverlayRef = useRef<() => void>(() => {});
+  const scheduleOverlayDraw = useCallback(() => {
+    if (overlayDrawRafRef.current !== null) return;
+    overlayDrawRafRef.current = window.requestAnimationFrame(() => {
+      overlayDrawRafRef.current = null;
+      drawOverlayRef.current();
+    });
+  }, []);
   const [editingHintTokenId, setEditingHintTokenId] = useState<string | null>(null);
   const [draftHintText, setDraftHintText] = useState<string>('');
   const [saveHintToGlossary, setSaveHintToGlossary] = useState<boolean>(true);
@@ -1339,7 +1451,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const [selStartRatio, setSelStartRatio] = useState<number | null>(null);
   const [selEndRatio, setSelEndRatio] = useState<number | null>(null);
   const [selLaneIdx, setSelLaneIdx] = useState<number>(0);
-  const [hoverRatio, setHoverRatio] = useState<number | null>(null);
   const [hoverLaneIdx, setHoverLaneIdx] = useState<number | null>(null);
   const [overlapJumpIdx, setOverlapJumpIdx] = useState<number>(0);
   const [showCutMarkers, setShowCutMarkers] = useState<boolean>(() => {
@@ -1509,6 +1620,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       coldOpenEnabled: state.coldOpenEnabled,
       highlights: state.highlights,
       blocks: state.blocks,
+      tracks: speakerTracks,
+      hiResEnvelopes: hiResEnvelopesRef.current,
+      recordingMode: state.recordingMode,
     });
   }, [
     wordTimelineMode,
@@ -1520,11 +1634,11 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     state.coldOpenEnabled,
     state.highlights,
     state.blocks,
+    speakerTracks,
+    state.recordingMode,
+    hiResEnvelopeRev,
   ]);
   const hasLoadedTimeline = timeline.totalEditedDurationSec > 0.01;
-  const progressPct = hasLoadedTimeline
-    ? Math.max(0, Math.min(100, (playheadSec / timeline.totalEditedDurationSec) * 100))
-    : 0;
   const coldOpenPct = hasLoadedTimeline
     ? Math.max(0, Math.min(100, (timeline.coldOpenDurationSec / timeline.totalEditedDurationSec) * 100))
     : 0;
@@ -1541,17 +1655,17 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       )
     : 0;
 
-  const zoomViewRef = useRef({ zoom, viewStartRatio, maxZoom, playheadSec, totalSec });
-  zoomViewRef.current = { zoom, viewStartRatio, maxZoom, playheadSec, totalSec };
+  const zoomViewRef = useRef({ zoom, viewStartRatio, maxZoom, totalSec });
+  zoomViewRef.current = { zoom, viewStartRatio, maxZoom, totalSec };
 
   const applyZoomAtAnchor = (targetZoom: number, customAnchorRatio?: number) => {
     const {
       zoom: curZoom,
       viewStartRatio: curStart,
       maxZoom: curMaxZoom,
-      playheadSec: curPlaySec,
       totalSec: curTotalSec,
     } = zoomViewRef.current;
+    const curPlaySec = getEffectivePlayheadSec();
 
     const clampedZoom = Math.max(
       1,
@@ -1582,13 +1696,18 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     setViewStartRatio(Math.max(0, Math.min(maxStart, nextStart)));
   };
 
-  const seekFromScrubberClientX = (clientX: number) => {
+  const seekFromScrubberClientX = (clientX: number, throttleAudio = false) => {
     const el = scrubberRef.current;
     if (!el || timeline.totalEditedDurationSec <= 0) return;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0) return;
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    onSeekToSec(ratio * timeline.totalEditedDurationSec);
+    const targetBodySec = ratio * timeline.totalEditedDurationSec;
+    if (throttleAudio) {
+      seekDuringDrag(targetBodySec);
+    } else {
+      onSeekToSec(targetBodySec);
+    }
   };
 
   const seekPlayheadWithoutZoom = (
@@ -1808,7 +1927,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         !waveformKeyActionsRef.current.isPlaying
       ) {
         const { rangeStartSec, rangeEndSec } = waveformKeyActionsRef.current;
-        const curPlayhead = zoomViewRef.current.playheadSec;
+        const curPlayhead = getEffectivePlayheadSec();
         if (curPlayhead < rangeStartSec - 0.05 || curPlayhead >= rangeEndSec - 0.05) {
           e.preventDefault();
           e.stopPropagation();
@@ -1826,36 +1945,42 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
   // Keep playhead anchored at left 1/3 during auto-scrolling (playback / scrubbing / out-of-view jump)
   useEffect(() => {
-    const wasPlaying = prevIsPlayingRef.current;
-    prevIsPlayingRef.current = isPlaying;
-    if (!wasPlaying && isPlaying) {
-      waveformManualPanUntilRef.current = 0;
-    }
+    const checkAutoFollow = () => {
+      const wasPlaying = prevIsPlayingRef.current;
+      prevIsPlayingRef.current = isPlaying;
+      if (!wasPlaying && isPlaying) {
+        waveformManualPanUntilRef.current = 0;
+      }
 
-    if (suppressAutoFollowOnceRef.current) {
-      suppressAutoFollowOnceRef.current = false;
-      if (!isPlaying) return;
-    }
-    if (zoom <= 1.005) {
-      if (viewStartRatio !== 0) setViewStartRatio(0);
-      return;
-    }
-    if (dragging || playheadDragging) return;
-    if (!scrubbing && Date.now() < waveformManualPanUntilRef.current) return;
+      if (suppressAutoFollowOnceRef.current) {
+        suppressAutoFollowOnceRef.current = false;
+        if (!isPlaying) return;
+      }
+      if (zoom <= 1.005) {
+        if (viewStartRatio !== 0) setViewStartRatio(0);
+        return;
+      }
+      if (dragging || playheadDragging) return;
+      if (!scrubbing && Date.now() < waveformManualPanUntilRef.current) return;
 
-    const nextStart = computeAutoScrollViewStartRatio({
-      playheadSec,
-      totalSec,
-      zoom,
-      currentViewStartRatio: viewStartRatio,
-      isPlaying: isPlaying || scrubbing,
-      viewportWidthPx: canvasMetrics.width,
-    });
-    if (Math.abs(nextStart - viewStartRatio) > 1e-9) {
-      setViewStartRatio(nextStart);
-    }
+      const curPlayhead = getEffectivePlayheadSec();
+      const nextStart = computeAutoScrollViewStartRatio({
+        playheadSec: curPlayhead,
+        totalSec,
+        zoom,
+        currentViewStartRatio: viewStartRatio,
+        isPlaying: isPlaying || scrubbing,
+        viewportWidthPx: canvasMetrics.width,
+      });
+      if (Math.abs(nextStart - viewStartRatio) > 0.0005) {
+        setViewStartRatio(nextStart);
+      }
+    };
+
+    checkAutoFollow();
+    return subscribePlayhead(checkAutoFollow);
   }, [
-    playheadSec,
+    getEffectivePlayheadSec,
     totalSec,
     zoom,
     isPlaying,
@@ -2528,7 +2653,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         trCalInfo?.gainLinear ?? computeTrackLinearGain(tr.autoGainDb, state.loudnessAligned);
       const sharedRefCeiling = trackCalibrations.sharedRefCeiling;
 
-      const trackDurMs = (tr.durationMs ?? 0) > 0 ? tr.durationMs! : hiRes?.durationMs ?? 0;
+      const rawTrackDurMs = (tr.durationMs ?? 0) > 0 ? tr.durationMs! : hiRes?.durationMs ?? 0;
+      const trackDurMs = hiRes && hiRes.numBins > 0 ? hiRes.durationMs : rawTrackDurMs;
       const hasAuthenticSource = Boolean(
         trackDurMs > 0 && ((hiRes && hiRes.numBins >= 16) || tr.peaks.length >= 16)
       );
@@ -3300,6 +3426,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.save();
 
       // 剪辑处标注（贯穿虚线 + 交叉淡化包络 + 顶部「✂️ 剪辑」胶囊，可通过工具栏开关切换显示）
+      cutBadgeHitBoxesRef.current = [];
       let lastCutBadgeRightX = -999;
       if (showCutMarkers) {
         timelineZones.cutSeams.forEach((seam) => {
@@ -3353,6 +3480,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             ctx.textBaseline = 'middle';
             ctx.fillText(cutLabel, px + 4, py + pillH / 2 + 0.5);
             lastCutBadgeRightX = px + pillW;
+            cutBadgeHitBoxesRef.current.push({
+              x1: px - 2,
+              y1: py - 2,
+              x2: px + pillW + 2,
+              y2: py + pillH + 2,
+              editedSec: seam.editedSec,
+            });
           }
           ctx.restore();
         });
@@ -3395,6 +3529,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 ctx.textBaseline = 'middle';
                 ctx.fillText(cutLabel, px + 3, py + pillH / 2 + 0.5);
                 lastCutBadgeRightX = px + pillW;
+                cutBadgeHitBoxesRef.current.push({
+                  x1: px - 2,
+                  y1: py - 2,
+                  x2: px + pillW + 2,
+                  y2: py + pillH + 2,
+                  editedSec: m.editedStartSec,
+                });
               }
               ctx.restore();
             }
@@ -3897,32 +4038,34 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const activeTokenTurnIdx = activeTokenId ? (turnIdxByTokenId.get(activeTokenId) ?? -1) : -1;
 
   const focusAnchorModeRef = useRef<'playhead' | 'range'>('playhead');
-  const prevPlayheadForFocusRef = useRef(playheadSec);
+  const prevPlayheadForFocusRef = useRef(getEffectivePlayheadSec());
   const prevRangeKeyForFocusRef = useRef('');
 
   const rangeFocusKey = hasValidRange
     ? `${rangeStartSec.toFixed(3)}:${rangeEndSec.toFixed(3)}`
     : '';
-  const playheadMovedForFocus = Math.abs(playheadSec - prevPlayheadForFocusRef.current) > 0.002;
-  const rangeChangedForFocus = rangeFocusKey !== prevRangeKeyForFocusRef.current;
 
-  if (playheadDragging || scrubbing || isPlaying) {
-    focusAnchorModeRef.current = 'playhead';
-  } else if (dragging && hasValidRange) {
-    focusAnchorModeRef.current = 'range';
-  } else if (playheadMovedForFocus) {
-    focusAnchorModeRef.current = 'playhead';
-  } else if (rangeChangedForFocus && hasValidRange) {
-    focusAnchorModeRef.current = 'range';
-  } else if (!hasValidRange) {
-    focusAnchorModeRef.current = 'playhead';
-  }
+  const computeFocusTurnIdx = useCallback(() => {
+    const curPlayhead = getEffectivePlayheadSec();
+    const playheadMovedForFocus = Math.abs(curPlayhead - prevPlayheadForFocusRef.current) > 0.002;
+    const rangeChangedForFocus = rangeFocusKey !== prevRangeKeyForFocusRef.current;
 
-  prevPlayheadForFocusRef.current = playheadSec;
-  prevRangeKeyForFocusRef.current = rangeFocusKey;
-  const focusAnchorMode = focusAnchorModeRef.current;
+    if (playheadDragging || scrubbing || isPlaying) {
+      focusAnchorModeRef.current = 'playhead';
+    } else if (dragging && hasValidRange) {
+      focusAnchorModeRef.current = 'range';
+    } else if (playheadMovedForFocus) {
+      focusAnchorModeRef.current = 'playhead';
+    } else if (rangeChangedForFocus && hasValidRange) {
+      focusAnchorModeRef.current = 'range';
+    } else if (!hasValidRange) {
+      focusAnchorModeRef.current = 'playhead';
+    }
 
-  const focusTurnIdx = useMemo(() => {
+    prevPlayheadForFocusRef.current = curPlayhead;
+    prevRangeKeyForFocusRef.current = rangeFocusKey;
+    const focusAnchorMode = focusAnchorModeRef.current;
+
     if (speakerDeckTurns.length === 0) return -1;
 
     if (focusAnchorMode === 'range' && hasValidRange) {
@@ -3938,7 +4081,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       if (intersectIdx >= 0) return intersectIdx;
     }
 
-    if (playheadSec < timeline.prefixDurationSec - 0.02) {
+    if (curPlayhead < timeline.prefixDurationSec - 0.02) {
       return -1;
     }
 
@@ -3946,7 +4089,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       return activeTokenTurnIdx;
     }
 
-    const activeIdx = findTurnIndexAtSec(speakerDeckTurns, playheadSec, 0.04, turnsAreMonotonic);
+    const activeIdx = findTurnIndexAtSec(speakerDeckTurns, curPlayhead, 0.04, turnsAreMonotonic);
     if (activeIdx >= 0) return activeIdx;
 
     if (activeBlockId) {
@@ -3954,21 +4097,34 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       if (blkIdx !== undefined) return blkIdx;
     }
 
-    return findNearestTurnIndex(speakerDeckTurns, playheadSec, turnsAreMonotonic);
+    return findNearestTurnIndex(speakerDeckTurns, curPlayhead, turnsAreMonotonic);
   }, [
+    getEffectivePlayheadSec,
     speakerDeckTurns,
     turnsAreMonotonic,
     turnIdxByBlockId,
-    focusAnchorMode,
+    rangeFocusKey,
     hasValidRange,
     rangeStartSec,
     rangeEndSec,
-    timeline.coldOpenDurationSec,
+    playheadDragging,
+    scrubbing,
+    isPlaying,
+    dragging,
     timeline.prefixDurationSec,
     activeBlockId,
     activeTokenTurnIdx,
-    playheadSec,
   ]);
+
+  const [focusTurnIdx, setFocusTurnIdx] = useState<number>(() => computeFocusTurnIdx());
+  useEffect(() => {
+    const syncFocusTurn = () => {
+      const nextIdx = computeFocusTurnIdx();
+      setFocusTurnIdx((prev) => (prev === nextIdx ? prev : nextIdx));
+    };
+    syncFocusTurn();
+    return subscribePlayhead(syncFocusTurn);
+  }, [computeFocusTurnIdx]);
 
   const focusedTurn = focusTurnIdx >= 0 ? speakerDeckTurns[focusTurnIdx] : undefined;
   const activeDeckFocusSpan =
@@ -3981,7 +4137,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       : focusedBlockOverlay;
 
   // Layer 2: Ultra-Fast 60fps Playhead, Hover & Selection Overlay (<0.15ms GPU Blit)
-  useEffect(() => {
+  const drawOverlayCanvas = useCallback(() => {
+    const playheadSec = getEffectivePlayheadSec();
+    const hoverRatio = hoverRatioRef.current;
     const canvas = canvasRef.current;
     const offCanvas = baseCacheCanvasRef.current;
     if (!canvas || !offCanvas || canvasMetrics.width === 0 || canvasMetrics.height === 0) return;
@@ -4287,6 +4445,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
     ctx.restore();
   }, [
+    getEffectivePlayheadSec,
     canvasMetrics,
     speakerTracks,
     anySolo,
@@ -4296,7 +4455,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     timeline,
     timelineZones,
     totalSec,
-    playheadSec,
     zoom,
     viewStartRatio,
     wordTimelineMode,
@@ -4305,7 +4463,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     selStartRatio,
     selEndRatio,
     selLaneIdx,
-    hoverRatio,
     hoverLaneIdx,
     dragging,
     playheadDragging,
@@ -4316,6 +4473,23 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     focusedTurn,
     focusedBlockOverlay,
   ]);
+
+  drawOverlayRef.current = drawOverlayCanvas;
+
+  useEffect(() => {
+    drawOverlayCanvas();
+  }, [drawOverlayCanvas]);
+
+  useEffect(() => {
+    const unsub = subscribePlayhead(scheduleOverlayDraw);
+    return () => {
+      unsub();
+      if (overlayDrawRafRef.current !== null) {
+        window.cancelAnimationFrame(overlayDrawRafRef.current);
+        overlayDrawRafRef.current = null;
+      }
+    };
+  }, [scheduleOverlayDraw]);
 
   const extractCanvasPos = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -4367,10 +4541,17 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     localY: number,
     rectWidth: number,
     rectHeight: number
-  ): 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' => {
+  ): 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge' => {
+    if (showCutMarkers && cutBadgeHitBoxesRef.current.length > 0) {
+      for (const box of cutBadgeHitBoxesRef.current) {
+        if (localX >= box.x1 && localX <= box.x2 && localY >= box.y1 && localY <= box.y2) {
+          return 'cut_badge';
+        }
+      }
+    }
     if (rectWidth > 0 && totalSec > 0) {
       const viewSpan = 1 / zoom;
-      const playRatio = playheadSec / totalSec;
+      const playRatio = getEffectivePlayheadSec() / totalSec;
       if (playRatio >= viewStartRatio - 0.01 && playRatio <= viewStartRatio + viewSpan + 0.01) {
         const phPx = Math.max(
           0.5,
@@ -5253,26 +5434,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                     const showChapter = Boolean(
                       turn.chapterTitle && turn.chapterTitle !== prevChapter
                     );
-                    const turnSpanSec = Math.max(0.05, turn.editedEndSec - turn.editedStartSec);
-                    let effectiveTurnSec = playheadSec;
-                    if (
-                      playheadSec < timeline.coldOpenDurationSec &&
-                      idx === activeTokenTurnIdx &&
-                      activeTokenId
-                    ) {
-                      const activeTokInTurn = turn.tokens.find(
-                        (item) => item.mapped.token.id === activeTokenId
-                      );
-                      if (activeTokInTurn) {
-                        effectiveTurnSec =
-                          (activeTokInTurn.mapped.editedStartSec +
-                            activeTokInTurn.mapped.editedEndSec) *
-                          0.5;
-                      }
-                    }
-                    const turnProgressRatio = isCurrent
-                      ? Math.min(1, Math.max(0, (effectiveTurnSec - turn.editedStartSec) / turnSpanSec))
-                      : 0;
                     const turnSelection = selectedTokensByTurn.get(idx) ?? EMPTY_TOKEN_ID_SET;
                     const renderInteractiveTokens =
                       speakerDeckTurns.length <= 36 ||
@@ -5293,11 +5454,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                         isRangeHit={isRangeHit}
                         showChapter={showChapter}
                         deckFlowMode={deckFlowMode}
-                        turnProgressRatio={turnProgressRatio}
+                        bodyOffsetSec={bodyOffsetSec}
                         activeTokenIdInTurn={
                           idx === activeTokenTurnIdx ? (activeTokenId ?? null) : null
                         }
-                        playheadSecInTurn={isCurrent ? playheadSec : null}
                         selectedTokenIdsInTurn={turnSelection}
                         waveRangeStartSec={isRangeHit ? rangeStartSec : null}
                         waveRangeEndSec={isRangeHit ? rangeEndSec : null}
@@ -5389,7 +5549,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           <button
             type="button"
             onClick={toggleShowCutMarkers}
-            title={showCutMarkers ? '点击隐藏波形上的剪辑处标注' : '点击显示波形上的剪辑处标注'}
+            title={showCutMarkers ? '点击隐藏波形上的剪辑处标注（点击波形上的「✂️ 剪辑」胶囊可查看详情或撤销）' : '点击显示波形上的剪辑处标注'}
             className={`px-2 py-0.5 rounded-md border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition ${
               showCutMarkers
                 ? 'bg-emerald-500/15 border-emerald-500/45 text-emerald-300 hover:bg-emerald-500/25'
@@ -5397,8 +5557,20 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             }`}
           >
             <Scissors className="w-3 h-3" />
-            <span>剪辑标注{timelineZones.cutSeams.length > 0 ? ` (${timelineZones.cutSeams.length})` : ''}</span>
+            <span>剪辑标注{cutPoints.length > 0 ? ` (${cutPoints.length})` : ''}</span>
           </button>
+
+          {onOpenCutReportModal && (
+            <button
+              type="button"
+              onClick={() => onOpenCutReportModal('cuts')}
+              title="统一查看全部剪辑处、生成剪辑分析报告、嘉宾表达建议及导出分析图片/习惯配置"
+              className="px-2 py-0.5 rounded-md border border-blue-500/40 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition"
+            >
+              <BarChart3 className="w-3 h-3" />
+              <span>剪辑总览与报告</span>
+            </button>
+          )}
 
           {hasValidRange ? (
             <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-blue-500/15 border border-blue-500/40">
@@ -5491,7 +5663,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 if (
                   !isPlaying &&
                   hasValidRange &&
-                  (playheadSec < rangeStartSec - 0.05 || playheadSec >= rangeEndSec - 0.05)
+                  (getEffectivePlayheadSec() < rangeStartSec - 0.05 ||
+                    getEffectivePlayheadSec() >= rangeEndSec - 0.05)
                 ) {
                   onSeekToSec(rangeStartSec);
                 }
@@ -5619,9 +5792,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           </div>
 
           <div className="px-2.5 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-800 font-mono tabular-nums text-zinc-400">
-            <span className="text-zinc-100 font-semibold">
-              {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
-            </span>
+            <PlayheadTimeText bodyOffsetSec={bodyOffsetSec} className="text-zinc-100 font-semibold" />
             <span className="mx-1 text-zinc-600">/</span>
             <span className="text-emerald-400 font-semibold">
               {formatMmSs(timeline.totalEditedDurationSec)}.{Math.floor((timeline.totalEditedDurationSec % 1) * 10)}
@@ -5632,9 +5803,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
       {/* 全片播放进度条：点击文稿任意字词或直接点击/拖拽此进度条均可精准跳转播放位置 */}
       <div className="mb-1.5 px-2.5 py-1 rounded-lg bg-zinc-950/90 border border-zinc-800/85 flex items-center gap-2.5 select-none shrink-0">
-        <span className="font-mono tabular-nums text-[11px] text-blue-300 font-semibold w-14 shrink-0">
-          {formatMmSs(playheadSec)}.{Math.floor((playheadSec % 1) * 10)}
-        </span>
+        <PlayheadTimeText
+          bodyOffsetSec={bodyOffsetSec}
+          className="font-mono tabular-nums text-[11px] text-blue-300 font-semibold w-14 shrink-0"
+        />
 
         <div
           ref={scrubberRef}
@@ -5642,7 +5814,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           aria-label="播放进度条"
           aria-valuemin={0}
           aria-valuemax={Number(timeline.totalEditedDurationSec.toFixed(2))}
-          aria-valuenow={Number(playheadSec.toFixed(2))}
           title="全片播放进度条：单击或左右拖动可随时跳转，单击上方文字稿任意字词也会同步跳至此位置"
           onPointerDown={(e) => {
             if (!hasLoadedTimeline || e.button !== 0) return;
@@ -5650,27 +5821,30 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             manualScrollLockUntilRef.current = 0;
             waveformManualPanUntilRef.current = 0;
             setScrubbing(true);
-            seekFromScrubberClientX(e.clientX);
+            seekFromScrubberClientX(e.clientX, false);
           }}
           onPointerMove={(e) => {
             const el = scrubberRef.current;
-            if (el && hasLoadedTimeline) {
+            const tooltip = scrubHoverTooltipRef.current;
+            if (el && tooltip && hasLoadedTimeline) {
               const rect = el.getBoundingClientRect();
               if (rect.width > 0) {
-                setScrubHoverRatio(
-                  Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-                );
+                const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                const hoverTime = ratio * timeline.totalEditedDurationSec;
+                tooltip.style.display = 'block';
+                tooltip.style.left = `${ratio * 100}%`;
+                tooltip.textContent = `${formatMmSs(hoverTime)}.${Math.floor((hoverTime % 1) * 10)}`;
               }
             }
             if (scrubbing) {
               manualScrollLockUntilRef.current = 0;
               waveformManualPanUntilRef.current = 0;
-              seekFromScrubberClientX(e.clientX);
+              seekFromScrubberClientX(e.clientX, true);
             }
           }}
           onPointerUp={(e) => {
             if (scrubbing) {
-              seekFromScrubberClientX(e.clientX);
+              seekFromScrubberClientX(e.clientX, false);
               setScrubbing(false);
             }
             if (e.currentTarget.hasPointerCapture(e.pointerId)) {
@@ -5679,7 +5853,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           }}
           onPointerCancel={() => setScrubbing(false)}
           onMouseLeave={() => {
-            if (!scrubbing) setScrubHoverRatio(null);
+            if (!scrubbing && scrubHoverTooltipRef.current) {
+              scrubHoverTooltipRef.current.style.display = 'none';
+            }
           }}
           className={`relative flex-1 h-4 flex items-center group ${
             hasLoadedTimeline ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
@@ -5702,10 +5878,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               />
             )}
             {/* 已播放进度条填充 */}
-            <div
-              style={{ width: `${progressPct}%` }}
-              className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-400 rounded-full"
-            />
+            <ScrubberProgressFill totalSec={timeline.totalEditedDurationSec} bodyOffsetSec={bodyOffsetSec} />
           </div>
 
           {/* 放大状态下在全片进度条上实时标出当前波形视窗范围 (Minimap Viewport Window) */}
@@ -5758,23 +5931,18 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               );
             })}
 
-          {/* 悬停时间预览浮标 */}
-          {hasLoadedTimeline && scrubHoverRatio !== null && (
-            <div
-              style={{ left: `${scrubHoverRatio * 100}%` }}
-              className="absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 rounded bg-zinc-900/95 border border-zinc-700 text-[10px] font-mono tabular-nums text-zinc-100 shadow pointer-events-none whitespace-nowrap z-20"
-            >
-              {formatMmSs(scrubHoverRatio * timeline.totalEditedDurationSec)}.
-              {Math.floor(((scrubHoverRatio * timeline.totalEditedDurationSec) % 1) * 10)}
-            </div>
-          )}
+          {/* 悬停时间预览浮标（直接 DOM 更新，零 React 重渲染） */}
+          <div
+            ref={scrubHoverTooltipRef}
+            style={{ display: 'none' }}
+            className="absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 rounded bg-zinc-900/95 border border-zinc-700 text-[10px] font-mono tabular-nums text-zinc-100 shadow pointer-events-none whitespace-nowrap z-20"
+          />
 
           {/* 播放滑块圆点 (Thumb) */}
-          <div
-            style={{ left: `${progressPct}%` }}
-            className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-white border-2 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.85)] pointer-events-none transition-transform ${
-              scrubbing ? 'w-3.5 h-3.5 scale-110' : 'w-3 h-3 group-hover:scale-110'
-            }`}
+          <ScrubberThumb
+            totalSec={timeline.totalEditedDurationSec}
+            bodyOffsetSec={bodyOffsetSec}
+            scrubbing={scrubbing}
           />
         </div>
 
@@ -5783,7 +5951,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             {formatMmSs(timeline.totalEditedDurationSec)}.
             {Math.floor((timeline.totalEditedDurationSec % 1) * 10)}
           </span>
-          <span className="ml-1 text-zinc-500">{Math.round(progressPct)}%</span>
+          <ScrubberPercentText totalSec={timeline.totalEditedDurationSec} bodyOffsetSec={bodyOffsetSec} />
         </span>
       </div>
 
@@ -6016,10 +6184,30 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               const zone = detectCanvasHoverZone(localX, localY, rectWidth, rectHeight);
               manualScrollLockUntilRef.current = 0;
               waveformManualPanUntilRef.current = 0;
-              setHoverRatio(ratio);
-              setHoverLaneIdx(hoveredLaneIdx);
-              setHoverZone(zone);
+              hoverRatioRef.current = ratio;
+              setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
+              setHoverZone((prev) => (prev === zone ? prev : zone));
+              scheduleOverlayDraw();
               e.currentTarget.setPointerCapture(e.pointerId);
+
+              if (zone === 'cut_badge') {
+                const hitBox = cutBadgeHitBoxesRef.current.find(
+                  (b) => localX >= b.x1 && localX <= b.x2 && localY >= b.y1 && localY <= b.y2
+                );
+                if (hitBox && cutPoints.length > 0 && onInspectCutPoint) {
+                  let best = cutPoints[0];
+                  let bestDiff = Math.abs((best.editedSec - bodyOffsetSec) - hitBox.editedSec);
+                  for (const c of cutPoints) {
+                    const diff = Math.abs((c.editedSec - bodyOffsetSec) - hitBox.editedSec);
+                    if (diff < bestDiff) {
+                      best = c;
+                      bestDiff = diff;
+                    }
+                  }
+                  onInspectCutPoint(best, { x: e.clientX, y: e.clientY });
+                  return;
+                }
+              }
 
               if (zone === 'outro_trim_handle') {
                 setOutroTrimDragging(true);
@@ -6047,8 +6235,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 playheadDragging || dragging || outroTrimDragging
                   ? resolveDragRatioWithAutoPan(localX, rectWidth, ratio)
                   : ratio;
-              setHoverRatio(effectiveRatio);
-              setHoverLaneIdx(hoveredLaneIdx);
+              hoverRatioRef.current = effectiveRatio;
+              setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
+              scheduleOverlayDraw();
 
               if (outroTrimActiveRef.current) {
                 const dragSec = Math.max(0, Math.min(totalSec, effectiveRatio * totalSec));
@@ -6056,14 +6245,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 const clampedDragSec = Math.max(minStart, Math.min(totalSec - 1.5, dragSec));
                 const nextDuration = Math.max(1.5, totalSec - clampedDragSec);
                 setDraftOutroDurationSec(Number(nextDuration.toFixed(1)));
-                setHoverZone('outro_trim_handle');
+                setHoverZone((prev) => (prev === 'outro_trim_handle' ? prev : 'outro_trim_handle'));
                 return;
               }
 
               if (playheadDragging) {
                 manualScrollLockUntilRef.current = 0;
-                setHoverZone('playhead');
-                onSeekToSec(effectiveRatio * totalSec);
+                setHoverZone((prev) => (prev === 'playhead' ? prev : 'playhead'));
+                seekDuringDrag(effectiveRatio * totalSec);
                 return;
               }
               if (dragging) {
@@ -6087,7 +6276,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 }
                 return;
               }
-              setHoverZone(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
+              const nextZone = detectCanvasHoverZone(localX, localY, rectWidth, rectHeight);
+              setHoverZone((prev) => (prev === nextZone ? prev : nextZone));
             }}
             onPointerUp={(e) => {
               if (e.currentTarget.hasPointerCapture(e.pointerId)) {
@@ -6153,7 +6343,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             }}
             onPointerLeave={() => {
               if (!playheadDragging && !dragging && !outroTrimActiveRef.current) {
-                setHoverRatio(null);
+                hoverRatioRef.current = null;
+                scheduleOverlayDraw();
                 setHoverLaneIdx(null);
                 setHoverZone('none');
               }
@@ -6198,7 +6389,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 ? 'cursor-ew-resize'
                 : outroTrimDragging || hoverZone === 'outro_trim_handle'
                 ? 'cursor-col-resize'
-                : hoverZone === 'ruler'
+                : hoverZone === 'ruler' || hoverZone === 'cut_badge'
                 ? 'cursor-pointer'
                 : 'cursor-crosshair'
             }`}

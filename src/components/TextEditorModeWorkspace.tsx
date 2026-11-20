@@ -9,6 +9,7 @@ import {
 } from '../types/podcast';
 import { TimelineComputation, formatMmSs } from '../engine/timelineEngine';
 import { buildTimelineItemsFromProject } from '../engine/shownotesGenerator';
+import { useActiveTokenId } from '../engine/playheadStore';
 import { HighlightEditModal } from './HighlightEditModal';
 import {
   ListTree,
@@ -145,12 +146,12 @@ interface TextEditorModeWorkspaceProps {
   onOpenHighlightEditModal?: (hl: HighlightClip) => void;
 }
 
-export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = ({
+export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = React.memo(({
   state,
   timeline,
   hideDeleted,
   hideFillerWords,
-  activeTokenId,
+  activeTokenId: activeTokenIdProp,
   isPlaying = false,
   onTogglePlay,
   onSeekAndPlay,
@@ -170,6 +171,8 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
   onNotify,
   onOpenHighlightEditModal,
 }) => {
+  const storeActiveTokenId = useActiveTokenId();
+  const activeTokenId = activeTokenIdProp ?? storeActiveTokenId;
   // 配色模式：彩色发言人字体 vs 沉浸纯黑字体
   const [colorMode, setColorMode] = useState<'colored' | 'monochrome'>('colored');
   // 侧边栏折叠状态：大纲与批注
@@ -1612,4 +1615,4 @@ export const TextEditorModeWorkspace: React.FC<TextEditorModeWorkspaceProps> = (
       )}
     </div>
   );
-};
+});

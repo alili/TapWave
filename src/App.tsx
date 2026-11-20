@@ -28,8 +28,21 @@ import {
 } from './engine/preferenceCutEngine';
 import { SmartCutConfirmModal } from './components/SmartCutConfirmModal';
 import { HighlightEditModal } from './components/HighlightEditModal';
+import { CutDetailPopover } from './components/CutDetailPopover';
+import {
+  CutModalTab,
+  CutReportAndProfileModal,
+} from './components/CutReportAndProfileModal';
+import {
+  applyEditingHabitProfileConfig,
+  CutPointItem,
+  extractAllCutPoints,
+  PodcraftEditingHabitConfig,
+  undoCutPoint,
+} from './engine/cutAnalysisEngine';
 import {
   DEFAULT_PERSONAL_EDITING_PROFILE,
+  PersonalEditingProfile,
   applyPersonalProfileDefaults,
 } from './data/editingPreferenceProfile';
 import {
@@ -59,7 +72,15 @@ import {
   hasAudibleVoiceInInterval,
   refineProjectBlocksWithWaveform,
 } from './engine/waveformAligner';
+import {
+  HiResWaveformEnvelope,
+  loadTrackHiResEnvelope,
+} from './engine/waveformEnvelopeLoader';
 import { audioPreview, resolveEditedPlayheadToSource } from './engine/audioPreviewEngine';
+import {
+  setActivePlaybackTarget,
+  setPlayheadSec as setGlobalPlayheadSec,
+} from './engine/playheadStore';
 
 const LazyShownotesModal = React.lazy(() =>
   import('./components/ShownotesModal').then((m) => ({ default: m.ShownotesModal }))
@@ -248,9 +269,7 @@ export const App: React.FC = () => {
   );
   const [resizingSide, setResizingSide] = useState<'left' | 'right' | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playheadSec, setPlayheadSec] = useState(0);
-  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
-  const [activeTokenId, setActiveTokenId] = useState<string | null>(null);
+  const setPlayheadSec = setGlobalPlayheadSec;
   const [waveformFocusRequest, setWaveformFocusRequest] = useState<{
     startSec: number;
     endSec: number;
@@ -287,6 +306,8 @@ export const App: React.FC = () => {
   const browserBgmInputRef = useRef<HTMLInputElement | null>(null);
   const bgmImportSlotRef = useRef<AuxAudioSlot>('intro');
   const undoStackRef = useRef<PodcastProjectState[]>([]);
+  const hiResEnvelopesRef = useRef<Map<string, HiResWaveformEnvelope>>(new Map());
+  const hiResRefinedSigRef = useRef<Set<string>>(new Set());
   const playheadRef = useRef<number>(0);
   const workspaceRowRef = useRef<HTMLDivElement | null>(null);
   const paneLayoutRef = useRef({
@@ -563,6 +584,12 @@ export const App: React.FC = () => {
         clamped,
         true
       );
+    } else {
+      audioPreview.preSeekWhenPaused(
+        stateRef.current,
+        timelineRef.current,
+        clamped
+      );
     }
     const resolved = resolveEditedPlayheadToSource(
       stateRef.current,
@@ -571,9 +598,8 @@ export const App: React.FC = () => {
     );
     const uiBlockId = resolved.inColdOpen ? null : resolved.activeBlockId;
     const uiTokenId = resolved.inColdOpen ? null : resolved.activeTokenId;
-    setActiveBlockId((prev) => (prev === uiBlockId ? prev : uiBlockId));
-    setActiveTokenId((prev) => (prev === uiTokenId ? prev : uiTokenId));
-    setPlayheadSec((prev) => (prev === clamped ? prev : clamped));
+    setActivePlaybackTarget(uiBlockId, uiTokenId);
+    setGlobalPlayheadSec(clamped);
   }, []);
 
   const applyRemappedPlayhead = useCallback(
@@ -610,7 +636,12 @@ export const App: React.FC = () => {
       if (Math.abs(clamped - 1.0) > 0.01) {
         lastCustomPlaybackRateRef.current = clamped;
       }
-      setState((prev) => ({ ...prev, playbackRate: clamped }));
+      if (isPlayingRef.current) {
+        audioPreview.setLivePlaybackRate(clamped);
+      }
+      React.startTransition(() => {
+        setState((prev) => ({ ...prev, playbackRate: clamped }));
+      });
       notify(`⏩ 播放倍速已切换为 ${clamped}x（保持原声声调不变）`);
     },
     [notify]
@@ -620,7 +651,12 @@ export const App: React.FC = () => {
     const currentRate = stateRef.current.playbackRate ?? 1.0;
     if (Math.abs(currentRate - 1.0) > 0.01) {
       lastCustomPlaybackRateRef.current = currentRate;
-      setState((prev) => ({ ...prev, playbackRate: 1.0 }));
+      if (isPlayingRef.current) {
+        audioPreview.setLivePlaybackRate(1.0);
+      }
+      React.startTransition(() => {
+        setState((prev) => ({ ...prev, playbackRate: 1.0 }));
+      });
       notify(`⏪ 播放倍速已切换为 1.0x 原速（按 \\ 可切回 ${currentRate}x）`);
     } else {
       const targetRate =
@@ -628,7 +664,12 @@ export const App: React.FC = () => {
         Math.abs(lastCustomPlaybackRateRef.current - 1.0) > 0.01
           ? lastCustomPlaybackRateRef.current
           : 1.5;
-      setState((prev) => ({ ...prev, playbackRate: targetRate }));
+      if (isPlayingRef.current) {
+        audioPreview.setLivePlaybackRate(targetRate);
+      }
+      React.startTransition(() => {
+        setState((prev) => ({ ...prev, playbackRate: targetRate }));
+      });
       notify(`⏩ 播放倍速已切换为 ${targetRate}x（按 \\ 可切回 1.0x）`);
     }
   }, [notify]);
@@ -670,6 +711,8 @@ export const App: React.FC = () => {
       seamSec: number,
       fallbackPlayheadSec?: number
     ) => {
+      stateRef.current = nextState;
+      timelineRef.current = nextTimeline;
       const maxDur = nextTimeline.totalEditedDurationSec;
       if (maxDur <= 0.05 || nextState.tracks.length === 0) {
         setIsPlaying(false);
@@ -701,8 +744,7 @@ export const App: React.FC = () => {
         setPlayheadSec(prerollSec);
         audioPreview.requestSeek();
         const resolved = resolveEditedPlayheadToSource(nextState, nextTimeline, prerollSec);
-        setActiveBlockId((prev) => (prev === resolved.activeBlockId ? prev : resolved.activeBlockId));
-        setActiveTokenId((prev) => (prev === resolved.activeTokenId ? prev : resolved.activeTokenId));
+        setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
         audioPreview.startFromUserGesture(nextState, nextTimeline, prerollSec, notify);
         setIsPlaying(true);
         return;
@@ -715,8 +757,7 @@ export const App: React.FC = () => {
         setPlayheadSec(clampedSeam);
         audioPreview.requestSeek();
         const resolved = resolveEditedPlayheadToSource(nextState, nextTimeline, clampedSeam);
-        setActiveBlockId((prev) => (prev === resolved.activeBlockId ? prev : resolved.activeBlockId));
-        setActiveTokenId((prev) => (prev === resolved.activeTokenId ? prev : resolved.activeTokenId));
+        setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
         audioPreview.startFromUserGesture(nextState, nextTimeline, clampedSeam, notify);
         setIsPlaying(true);
         return;
@@ -731,8 +772,7 @@ export const App: React.FC = () => {
       setPlayheadSec(prerollSec);
       audioPreview.requestSeek();
       const resolved = resolveEditedPlayheadToSource(nextState, nextTimeline, prerollSec);
-      setActiveBlockId((prev) => (prev === resolved.activeBlockId ? prev : resolved.activeBlockId));
-      setActiveTokenId((prev) => (prev === resolved.activeTokenId ? prev : resolved.activeTokenId));
+      setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
       audioPreview.startFromUserGesture(nextState, nextTimeline, prerollSec, notify);
       setIsPlaying(true);
     },
@@ -801,6 +841,48 @@ export const App: React.FC = () => {
     },
     [mutateProject, notify]
   );
+
+  // Load 5ms hi-res waveform envelopes and snap un-trimmed transcript tokens to real vocal onsets/offsets
+  useEffect(() => {
+    if (state.tracks.length === 0 || state.blocks.length === 0) return;
+    let cancelled = false;
+    const targets = state.tracks.filter((tr) => Boolean(tr.filePath || tr.audioUrl));
+    if (targets.length === 0) return;
+
+    Promise.all(
+      targets.map(async (tr) => {
+        const env = await loadTrackHiResEnvelope(tr);
+        return { tr, env };
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      let hasNewRefinementTarget = false;
+      for (const { tr, env } of results) {
+        if (!env || env.numBins < 32) continue;
+        hiResEnvelopesRef.current.set(tr.id, env);
+        const sig = `${state.projectTitle}::${tr.id}::${tr.filePath || tr.audioUrl || ''}::${env.numBins}`;
+        if (!hiResRefinedSigRef.current.has(sig)) {
+          hiResRefinedSigRef.current.add(sig);
+          hasNewRefinementTarget = true;
+        }
+      }
+      if (!hasNewRefinementTarget) return;
+      setState((prev) => {
+        if (prev.blocks.length === 0 || prev.tracks.length === 0) return prev;
+        const refined = refineProjectBlocksWithWaveform(
+          prev.blocks,
+          prev.tracks,
+          prev.recordingMode,
+          hiResEnvelopesRef.current
+        );
+        return refined === prev.blocks ? prev : { ...prev, blocks: refined };
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.projectTitle, state.tracks, state.blocks.length]);
 
   // Pre-warm <audio> elements whenever imported tracks change so pressing Space starts with 0ms lag
   useEffect(() => {
@@ -872,7 +954,6 @@ export const App: React.FC = () => {
 
     let rafId = 0;
     let lastFrameMs = performance.now();
-    let lastUiCommitSec = playheadRef.current;
     let lastUiCommitTok: string | null = null;
     let prevWasBleeped = false;
 
@@ -892,9 +973,8 @@ export const App: React.FC = () => {
       if (nextSec >= curTimeline.totalEditedDurationSec) {
         if (playheadRef.current >= curTimeline.totalEditedDurationSec - 0.08) {
           playheadRef.current = 0;
-          setPlayheadSec(0);
-          setActiveBlockId(null);
-          setActiveTokenId(null);
+          setGlobalPlayheadSec(0);
+          setActivePlaybackTarget(null, null);
           setIsPlaying(false);
           audioPreview.pauseMultiTrackPlayback();
           return;
@@ -912,17 +992,15 @@ export const App: React.FC = () => {
       }
       prevWasBleeped = Boolean(resolved?.isBleeped);
 
+      // Update global playheadStore at full 60fps without triggering App-wide React re-renders
+      setGlobalPlayheadSec(playheadRef.current);
+
       const nextBlk = resolved?.inColdOpen ? null : (resolved?.activeBlockId ?? null);
       const nextTok = resolved?.inColdOpen ? null : (resolved?.activeTokenId ?? null);
 
-      // Keep UI playhead, activeBlockId, and activeTokenId strictly locked to the exact same frame commit
-      // so text highlight and waveform/scrubber playhead never drift out of sync.
-      if (Math.abs(nextSec - lastUiCommitSec) >= 0.025 || nextTok !== lastUiCommitTok) {
-        lastUiCommitSec = nextSec;
+      if (nextTok !== lastUiCommitTok) {
         lastUiCommitTok = nextTok;
-        setActiveBlockId((prev) => (prev === nextBlk ? prev : nextBlk));
-        setActiveTokenId((prev) => (prev === nextTok ? prev : nextTok));
-        setPlayheadSec(Number(nextSec.toFixed(3)));
+        setActivePlaybackTarget(nextBlk, nextTok);
       }
 
       rafId = window.requestAnimationFrame(tick);
@@ -932,14 +1010,20 @@ export const App: React.FC = () => {
     return () => window.cancelAnimationFrame(rafId);
   }, [isPlaying]);
 
-  // Immediately update live track gains / playbackRate / BGM beds if user toggles Solo/Mute/Loudness/Speed/BGM while playing
+  // Lightweight live playbackRate update (no seek / no AutoSolo re-eval / no buffer reset)
+  useEffect(() => {
+    if (isPlaying) {
+      audioPreview.setLivePlaybackRate(state.playbackRate || 1.0);
+    }
+  }, [isPlaying, state.playbackRate]);
+
+  // Immediately update live track gains / BGM beds if user toggles Solo/Mute/Loudness/BGM while playing
   useEffect(() => {
     if (isPlaying) {
       audioPreview.syncMultiTrackPlayback(state, timeline, playheadRef.current, true);
     }
   }, [
     isPlaying,
-    state.playbackRate,
     state.loudnessAligned,
     state.deClickEnabled,
     state.deClickStrength,
@@ -1172,8 +1256,7 @@ export const App: React.FC = () => {
       playheadRef.current = clampedTarget;
       setPlayheadSec(clampedTarget);
       const resolved = resolveEditedPlayheadToSource(loaded, targetTl, clampedTarget);
-      setActiveBlockId(resolved.activeBlockId);
-      setActiveTokenId(resolved.activeTokenId);
+      setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
       audioPreview.requestSeek();
       setSelectedIds(new Set());
       clearUndoHistory();
@@ -1215,7 +1298,7 @@ export const App: React.FC = () => {
   const handleSaveProjectFile = async (saveAs = false) => {
     try {
       const currentPlayhead = Number(
-        (playheadRef.current ?? playheadSec ?? 0).toFixed(3)
+        (playheadRef.current ?? 0).toFixed(3)
       );
       const stateToSave: PodcastProjectState = {
         ...state,
@@ -2375,8 +2458,7 @@ export const App: React.FC = () => {
         timelineRef.current,
         prerollSec
       );
-      setActiveBlockId(resolved.activeBlockId);
-      setActiveTokenId(resolved.activeTokenId);
+      setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
 
       audioPreview.startFromUserGesture(
         stateRef.current,
@@ -2403,8 +2485,50 @@ export const App: React.FC = () => {
     setSmartCutModalOutcome(null);
   }, [handleStopCutAudition]);
 
+  const [activePersonalProfile, setActivePersonalProfile] = useState<PersonalEditingProfile>(
+    DEFAULT_PERSONAL_EDITING_PROFILE
+  );
+  const [inspectedCutState, setInspectedCutState] = useState<{
+    cut: CutPointItem;
+    anchor?: { x: number; y: number };
+  } | null>(null);
+  const [cutReportModal, setCutReportModal] = useState<{
+    open: boolean;
+    tab: CutModalTab;
+  }>({ open: false, tab: 'cuts' });
+
+  const allCutPoints = useMemo(
+    () => extractAllCutPoints(state, timeline),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.blocks, state.tracks, state.trackMuteRanges, timeline]
+  );
+
+  const handleInspectCutPoint = useLatestCallback(
+    (cut: CutPointItem, anchor?: { x: number; y: number }) => {
+      setInspectedCutState({ cut, anchor });
+    }
+  );
+
+  const handleOpenCutReportModal = useLatestCallback((tab: CutModalTab = 'cuts') => {
+    setCutReportModal({ open: true, tab });
+  });
+
+  const handleUndoCutPoint = useLatestCallback((cut: CutPointItem) => {
+    audioPreview.requestSeek();
+    mutateProject((prev) => undoCutPoint(prev, cut), true);
+    notify(`↺ 已撤销剪辑处（${cut.timeFormatted} · 恢复 ${cut.removedDurationSec.toFixed(2)}s）`);
+  });
+
+  const handleImportHabitConfig = useLatestCallback(
+    (config: PodcraftEditingHabitConfig) => {
+      const { nextState, appliedProfile } = applyEditingHabitProfileConfig(state, config);
+      setActivePersonalProfile(appliedProfile);
+      mutateProject(() => nextState, true);
+    }
+  );
+
   const handleApplyPreferenceSmartCutAction = () => {
-    const outcome = applyPreferenceSmartCut(state);
+    const outcome = applyPreferenceSmartCut(state, activePersonalProfile);
     if (
       outcome.hesitationsCut === 0 &&
       outcome.stuttersCut === 0 &&
@@ -2438,7 +2562,7 @@ export const App: React.FC = () => {
 
   const handleCompressSpeakerSilence = (speakerId: string) => {
     let saved = 0;
-    const profiles = buildAcousticProfileMap(state.tracks);
+    const profiles = buildAcousticProfileMap(state.tracks, hiResEnvelopesRef.current);
     const nextState: PodcastProjectState = {
       ...state,
       blocks: state.blocks.map((b) => {
@@ -2455,7 +2579,8 @@ export const App: React.FC = () => {
                 profiles,
                 t.sourceStartMs,
                 t.sourceEndMs,
-                state.recordingMode
+                state.recordingMode,
+                hiResEnvelopesRef.current
               )
             ) {
               saved += t.durationSec - 0.45;
@@ -3454,6 +3579,11 @@ export const App: React.FC = () => {
   const stableSelectRange = useLatestCallback(handleSelectRange);
   const stableClearSelection = useLatestCallback(() => setSelectedIds(new Set()));
   const stableSeekToSec = useLatestCallback(seekToSec);
+  const stableInsertSilenceAtPlayhead = useLatestCallback((durSec: number) => {
+    const atSec = playheadRef.current;
+    mutateProject((prev) => insertSilenceAtPlayhead(prev, atSec, durSec));
+    notify(`⏸ 已在 ${atSec.toFixed(1)}s 游标处插入 ${durSec.toFixed(1)}s 空白时长`);
+  });
   const stableSetGroupingMode = useLatestCallback(
     (mode: PodcastProjectState['groupingMode']) =>
       mutateProject((p) => ({ ...p, groupingMode: mode }))
@@ -4111,8 +4241,6 @@ export const App: React.FC = () => {
             state={state}
             timeline={timeline}
             selectedIds={selectedIds}
-            activeBlockId={activeBlockId}
-            activeTokenId={activeTokenId}
             canUndo={undoDepth > 0}
             onSelectToken={stableSelectToken}
             onSelectRange={stableSelectRange}
@@ -4186,18 +4314,11 @@ export const App: React.FC = () => {
         ) : (
           <WaveformEditorBar
             isMainStage
-            onInsertSilenceAtPlayhead={(durSec) => {
-              const atSec = playheadRef.current;
-              mutateProject((prev) => insertSilenceAtPlayhead(prev, atSec, durSec));
-              notify(`⏸ 已在 ${atSec.toFixed(1)}s 游标处插入 ${durSec.toFixed(1)}s 空白时长`);
-            }}
+            onInsertSilenceAtPlayhead={stableInsertSilenceAtPlayhead}
             state={state}
             timeline={timeline}
-            playheadSec={playheadSec}
             isPlaying={isPlaying}
             selectedTokenIds={selectedIds}
-            activeBlockId={activeBlockId}
-            activeTokenId={activeTokenId}
             canUndo={undoDepth > 0}
             rightPaneCollapsed={rightPaneCollapsed}
             onToggleRightPane={stableToggleRightPane}
@@ -4238,6 +4359,9 @@ export const App: React.FC = () => {
             onUpdateBgmAsset={handleUpdateBgmAsset}
             onOpenIntroEditor={stableSwitchToIntroView}
             onNotify={notify}
+            cutPoints={allCutPoints}
+            onInspectCutPoint={handleInspectCutPoint}
+            onOpenCutReportModal={handleOpenCutReportModal}
           />
         )}
 
@@ -4305,6 +4429,7 @@ export const App: React.FC = () => {
                   onSeekToSec={stableSeekToSec}
                   onExportAudio={stableExportAudio}
                   onOpenShownotes={() => handleOpenShownotes('summary')}
+                  onOpenCutReportModal={handleOpenCutReportModal}
                   onNotify={notify}
                   onCollapsePane={stableToggleRightPane}
                 />
@@ -4317,7 +4442,6 @@ export const App: React.FC = () => {
         <WaveformEditorBar
           state={state}
           timeline={timeline}
-          playheadSec={playheadSec}
           isPlaying={isPlaying}
           focusRequest={waveformFocusRequest}
           onTogglePlay={stableTogglePlay}
@@ -4334,6 +4458,9 @@ export const App: React.FC = () => {
           onSetWaveformSelectionMode={stableSetWaveformSelectionMode}
           onUpdateBgmAsset={handleUpdateBgmAsset}
           onNotify={notify}
+          cutPoints={allCutPoints}
+          onInspectCutPoint={handleInspectCutPoint}
+          onOpenCutReportModal={handleOpenCutReportModal}
         />
       )}
 
@@ -4377,7 +4504,8 @@ export const App: React.FC = () => {
                   blocks: refineProjectBlocksWithWaveform(
                     next.blocks,
                     next.tracks,
-                    next.recordingMode
+                    next.recordingMode,
+                    hiResEnvelopesRef.current
                   ),
                 };
               }, true);
@@ -4419,6 +4547,31 @@ export const App: React.FC = () => {
         onConfirm={handleConfirmPreferenceSmartCut}
         onCancel={handleCancelPreferenceSmartCut}
         onSeekToSec={stableSeekToSec}
+      />
+
+      <CutDetailPopover
+        cut={inspectedCutState?.cut ?? null}
+        anchorPos={inspectedCutState?.anchor ?? null}
+        onClose={() => setInspectedCutState(null)}
+        onUndoCut={handleUndoCutPoint}
+        onSeekToSec={stableSeekToSec}
+        onAudition={(cut) => {
+          audioPreview.playSpliceAudition(cut.speakerId);
+        }}
+        onOpenAllCuts={() => handleOpenCutReportModal('cuts')}
+      />
+
+      <CutReportAndProfileModal
+        open={cutReportModal.open}
+        initialTab={cutReportModal.tab}
+        state={state}
+        timeline={timeline}
+        cuts={allCutPoints}
+        onClose={() => setCutReportModal((prev) => ({ ...prev, open: false }))}
+        onUndoCut={handleUndoCutPoint}
+        onSeekToSec={stableSeekToSec}
+        onImportHabitConfig={handleImportHabitConfig}
+        onNotify={notify}
       />
 
       {globalEditingHighlight && (

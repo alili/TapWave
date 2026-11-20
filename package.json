@@ -1,7 +1,7 @@
 {
   "name": "tapwave",
   "private": true,
-  "version": "2.1.16",
+  "version": "2.2.1",
   "description": "点波 TapWave",
   "type": "module",
   "scripts": {
