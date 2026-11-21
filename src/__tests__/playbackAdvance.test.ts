@@ -243,4 +243,106 @@ describe('Multi-Track Playback Continuity & Splice Resilience', () => {
 
     expect(loadedUrls.some((u) => u.includes('orig_guest.wav'))).toBe(true);
   });
+
+  it('keeps audio paused when pauseMultiTrackPlayback is called before async play() resolves or a stale rAF frame fires', async () => {
+    // @ts-expect-error test mock
+    globalThis.window = globalThis;
+    const pendingResolvers: Array<() => void> = [];
+
+    class DeferredPlayAudio {
+      currentTime = 0;
+      duration = 20;
+      paused = true;
+      readyState = 4;
+      ended = false;
+      seeking = false;
+      volume = 1;
+      src = '';
+      playbackRate = 1;
+      preservesPitch = true;
+
+      play() {
+        return new Promise<void>((resolve) => {
+          pendingResolvers.push(() => {
+            this.paused = false;
+            resolve();
+          });
+        });
+      }
+      pause() {
+        this.paused = true;
+      }
+      load() {}
+      addEventListener() {}
+      removeEventListener() {}
+      removeAttribute() {}
+    }
+    // @ts-expect-error test mock
+    globalThis.Audio = DeferredPlayAudio;
+
+    const base = createEmptyProjectState();
+    const state = {
+      ...base,
+      tracks: [
+        {
+          id: 't_race',
+          name: 'Host',
+          role: 'host' as const,
+          roleLabel: '主持人 Host',
+          color: '#3b82f6',
+          filePath: '/path/race_host.wav',
+          sourceFilePath: '/orig/race_host.wav',
+          durationMs: 20000,
+          rawLufs: -18,
+          autoGainDb: 0,
+          syncOffsetMs: 0,
+          roomToneStartMs: 0,
+          roomToneEndMs: 500,
+          peaks: [0.1, 0.2],
+          solo: false,
+          muted: false,
+        },
+      ],
+      blocks: [
+        {
+          blockId: 'b_race',
+          speakerId: 't_race',
+          chapterTitle: '第一段',
+          tokens: [
+            {
+              id: 'tok_r1',
+              type: 'word' as const,
+              text: 'Hello',
+              sourceStartMs: 0,
+              sourceEndMs: 2000,
+              durationSec: 2,
+              origDurationSec: 2,
+            },
+          ],
+        },
+      ],
+    };
+    const timeline = computeEditedTimeline(state);
+
+    audioPreview.stopAll();
+    audioPreview.startFromUserGesture(state, timeline, 0);
+
+    // User immediately hits Stop before deferred play() settles
+    audioPreview.pauseMultiTrackPlayback();
+
+    // A stale rAF frame arriving right after stop must not restart playback
+    const staleRes = audioPreview.advanceAndSyncPlayback(state, timeline, 0.1, 0.016);
+    expect(staleRes.nextPlayheadSec).toBe(0.1);
+    expect(staleRes.resolved).toBeNull();
+
+    // Resolve the deferred play() promise; generation guard must immediately re-pause it
+    for (const r of pendingResolvers) r();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const holder = (
+      audioPreview as unknown as { trackElements: Map<string, { audio: DeferredPlayAudio }> }
+    ).trackElements.get('t_race');
+    expect(holder?.audio.paused).toBe(true);
+  });
 });

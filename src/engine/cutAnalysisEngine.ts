@@ -69,6 +69,7 @@ export interface SpeakerExpressionSuggestion {
   cutRatioPct: number;
   fillerCount: number;
   silenceCutSec: number;
+  categoryBreakdown: CutCategoryStat[];
   dimensions: RadarDimensionScore[];
   topHabitWords: Array<{ word: string; count: number; perMin: number }>;
   strengths: string[];
@@ -142,6 +143,101 @@ const CATEGORY_LABELS: Record<CutCategory, string> = {
   pause_tighten: '停顿收紧',
   track_mute: '单轨静音',
 };
+
+export interface CutCategoryMeta {
+  category: CutCategory;
+  label: string;
+  shortLabel: string;
+  color: string;
+  badgeClass: string;
+  activeFilterClass: string;
+}
+
+export const CUT_CATEGORY_ORDER: CutCategory[] = [
+  'silence',
+  'filler',
+  'pause_tighten',
+  'waveform_cut',
+  'manual_delete',
+  'track_mute',
+];
+
+export const CUT_CATEGORY_META: Record<CutCategory, CutCategoryMeta> = {
+  silence: {
+    category: 'silence',
+    label: '空白切除',
+    shortLabel: '空白',
+    color: '#a855f7',
+    badgeClass: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+    activeFilterClass: 'bg-purple-500/20 text-purple-200 border-purple-400/70',
+  },
+  filler: {
+    category: 'filler',
+    label: '口癖/卡壳',
+    shortLabel: '口癖',
+    color: '#f59e0b',
+    badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+    activeFilterClass: 'bg-amber-500/20 text-amber-200 border-amber-400/70',
+  },
+  pause_tighten: {
+    category: 'pause_tighten',
+    label: '停顿收紧',
+    shortLabel: '收紧',
+    color: '#06b6d4',
+    badgeClass: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
+    activeFilterClass: 'bg-cyan-500/20 text-cyan-200 border-cyan-400/70',
+  },
+  waveform_cut: {
+    category: 'waveform_cut',
+    label: '波形精剪',
+    shortLabel: '精剪',
+    color: '#10b981',
+    badgeClass: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    activeFilterClass: 'bg-emerald-500/20 text-emerald-200 border-emerald-400/70',
+  },
+  manual_delete: {
+    category: 'manual_delete',
+    label: '文稿切除',
+    shortLabel: '删改',
+    color: '#ef4444',
+    badgeClass: 'bg-red-500/20 text-red-300 border-red-500/40',
+    activeFilterClass: 'bg-red-500/20 text-red-200 border-red-400/70',
+  },
+  track_mute: {
+    category: 'track_mute',
+    label: '单轨静音',
+    shortLabel: '静音',
+    color: '#94a3b8',
+    badgeClass: 'bg-slate-500/25 text-slate-200 border-slate-400/45',
+    activeFilterClass: 'bg-slate-500/25 text-slate-100 border-slate-300/70',
+  },
+};
+
+/**
+ * 计算剪辑项在编辑后时间轴上的区间（用于主时间轴着色高亮）。
+ */
+export function computeTimelineCutIntervalSec(cut: CutPointItem): {
+  startSec: number;
+  endSec: number;
+  isSpan: boolean;
+} {
+  const startSec = Math.max(0, cut.editedSec);
+  if (cut.category === 'track_mute') {
+    return {
+      startSec,
+      endSec: startSec + Math.max(0.05, cut.removedDurationSec),
+      isSpan: true,
+    };
+  }
+  if (cut.category === 'pause_tighten') {
+    return {
+      startSec,
+      endSec: startSec + Math.max(0.05, cut.keptDurationSec ?? 0.2),
+      isSpan: true,
+    };
+  }
+  return { startSec, endSec: startSec, isSpan: false };
+}
 
 function getRoleLabel(role?: SpeakerRole): string {
   if (role === 'host') return '主持人';
@@ -474,6 +570,17 @@ export function generateCutAnalysisReport(
   const speakerSuggestions: SpeakerExpressionSuggestion[] = speakerTracks.map(
     (tr) => {
       const spCuts = allCuts.filter((c) => c.speakerId === tr.id);
+      const categoryBreakdown: CutCategoryStat[] = catOrder
+        .map((cat) => {
+          const matched = spCuts.filter((c) => c.category === cat);
+          return {
+            category: cat,
+            label: CATEGORY_LABELS[cat],
+            count: matched.length,
+            savedSec: matched.reduce((s, c) => s + c.removedDurationSec, 0),
+          };
+        })
+        .filter((s) => s.count > 0);
       const cutSec = spCuts
         .filter((c) => c.category !== 'track_mute')
         .reduce((s, c) => s + c.removedDurationSec, 0);
@@ -512,7 +619,7 @@ export function generateCutAnalysisReport(
       const sortedDims = [...dimensions].sort((a, b) => b.score - a.score);
       if (sortedDims[0] && sortedDims[0].score >= 78) {
         strengths.push(
-          `${sortedDims[0].label}表现突出（${sortedDims[0].score}分）：${sortedDims[0].detail}`
+          `${sortedDims[0].label}表现突出：${sortedDims[0].detail}`
         );
       }
       if (avgCpm >= 175 && avgCpm <= 255) {
@@ -581,6 +688,7 @@ export function generateCutAnalysisReport(
         cutRatioPct,
         fillerCount: fillerCutCount,
         silenceCutSec,
+        categoryBreakdown,
         dimensions,
         topHabitWords,
         strengths,

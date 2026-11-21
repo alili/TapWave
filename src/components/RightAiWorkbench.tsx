@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  BarChart3,
   BookOpen,
   Download,
   MessageCircleQuestion,
   PanelRightClose,
   Plus,
+  Scissors,
+  Search,
   Sparkles,
   Trash2,
   TrendingUp,
@@ -17,13 +20,20 @@ import { audioPreview } from '../engine/audioPreviewEngine';
 import { runPythonSidecarAnalysis } from '../engine/tauriBridge';
 import { computeSpeakerRadarProfiles, SpeakerRadarProfile } from '../engine/speakerRadarEngine';
 import { analyzeQaInteractions } from '../engine/questionAnalysis';
+import {
+  CUT_CATEGORY_META,
+  CUT_CATEGORY_ORDER,
+  CutCategory,
+  CutPointItem,
+} from '../engine/cutAnalysisEngine';
 import { SpeakerRadarChart } from './SpeakerRadarChart';
+import { CutDetailPopover } from './CutDetailPopover';
 
 interface RightAiWorkbenchProps {
   state: PodcastProjectState;
   timeline: TimelineComputation;
-  activeTab: 'coach' | 'glossary';
-  onSwitchTab: (tab: 'coach' | 'glossary') => void;
+  activeTab: 'coach' | 'cuts' | 'glossary';
+  onSwitchTab: (tab: 'coach' | 'cuts' | 'glossary') => void;
   onUpdateState: (updater: (prev: PodcastProjectState) => PodcastProjectState) => void;
   onAiAutoFillHighlights?: () => void;
   onCleanSpeakerFillers: (speakerId: string) => void;
@@ -32,6 +42,14 @@ interface RightAiWorkbenchProps {
   onExportAudio: (format: 'mp3') => void;
   onOpenShownotes?: () => void;
   onOpenCutReportModal?: (tab?: 'cuts' | 'report' | 'profile') => void;
+  inspectedCut?: CutPointItem | null;
+  allCuts?: CutPointItem[];
+  cutCategoryFilter?: CutCategory | 'all';
+  onChangeCutCategoryFilter?: (category: CutCategory | 'all') => void;
+  onSelectCut?: (cut: CutPointItem) => void;
+  onCloseInspectedCut?: () => void;
+  onUndoCut?: (cut: CutPointItem) => void;
+  onAuditionCut?: (cut: CutPointItem) => void;
   onNotify: (msg: string) => void;
   onCollapsePane?: () => void;
 }
@@ -79,9 +97,25 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
   onExportAudio,
   onOpenShownotes,
   onOpenCutReportModal,
+  inspectedCut = null,
+  allCuts = [],
+  cutCategoryFilter,
+  onChangeCutCategoryFilter,
+  onSelectCut,
+  onCloseInspectedCut,
+  onUndoCut,
+  onAuditionCut,
   onNotify,
   onCollapsePane,
 }) => {
+  const [localCutCategoryFilter, setLocalCutCategoryFilter] = useState<CutCategory | 'all'>('all');
+  const activeCutCategoryFilter = cutCategoryFilter ?? localCutCategoryFilter;
+  const setActiveCutCategoryFilter = (cat: CutCategory | 'all') => {
+    setLocalCutCategoryFilter(cat);
+    onChangeCutCategoryFilter?.(cat);
+  };
+  const [cutSpeakerFilter, setCutSpeakerFilter] = useState<string>('all');
+  const [cutSearchQuery, setCutSearchQuery] = useState<string>('');
   const speakerTracks = useMemo(
     () =>
       state.tracks.some((t) => !t.isRef)
@@ -119,6 +153,59 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
     () => Object.fromEntries(state.tracks.map((t) => [t.id, t])),
     [state.tracks]
   );
+
+  const cutOverviewData = useMemo(() => {
+    const counts: Record<CutCategory, number> = {
+      silence: 0,
+      filler: 0,
+      pause_tighten: 0,
+      waveform_cut: 0,
+      manual_delete: 0,
+      track_mute: 0,
+    };
+    const savedByCat: Record<CutCategory, number> = {
+      silence: 0,
+      filler: 0,
+      pause_tighten: 0,
+      waveform_cut: 0,
+      manual_delete: 0,
+      track_mute: 0,
+    };
+    const speakerSet = new Map<string, string>();
+    let totalSavedSec = 0;
+    let totalMutedSec = 0;
+
+    for (const c of allCuts) {
+      counts[c.category] = (counts[c.category] ?? 0) + 1;
+      savedByCat[c.category] = (savedByCat[c.category] ?? 0) + c.removedDurationSec;
+      if (c.category === 'track_mute') {
+        totalMutedSec += c.removedDurationSec;
+      } else {
+        totalSavedSec += c.removedDurationSec;
+      }
+      speakerSet.set(c.speakerId, c.speakerName);
+    }
+
+    const q = cutSearchQuery.trim().toLowerCase();
+    const filtered = allCuts.filter((c) => {
+      if (activeCutCategoryFilter !== 'all' && c.category !== activeCutCategoryFilter) return false;
+      if (cutSpeakerFilter !== 'all' && c.speakerId !== cutSpeakerFilter) return false;
+      if (q) {
+        const hay = `${c.summaryText} ${c.removedText} ${c.speakerName} ${c.reason} ${c.timeFormatted}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    return {
+      counts,
+      savedByCat,
+      totalSavedSec,
+      totalMutedSec,
+      speakerOptions: Array.from(speakerSet.entries()),
+      filtered,
+    };
+  }, [allCuts, activeCutCategoryFilter, cutSpeakerFilter, cutSearchQuery]);
 
   // 大模型深度诊断状态
   const [aiDiagnosing, setAiDiagnosing] = useState(false);
@@ -487,15 +574,20 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
   return (
     <section className="w-full bg-zinc-900/75 flex flex-col h-full min-h-0 overflow-hidden">
       <div className="shrink-0 flex items-center border-b border-zinc-800 bg-zinc-900 text-xs font-medium">
-        <div className="flex-1 grid grid-cols-2 min-w-0">
+        <div className="flex-1 grid grid-cols-3 min-w-0">
           {[
             { id: 'coach', label: '📊 表达教练' },
+            {
+              id: 'cuts',
+              label:
+                allCuts.length > 0 ? `✂️ 剪辑总览 (${allCuts.length})` : '✂️ 剪辑总览',
+            },
             { id: 'glossary', label: '📚 摘要与导出' },
           ].map((tab) => (
             <button
               key={tab.id}
               onClick={() => onSwitchTab(tab.id as typeof activeTab)}
-              className={`py-2.5 px-1.5 border-b-2 transition cursor-pointer whitespace-nowrap truncate ${
+              className={`py-2.5 px-1 border-b-2 transition cursor-pointer whitespace-nowrap truncate text-[11.5px] ${
                 activeTab === tab.id
                   ? 'border-blue-500 text-zinc-100 font-semibold bg-zinc-900'
                   : 'border-transparent text-zinc-400 hover:text-zinc-200'
@@ -1336,7 +1428,236 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
         </div>
       )}
 
-      {/* Tab 4: 节目摘要、专属词库与导出 */}
+      {/* Tab 2: 剪辑总览与分标签筛选 */}
+      {activeTab === 'cuts' && (
+        <div className="p-3.5 space-y-3 overflow-y-auto flex-1 min-h-0">
+          {/* 顶部总览与分析报告弹窗入口 */}
+          <div className="p-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11.5px] font-semibold text-emerald-200 flex items-center gap-1.5">
+                  <Scissors className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>剪辑总览</span>
+                  <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 border border-emerald-500/40 font-mono text-[10px] text-emerald-200">
+                    {allCuts.length} 处 · 省 {cutOverviewData.totalSavedSec.toFixed(1)}s
+                  </span>
+                </div>
+                <div className="text-[10px] text-emerald-300/80 mt-0.5 leading-snug">
+                  主时间轴已按分类着色提示剪辑区间
+                  {cutOverviewData.totalMutedSec > 0
+                    ? ` · 静音 ${cutOverviewData.totalMutedSec.toFixed(1)}s`
+                    : ''}
+                </div>
+              </div>
+              {onOpenCutReportModal && (
+                <button
+                  type="button"
+                  onClick={() => onOpenCutReportModal('report')}
+                  className="shrink-0 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium flex items-center gap-1 cursor-pointer transition shadow-sm"
+                  title="在弹窗中查看剪辑分析报告、嘉宾建议、导出报告图与脱敏配置"
+                >
+                  <BarChart3 className="w-3 h-3" />
+                  <span>分析报告</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {inspectedCut ? (
+            <CutDetailPopover
+              cut={inspectedCut}
+              embedded
+              onClose={() => onCloseInspectedCut?.()}
+              onUndoCut={(cut) => onUndoCut?.(cut)}
+              onSeekToSec={onSeekToSec}
+              onAudition={onAuditionCut}
+              onOpenAllCuts={
+                onOpenCutReportModal ? () => onOpenCutReportModal('cuts') : undefined
+              }
+            />
+          ) : (
+            <div className="p-2.5 rounded-xl border border-dashed border-zinc-700/80 bg-zinc-950/50 text-[11px] text-zinc-400 flex items-start gap-2 leading-relaxed">
+              <Scissors className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+              <span>
+                点击主时间轴上的彩色剪辑区间或「<strong className="text-emerald-300">✂️ 剪辑</strong>」标记，或在下方列表中选择一项，即可查看详情、试听或撤销。
+              </span>
+            </div>
+          )}
+
+          {/* 分标签筛选栏 */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setActiveCutCategoryFilter('all')}
+                className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition cursor-pointer ${
+                  activeCutCategoryFilter === 'all'
+                    ? 'bg-zinc-100 text-zinc-900 border-zinc-200'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                全部 ({allCuts.length})
+              </button>
+              {CUT_CATEGORY_ORDER.map((cat) => {
+                const count = cutOverviewData.counts[cat] ?? 0;
+                const isSelected = activeCutCategoryFilter === cat;
+                if (count === 0 && !isSelected) return null;
+                const meta = CUT_CATEGORY_META[cat];
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() =>
+                      setActiveCutCategoryFilter(isSelected ? 'all' : cat)
+                    }
+                    className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition cursor-pointer inline-flex items-center gap-1 ${
+                      isSelected
+                        ? meta.activeFilterClass
+                        : 'bg-zinc-900/90 text-zinc-300 border-zinc-800 hover:border-zinc-700 hover:text-zinc-100'
+                    }`}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: meta.color }}
+                    />
+                    <span>{meta.label}</span>
+                    <span className="font-mono text-[10px] opacity-80">
+                      ({count})
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {allCuts.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                {cutOverviewData.speakerOptions.length > 1 && (
+                  <select
+                    value={cutSpeakerFilter}
+                    onChange={(e) => setCutSpeakerFilter(e.target.value)}
+                    className="px-2 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-200 max-w-[110px] truncate focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="all">全部发言人</option>
+                    {cutOverviewData.speakerOptions.map(([id, name]) => (
+                      <option key={id} value={id}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <div className="relative flex-1 min-w-0">
+                  <Search className="w-3 h-3 text-zinc-500 absolute left-2 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={cutSearchQuery}
+                    onChange={(e) => setCutSearchQuery(e.target.value)}
+                    placeholder="筛选内容/原因/时间…"
+                    className="w-full pl-6 pr-2 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-200 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
+              <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                <span>
+                  筛选结果 ({cutOverviewData.filtered.length}
+                  {cutOverviewData.filtered.length !== allCuts.length
+                    ? ` / ${allCuts.length}`
+                    : ''}
+                  )
+                </span>
+              </span>
+              {onOpenCutReportModal && allCuts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onOpenCutReportModal('cuts')}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
+                >
+                  在弹窗中打开完整列表
+                </button>
+              )}
+            </div>
+
+            {allCuts.length === 0 ? (
+              <div className="py-8 text-center text-xs text-zinc-500">
+                当前暂无剪辑标注记录
+              </div>
+            ) : cutOverviewData.filtered.length === 0 ? (
+              <div className="py-6 text-center text-xs text-zinc-500 space-y-1.5">
+                <div>当前筛选条件下暂无匹配的剪辑处</div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveCutCategoryFilter('all');
+                    setCutSpeakerFilter('all');
+                    setCutSearchQuery('');
+                  }}
+                  className="text-[11px] text-emerald-400 hover:underline cursor-pointer"
+                >
+                  重置筛选条件
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {cutOverviewData.filtered.map((c) => {
+                  const isActive = inspectedCut?.id === c.id;
+                  const meta = CUT_CATEGORY_META[c.category];
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectCut?.(c);
+                        onSeekToSec(c.editedSec);
+                      }}
+                      className={`w-full text-left p-2.5 rounded-xl border transition cursor-pointer space-y-1 ${
+                        isActive
+                          ? 'border-emerald-500/70 bg-emerald-500/10'
+                          : 'border-zinc-800 bg-zinc-950/70 hover:border-zinc-700 hover:bg-zinc-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`px-1.5 py-0.2 rounded-full text-[9.5px] border shrink-0 ${meta.badgeClass}`}
+                          >
+                            {meta.label}
+                          </span>
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ backgroundColor: c.speakerColor }}
+                          />
+                          <span className="font-medium text-zinc-200 truncate">
+                            {c.speakerName}
+                          </span>
+                          <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px] shrink-0">
+                            {c.timeFormatted}
+                          </span>
+                        </div>
+                        <span className="font-mono font-semibold text-emerald-300 shrink-0">
+                          {c.category === 'track_mute'
+                            ? `静音 ${c.removedDurationSec.toFixed(2)}s`
+                            : `-${c.removedDurationSec.toFixed(2)}s`}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                        <span className="truncate">
+                          {c.removedText ? `「${c.removedText}」` : c.reason}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Tab 3: 节目摘要、专属词库与导出 */}
       {activeTab === 'glossary' && (
         <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0">
           <div className="p-3 rounded-xl border border-zinc-800 bg-zinc-950 space-y-2 text-xs">

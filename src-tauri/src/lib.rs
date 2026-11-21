@@ -296,6 +296,20 @@ async fn save_project_file(file_path: String, content_json: String) -> Result<St
 }
 
 #[tauri::command]
+async fn save_binary_file(file_path: String, bytes: Vec<u8>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(parent) = Path::new(&file_path).parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&file_path, &bytes)
+            .map_err(|e| format!("保存文件失败 ({}): {}", file_path, e))?;
+        Ok(file_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn load_project_file(app: AppHandle, file_path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _ = app.emit(
@@ -1560,6 +1574,7 @@ pub fn run() {
             export_daw_project,
             export_wechat_video_mp4,
             save_project_file,
+            save_binary_file,
             load_project_file,
             read_subtitle_bytes,
             run_ai_sidecar,
@@ -1760,24 +1775,29 @@ mod tests {
     }
 
     #[test]
-    fn test_non_primary_speaker_auto_ducked_during_speech_overlap() {
+    fn test_non_primary_speaker_speech_preserved_while_noise_floor_ducked() {
         let p_pri = "/tmp/podcraft_ov_pri.wav";
         let p_sec = "/tmp/podcraft_ov_sec.wav";
-        // 1.0s of 48kHz audio: ONLY secondary speaker has signal (amplitude 12000) while primary is silent (0)
-        // so we can directly measure exact linear gain applied to the overlapping secondary track!
+        let p_noise = "/tmp/podcraft_ov_noise.wav";
+        // 1.0s of 48kHz audio:
+        // - s_sec: genuine speech on secondary speaker (amplitude 12000)
+        // - s_noise: low-level floor noise on secondary track (amplitude 120)
         let total_src = 48_000usize;
         let s_pri = vec![0i16; total_src];
         let mut s_sec = vec![0i16; total_src];
+        let mut s_noise = vec![0i16; total_src];
         for i in 0..total_src {
             let phase = 2.0 * std::f32::consts::PI * 440.0 * (i as f32 / 48000.0);
             s_sec[i] = (phase.sin() * 12000.0) as i16;
+            s_noise[i] = (phase.sin() * 120.0) as i16;
         }
         write_test_wav_with_list_metadata(p_pri, &s_pri);
         write_test_wav_with_list_metadata(p_sec, &s_sec);
+        write_test_wav_with_list_metadata(p_noise, &s_noise);
 
         let port = ensure_local_audio_http_server();
 
-        let post_and_peak = |auto_solo_mode: &str, sec_also_primary: bool| -> i16 {
+        let post_and_peak = |sec_path: &str, auto_solo_mode: &str, sec_also_primary: bool| -> i16 {
             let pri_json = if sec_also_primary {
                 r#"[{"trackId":"sp_1","startMs":0,"endMs":1000},{"trackId":"sp_2","startMs":0,"endMs":1000}]"#
             } else {
@@ -1814,7 +1834,7 @@ mod tests {
                     "mouthClickRanges": [],
                     "bleepRanges": []
                 }}"#,
-                auto_solo_mode, p_pri, p_sec, pri_json
+                auto_solo_mode, p_pri, sec_path, pri_json
             );
             let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
             let req = format!(
@@ -1837,27 +1857,41 @@ mod tests {
                 .unwrap_or(0)
         };
 
-        let peak_off = post_and_peak("off", false);
-        let peak_ducked = post_and_peak("natural_ducking", false);
-        let peak_hard = post_and_peak("hard_mute", false);
-        let peak_keep_full = post_and_peak("natural_ducking", true);
+        let peak_off = post_and_peak(p_sec, "off", false);
+        let peak_ducked = post_and_peak(p_sec, "natural_ducking", false);
+        let peak_hard = post_and_peak(p_sec, "hard_mute", false);
+        let peak_keep_full = post_and_peak(p_sec, "natural_ducking", true);
 
-        // When auto-ducking is off or keepFullVolume promotes sp_2 to primary, peak stays ~12000
+        // When another speaker has genuine speech, auto-ducking must preserve full volume for editor handling
         assert!(peak_off > 10500, "peak_off={}", peak_off);
         assert!(peak_keep_full > 10500, "peak_keep_full={}", peak_keep_full);
-        // By default in natural_ducking, overlapping non-primary speaker is automatically lowered (~30% of full)
         assert!(
-            peak_ducked < (peak_off as f32 * 0.45) as i16 && peak_ducked > (peak_off as f32 * 0.18) as i16,
-            "expected natural overlap ducking between 18%..45%, got peak_ducked={} vs peak_off={}",
-            peak_ducked,
-            peak_off
+            peak_ducked > 10500,
+            "expected secondary speaker speech preserved in natural_ducking, got peak_ducked={}",
+            peak_ducked
         );
-        // In hard_mute, overlapping non-primary speaker is suppressed even further (<12%)
         assert!(
-            peak_hard < (peak_off as f32 * 0.12) as i16,
-            "expected hard_mute < 12%, got peak_hard={} vs peak_off={}",
-            peak_hard,
-            peak_off
+            peak_hard > 10500,
+            "expected secondary speaker speech preserved in hard_mute, got peak_hard={}",
+            peak_hard
+        );
+
+        // Low-level noise floor on non-primary track must still be ducked
+        let noise_off = post_and_peak(p_noise, "off", false);
+        let noise_ducked = post_and_peak(p_noise, "natural_ducking", false);
+        let noise_hard = post_and_peak(p_noise, "hard_mute", false);
+        assert!(noise_off >= 100, "noise_off={}", noise_off);
+        assert!(
+            noise_ducked < (noise_off as f32 * 0.20) as i16,
+            "expected low-level noise floor ducked in natural_ducking, off={} vs ducked={}",
+            noise_off,
+            noise_ducked
+        );
+        assert!(
+            noise_hard < (noise_off as f32 * 0.10) as i16,
+            "expected low-level noise floor suppressed in hard_mute, off={} vs hard={}",
+            noise_off,
+            noise_hard
         );
     }
 

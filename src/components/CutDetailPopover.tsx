@@ -14,6 +14,7 @@ import { CutCategory, CutPointItem } from '../engine/cutAnalysisEngine';
 interface CutDetailPopoverProps {
   cut: CutPointItem | null;
   anchorPos?: { x: number; y: number } | null;
+  embedded?: boolean;
   onClose: () => void;
   onUndoCut: (cut: CutPointItem) => void;
   onSeekToSec?: (sec: number) => void;
@@ -33,6 +34,7 @@ const CATEGORY_BADGE_STYLE: Record<CutCategory, string> = {
 export const CutDetailPopover: React.FC<CutDetailPopoverProps> = ({
   cut,
   anchorPos,
+  embedded = false,
   onClose,
   onUndoCut,
   onSeekToSec,
@@ -40,7 +42,7 @@ export const CutDetailPopover: React.FC<CutDetailPopoverProps> = ({
   onOpenAllCuts,
 }) => {
   useEffect(() => {
-    if (!cut) return;
+    if (!cut || embedded) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -49,11 +51,11 @@ export const CutDetailPopover: React.FC<CutDetailPopoverProps> = ({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [cut, onClose]);
+  }, [cut, embedded, onClose]);
 
   if (!cut) return null;
 
-  // Clamp position inside viewport
+  // Clamp position inside viewport (only used when floating)
   const cardWidth = 360;
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
@@ -66,16 +68,16 @@ export const CutDetailPopover: React.FC<CutDetailPopoverProps> = ({
       : Math.min(vh - 300, anchorPos.y + 14)
     : Math.max(80, vh * 0.25);
 
-  return (
+  const cardNode = (
     <div
-      className="fixed inset-0 z-50"
-      onClick={onClose}
+      onClick={(e) => e.stopPropagation()}
+      style={embedded ? undefined : { left, top, width: cardWidth }}
+      className={
+        embedded
+          ? 'w-full rounded-xl border border-emerald-500/35 bg-zinc-900/95 shadow-lg overflow-hidden text-xs'
+          : 'fixed rounded-2xl border border-zinc-700/90 bg-zinc-900/95 backdrop-blur-md shadow-2xl overflow-hidden text-xs animate-in fade-in zoom-in-95 duration-150'
+      }
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ left, top, width: cardWidth }}
-        className="fixed rounded-2xl border border-zinc-700/90 bg-zinc-900/95 backdrop-blur-md shadow-2xl overflow-hidden text-xs animate-in fade-in zoom-in-95 duration-150"
-      >
         {/* Header */}
         <div className="px-3.5 py-2.5 bg-zinc-950/90 border-b border-zinc-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -210,6 +212,13 @@ export const CutDetailPopover: React.FC<CutDetailPopoverProps> = ({
           </button>
         </div>
       </div>
+  );
+
+  if (embedded) return cardNode;
+
+  return (
+    <div className="fixed inset-0 z-50" onClick={onClose}>
+      {cardNode}
     </div>
   );
 };

@@ -247,8 +247,12 @@ export const SmartCutConfirmModal: React.FC<SmartCutConfirmModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        onSeekToSec?.(item.timeSec);
-                        onAuditionCutPoint?.(item);
+                        if (isAuditioning) {
+                          onStopAudition?.();
+                        } else {
+                          onSeekToSec?.(item.timeSec);
+                          onAuditionCutPoint?.(item);
+                        }
                       }}
                       title={
                         isAuditioning

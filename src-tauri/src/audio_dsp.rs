@@ -1212,11 +1212,6 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
     } else {
         db_to_linear(req.duck_attenuation_db).clamp(0.10, 0.55)
     };
-    let overlap_duck_linear = if req.auto_solo_mode == "hard_mute" {
-        duck_linear
-    } else {
-        (duck_linear * 2.0).clamp(0.22, 0.38)
-    };
     let single_bleed_gain = if req.auto_solo_mode == "hard_mute" {
         0.02_f32
     } else {
@@ -1356,17 +1351,23 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
                             idle_noise_gain.max(0.45)
                         }
                     } else if max_rms >= 0.016 && dom_ratio < 0.35 {
+                        hold_frames_rem[ti] = 0;
                         single_bleed_gain
-                    } else if eff >= 0.014 || transcript_active {
-                        overlap_duck_linear
+                    } else if eff >= 0.014 || (transcript_active && eff >= 0.008) {
+                        hold_frames_rem[ti] = 7_680;
+                        1.0
+                    } else if hold_frames_rem[ti] > 0 && dom_ratio >= 0.22 {
+                        hold_frames_rem[ti] = hold_frames_rem[ti].saturating_sub(sub_len);
+                        1.0
                     } else {
+                        hold_frames_rem[ti] = 0;
                         single_bleed_gain
                     }
                 } else if any_laughter {
                     if eff >= floor_thr * 0.8 || dom_ratio >= 0.28 {
                         1.0
                     } else {
-                        overlap_duck_linear
+                        single_bleed_gain
                     }
                 } else if max_rms >= 0.014 {
                     if dom_ratio >= 0.70 || indep_speech {

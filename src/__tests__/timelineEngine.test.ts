@@ -2157,13 +2157,15 @@ describe('PodCraft Clean Workspace, Project Persistence & Timeline Engine', () =
     expect(gapSentence.negPeak).toBeLessThan(0.015);
   });
 
-  it('activates word-annotated timeline at >=100x zoom, preserves inter-word gaps, and subdivides multi-char words at deeper zoom', () => {
-    // 1. Threshold check aligned with UI readout Rounding (>= 100x)
+  it('keeps 50x-100x in phrase mode, activates word-annotated timeline above 100x, preserves inter-word gaps, and subdivides multi-char words at deeper zoom', () => {
+    // 1. Threshold check aligned with UI readout Rounding (> 100x, i.e. >= 101x)
     expect(isWordTimelineZoom(1)).toBe(false);
     expect(isWordTimelineZoom(50)).toBe(false);
-    expect(isWordTimelineZoom(99.4)).toBe(false);
-    expect(isWordTimelineZoom(99.6)).toBe(true);
-    expect(isWordTimelineZoom(100)).toBe(true);
+    expect(isWordTimelineZoom(99.6)).toBe(false);
+    expect(isWordTimelineZoom(100)).toBe(false);
+    expect(isWordTimelineZoom(100.4)).toBe(false);
+    expect(isWordTimelineZoom(100.6)).toBe(true);
+    expect(isWordTimelineZoom(101)).toBe(true);
     expect(isWordTimelineZoom(250)).toBe(true);
     expect(isWordTimelineZoom(2400)).toBe(true);
 

@@ -10,26 +10,26 @@ describe('computeHoverScrubRate', () => {
     expect(res.nextSample.timeSec).toBe(10.0);
   });
 
-  it('slows down toward 0.5x when mouse moves slowly in timeline space', () => {
+  it('keeps 1.0x original speed when mouse moves slowly in timeline space', () => {
     let sample = computeHoverScrubRate(null, 10.0, 1000).nextSample;
     for (let i = 1; i <= 8; i += 1) {
-      const res = computeHoverScrubRate(sample, 10.0 + i * 0.05, 1000 + i * 100); // 0.5x real-time
+      const res = computeHoverScrubRate(sample, 10.0 + i * 0.05, 1000 + i * 100);
       expect(res.direction).toBe(1);
+      expect(res.rate).toBe(1.0);
       sample = res.nextSample;
     }
-    expect(sample.smoothedRate).toBeCloseTo(HOVER_SCRUB_MIN_RATE, 1);
+    expect(sample.smoothedRate).toBe(1.0);
   });
 
-  it('accelerates smoothly up to 3.5x when mouse sweeps fast', () => {
+  it('keeps 1.0x original speed when mouse sweeps fast', () => {
     let sample = computeHoverScrubRate(null, 10.0, 1000).nextSample;
     for (let i = 1; i <= 10; i += 1) {
-      const res = computeHoverScrubRate(sample, 10.0 + i * 0.5, 1000 + i * 50); // 10x raw -> clamped 3.5x
+      const res = computeHoverScrubRate(sample, 10.0 + i * 0.5, 1000 + i * 50);
       expect(res.direction).toBe(1);
-      expect(res.rate).toBeLessThanOrEqual(HOVER_SCRUB_MAX_RATE);
+      expect(res.rate).toBe(1.0);
       sample = res.nextSample;
     }
-    expect(sample.smoothedRate).toBeGreaterThan(3.2);
-    expect(sample.smoothedRate).toBeLessThanOrEqual(HOVER_SCRUB_MAX_RATE);
+    expect(sample.smoothedRate).toBe(1.0);
   });
 
   it('reports direction -1 when moving backward along timeline', () => {

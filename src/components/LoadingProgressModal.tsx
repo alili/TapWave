@@ -88,9 +88,15 @@ export const LoadingProgressModal: React.FC<LoadingProgressModalProps> = ({ prog
   const stageText = STAGE_DISPLAY_LABELS[progress.stage] || progress.stage || '处理中';
   const steps = getPipelineSteps(progress.stage, progress.title);
 
+  const isThreeSteps = steps.length === 3;
+
   return (
     <div className="fixed inset-0 z-[70] bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 select-none">
-      <div className="w-full max-w-xl rounded-2xl border border-zinc-700/90 bg-zinc-900 p-6 shadow-2xl space-y-4">
+      <div
+        className={`w-full ${
+          isThreeSteps ? 'max-w-2xl' : 'max-w-xl'
+        } rounded-2xl border border-zinc-700/90 bg-zinc-900 p-6 shadow-2xl space-y-4`}
+      >
         {/* 标题与完整百分比 + 耗时 */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-2.5 min-w-0 flex-1">
@@ -155,7 +161,11 @@ export const LoadingProgressModal: React.FC<LoadingProgressModalProps> = ({ prog
         </div>
 
         {/* 全流程步骤清单 */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+        <div
+          className={`grid grid-cols-1 ${
+            isThreeSteps ? 'sm:grid-cols-3' : 'sm:grid-cols-2'
+          } gap-2 pt-1`}
+        >
           {steps.map((st, idx) => {
             const stepCompleted = isDone || clampedPct >= st.donePct;
             const stepActive = !stepCompleted && clampedPct >= st.thresholdPct;

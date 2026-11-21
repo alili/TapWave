@@ -30,7 +30,12 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { AuxAudioSlot, BgmTrackAsset, HighlightClip, PodcastProjectState, WaveformSelectionMode } from '../types/podcast';
-import { CutPointItem } from '../engine/cutAnalysisEngine';
+import {
+  computeTimelineCutIntervalSec,
+  CUT_CATEGORY_META,
+  CutCategory,
+  CutPointItem,
+} from '../engine/cutAnalysisEngine';
 import {
   getPlayheadSec,
   setPlayheadSec as setGlobalPlayheadSec,
@@ -59,6 +64,7 @@ import {
   snapRangeToWordGaps,
   TimelineComputation,
   TimelineWordAnnotation,
+  WORD_TIMELINE_MIN_ZOOM,
 } from '../engine/timelineEngine';
 import {
   computeLegacyPeaksCalibration,
@@ -177,6 +183,9 @@ interface WaveformEditorBarProps {
   ) => void;
   onSetWaveformSelectionMode?: (mode: WaveformSelectionMode) => void;
   cutPoints?: CutPointItem[];
+  cutOverviewActive?: boolean;
+  cutCategoryFilter?: CutCategory | 'all';
+  inspectedCutId?: string | null;
   onInspectCutPoint?: (cut: CutPointItem, anchorPos?: { x: number; y: number }) => void;
   onOpenCutReportModal?: (tab?: 'cuts' | 'report' | 'profile') => void;
 }
@@ -992,8 +1001,8 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
           data-token-stream="1"
           className={`block tracking-[0.01em] break-words whitespace-normal select-none ${
             isHorizontal
-              ? 'flex-1 min-h-0 overflow-y-auto pr-0.5 text-[13.5px] leading-[1.48]'
-              : 'text-[14.5px] leading-[1.65]'
+              ? 'flex-1 min-h-0 overflow-y-auto pr-0.5 text-[13.5px] leading-[1.68]'
+              : 'text-[14.5px] leading-[1.85]'
           }`}
         >
           {!renderInteractiveTokens ? (
@@ -1076,11 +1085,11 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
                         isHorizontal ? 'px-1 mx-0.5 text-[10.5px]' : 'px-1.5 mx-1 text-[11px]'
                       } ${
                         isWaveRangeToken
-                          ? 'bg-rose-500/35 text-rose-100'
+                          ? 'bg-rose-500/85 text-white font-semibold ring-1 ring-rose-300/85 shadow-xs'
                           : isSelected
-                          ? 'bg-blue-500/45 text-white'
+                          ? 'bg-blue-500 text-white font-semibold ring-1 ring-sky-300/85 shadow-xs'
                           : isActive
-                          ? 'bg-amber-500/30 text-amber-100'
+                          ? 'bg-amber-400 text-zinc-950 font-bold ring-1 ring-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.55)]'
                           : isCleanedPause
                           ? 'bg-teal-500/15 text-teal-300 hover:bg-teal-500/25'
                           : 'bg-zinc-800/80 text-zinc-400 hover:bg-zinc-700'
@@ -1113,9 +1122,9 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
                         isHorizontal ? 'px-1 mx-0.5 text-[10.5px]' : 'px-1.5 mx-1 text-[11px]'
                       } ${
                         isSelected
-                          ? 'bg-blue-500/45 text-white'
+                          ? 'bg-blue-500 text-white font-semibold ring-1 ring-sky-300/85 shadow-xs'
                           : isActive
-                          ? 'bg-amber-500/35 text-amber-100'
+                          ? 'bg-amber-400 text-zinc-950 font-bold ring-1 ring-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.55)]'
                           : 'bg-amber-500/20 text-amber-300'
                       }`}
                     >
@@ -1131,13 +1140,13 @@ const DeckTurnCard: React.FC<DeckTurnCardProps> = React.memo(
                 const tokenCls = [
                   'inline p-0 m-0 cursor-pointer transition-colors select-none',
                   isWaveRangeToken
-                    ? 'bg-rose-500/40 text-rose-50'
+                    ? 'bg-rose-500/85 text-white rounded-[3px] shadow-[0_0_0_1.5px_rgba(253,164,175,0.85)]'
                     : isSelected
                     ? isActive
-                      ? 'bg-blue-500/55 text-amber-100'
-                      : 'bg-blue-500/45 text-white'
+                      ? 'bg-amber-400 text-zinc-950 rounded-[3px] shadow-[0_0_0_2px_rgba(59,130,246,0.95),0_0_10px_rgba(251,191,36,0.75)]'
+                      : 'bg-blue-500 text-white rounded-[3px] shadow-[0_0_0_1.5px_rgba(125,211,252,0.85)]'
                     : isActive
-                    ? 'bg-amber-500/30 text-amber-100'
+                    ? 'bg-amber-400 text-zinc-950 rounded-[3px] shadow-[0_0_0_2px_rgba(251,191,36,0.95),0_0_8px_rgba(251,191,36,0.65)]'
                     : m.token.fillerTag === 'pure'
                     ? 'token-filler-wavy text-amber-200/95 hover:bg-zinc-800/80'
                     : 'text-zinc-100 hover:bg-zinc-800/75',
@@ -1317,6 +1326,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onInsertSilenceAtPlayhead,
   onNotify,
   cutPoints = [],
+  cutOverviewActive = false,
+  cutCategoryFilter = 'all',
+  inspectedCutId = null,
   onInspectCutPoint,
   onOpenCutReportModal,
 }) => {
@@ -1581,39 +1593,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     [playheadDragging, outroTrimDragging, syncCanvasCursor]
   );
   const cutBadgeHitBoxesRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; editedSec: number }>>([]);
-  const renderedWordPillsRef = useRef<
-    Array<{
-      speakerId: string;
-      startSec: number;
-      endSec: number;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-      text: string;
-      trackColor: string;
-    }>
-  >([]);
-  const renderedCaptionPillsRef = useRef<
-    Array<{
-      speakerId: string;
-      r1: number;
-      r2: number;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-      text: string;
-      tokens: Array<{
-        startSec: number;
-        endSec: number;
-        charStart: number;
-        charEnd: number;
-        text: string;
-      }>;
-      trackColor: string;
-    }>
-  >([]);
   const scrubHoverTooltipRef = useRef<HTMLDivElement | null>(null);
   const hoverRatioRef = useRef<number | null>(null);
   const overlayDrawRafRef = useRef<number | null>(null);
@@ -2572,8 +2551,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    renderedWordPillsRef.current = [];
-    renderedCaptionPillsRef.current = [];
 
     const RULER_H = rulerHeightPx;
     const topRulerBandH = wordTimelineMode ? 14 : RULER_H;
@@ -3175,23 +3152,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           voicedByAcousticOrWord = activeSynth;
         }
 
-        // Visually reflect Non-Primary Speaker Auto-Ducking and Manual Single-Track Mutes
-        const secOvDucked =
-          Boolean(activeSecOv) &&
-          !activeSecOv!.muted &&
-          state.autoSoloMode !== 'off' &&
-          !activeSecOv!.keepFullVolume;
+        // Visually reflect Manual Single-Track Mutes (overlapping speech from other speakers stays full-height for editor handling)
         const secOvMuted = Boolean(activeSecOv?.muted);
 
         if (secOvMuted || inManualMuteZone) {
           posNorm *= 0.08;
           negNorm *= 0.08;
           rmsNorm *= 0.08;
-        } else if (secOvDucked) {
-          const duckScale = state.autoSoloMode === 'hard_mute' ? 0.16 : 0.45;
-          posNorm *= duckScale;
-          negNorm *= duckScale;
-          rmsNorm *= duckScale;
         }
 
         const isVoiced =
@@ -3201,8 +3168,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           inClip || inLaugh || inColdClip || voicedByAcousticOrWord || activeSecOv ? 1 : 0;
         if (secOvMuted || inManualMuteZone) {
           gateOpen = 0;
-        } else if (secOvDucked) {
-          gateOpen = state.autoSoloMode === 'hard_mute' ? 0.06 : 0.32;
         }
         gatePoints.push({ x, open: gateOpen });
 
@@ -3736,10 +3701,103 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       const lastWordPillRightByLane = new Float64Array(speakerTracks.length).fill(-999);
       ctx.save();
 
-      // 剪辑处标注（贯穿虚线 + 交叉淡化包络 + 顶部「✂️ 剪辑」胶囊，可通过工具栏开关切换显示）
+      // 剪辑处标注：打开右侧「剪辑总览」侧栏时，在主时间轴按分类做不同着色提示剪辑区间；
+      // 否则按工具栏 showCutMarkers 开关显示标准绿色剪辑缝隙标注
       cutBadgeHitBoxesRef.current = [];
       let lastCutBadgeRightX = -999;
-      if (showCutMarkers) {
+      if (cutOverviewActive && cutPoints.length > 0) {
+        const speakerLaneIdxMap = new Map<string, number>();
+        speakerTracks.forEach((tr, i) => speakerLaneIdxMap.set(tr.id, i));
+
+        cutPoints.forEach((cut) => {
+          if (cutCategoryFilter !== 'all' && cut.category !== cutCategoryFilter) return;
+          const meta = CUT_CATEGORY_META[cut.category];
+          const isInspected = inspectedCutId === cut.id;
+          const { startSec, endSec, isSpan } = computeTimelineCutIntervalSec(cut);
+          const r1 = Math.max(0, Math.min(1, startSec / totalSec));
+          const r2 = Math.max(r1, Math.min(1, endSec / totalSec));
+          if (r2 < viewStartRatio - 0.02 || r1 > viewEndRatio + 0.02) return;
+
+          const x1Raw = ratioToX(r1);
+          const x2Raw = ratioToX(r2);
+          const spanW = isSpan
+            ? Math.max(8, x2Raw - x1Raw)
+            : Math.max(10, Math.min(34, 8 + cut.removedDurationSec * 4));
+          const boxX = isSpan ? x1Raw : x1Raw - spanW / 2;
+          const centerX = isSpan ? x1Raw + spanW / 2 : x1Raw;
+
+          let zoneTop = RULER_H + 1;
+          let zoneH = Math.max(1, BODY_H - 2);
+          if (cut.category === 'track_mute') {
+            const laneIdx = speakerLaneIdxMap.get(cut.speakerId);
+            if (laneIdx !== undefined) {
+              zoneTop = RULER_H + laneIdx * laneH + 1;
+              zoneH = Math.max(1, laneH - 2);
+            }
+          }
+
+          ctx.save();
+          // 1. 区间着色填充
+          ctx.fillStyle = hexToRgba(meta.color, isInspected ? 0.30 : 0.16);
+          ctx.fillRect(boxX, zoneTop, spanW, zoneH);
+
+          // 2. 区间左右边界或中心剪辑线
+          ctx.strokeStyle = hexToRgba(meta.color, isInspected ? 0.98 : 0.78);
+          ctx.lineWidth = isInspected ? 1.6 : 1.1;
+          if (isSpan) {
+            ctx.strokeRect(boxX + 0.5, zoneTop + 0.5, Math.max(1, spanW - 1), Math.max(1, zoneH - 1));
+          } else {
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(centerX, RULER_H + 1);
+            ctx.lineTo(centerX, H - 1);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+
+          // 3. 顶部标尺底边彩色色条（缩放到全局也能一眼看清各色剪辑分布）
+          ctx.fillStyle = hexToRgba(meta.color, isInspected ? 1.0 : 0.90);
+          ctx.fillRect(boxX, Math.max(0, RULER_H - 3), Math.max(4, spanW), 3);
+
+          // 4. 顶部彩色分类胶囊
+          if (centerX >= 4 && centerX <= W - 12 && centerX > lastCutBadgeRightX + 4) {
+            const cutLabel = visibleSec <= 90 ? `✂️ ${meta.shortLabel}` : '✂️';
+            ctx.font = '600 9px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+            const lw = ctx.measureText(cutLabel).width;
+            const pillW = lw + 8;
+            const pillH = 14;
+            const px = Math.min(W - pillW - 4, Math.max(2, centerX - pillW / 2));
+            const py = RULER_H + 3;
+            ctx.fillStyle = isInspected ? meta.color : 'rgba(15, 23, 42, 0.92)';
+            ctx.beginPath();
+            ctx.roundRect(px, py, pillW, pillH, 3);
+            ctx.fill();
+            ctx.strokeStyle = hexToRgba(meta.color, isInspected ? 1 : 0.85);
+            ctx.lineWidth = isInspected ? 1.25 : 0.9;
+            ctx.stroke();
+            ctx.fillStyle = isInspected ? '#09090b' : '#f4f4f5';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(cutLabel, px + 4, py + pillH / 2 + 0.5);
+            lastCutBadgeRightX = px + pillW;
+            cutBadgeHitBoxesRef.current.push({
+              x1: Math.min(px - 2, boxX),
+              y1: py - 2,
+              x2: Math.max(px + pillW + 2, boxX + spanW),
+              y2: py + pillH + 2,
+              editedSec: cut.editedSec,
+            });
+          } else {
+            cutBadgeHitBoxesRef.current.push({
+              x1: boxX,
+              y1: zoneTop,
+              x2: boxX + spanW,
+              y2: zoneTop + 20,
+              editedSec: cut.editedSec,
+            });
+          }
+          ctx.restore();
+        });
+      } else if (showCutMarkers) {
         timelineZones.cutSeams.forEach((seam) => {
           if (seam.ratio < viewStartRatio || seam.ratio > viewEndRatio) return;
           const sx = ratioToX(seam.ratio);
@@ -3935,17 +3993,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               ctx.fillText(rawTxt, clippedLeft + 4, yLaneTop + 11.5);
               ctx.restore();
               lastWordPillRightByLane[spLaneIdx] = clippedLeft + pillW;
-              renderedWordPillsRef.current.push({
-                speakerId: ann.speakerId,
-                startSec: ann.editedStartSec,
-                endSec: ann.editedEndSec,
-                x: clippedLeft,
-                y: yLaneTop + 3,
-                w: pillW,
-                h: 16.5,
-                text: rawTxt,
-                trackColor: speakerTracks[spLaneIdx]?.color ?? '#fbbf24',
-              });
             }
           }
         }
@@ -3980,18 +4027,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             ctx.fillText(cap.text, x0 + 6, yLaneTop + 11.5);
             ctx.restore();
             lastCapRightX = x0 + 1 + pillW;
-            renderedCaptionPillsRef.current.push({
-              speakerId: tr.id,
-              r1: cap.r1,
-              r2: cap.r2,
-              x: x0 + 1,
-              y: yLaneTop + 3,
-              w: pillW,
-              h: 16.5,
-              text: cap.text,
-              tokens: cap.tokens,
-              trackColor: tr.color,
-            });
           });
         });
       }
@@ -4045,6 +4080,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     rulerHeightPx,
     visibleWordAnnotations,
     showCutMarkers,
+    cutOverviewActive,
+    cutCategoryFilter,
+    inspectedCutId,
+    cutPoints,
   ]);
 
   const minDragRatioSpan = Math.max(0.01 / totalSec, 0.004 / zoom);
@@ -4571,45 +4610,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       }
     }
 
-    // 5c. Live Active Word/Character Highlight on >=100x Word-Annotated Ruler
-    if (wordTimelineMode && visibleWordAnnotations.length > 0) {
-      let lo = 0;
-      let hi = visibleWordAnnotations.length - 1;
-      let candidateIdx = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >>> 1;
-        if (visibleWordAnnotations[mid].editedStartSec <= playheadSec) {
-          candidateIdx = mid;
-          lo = mid + 1;
-        } else {
-          hi = mid - 1;
-        }
-      }
-      if (candidateIdx >= 0) {
-        const scanStart = Math.max(0, candidateIdx - 6);
-        for (let idx = scanStart; idx <= candidateIdx; idx++) {
-          const ann = visibleWordAnnotations[idx];
-          if (playheadSec >= ann.editedStartSec && playheadSec <= ann.editedEndSec) {
-            const ax0 = Math.max(0, ratioToX(ann.editedStartSec / totalSec));
-            const ax1 = Math.min(W, ratioToX(ann.editedEndSec / totalSec));
-            const aw = Math.max(3, ax1 - ax0);
-            ctx.save();
-            ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
-            ctx.fillRect(ax0, topRulerBandH + 1, aw, RULER_H - topRulerBandH - 2);
-            ctx.strokeStyle = '#38bdf8';
-            ctx.lineWidth = 1.25;
-            ctx.strokeRect(
-              ax0 + 0.5,
-              topRulerBandH + 1,
-              Math.max(1, aw - 1),
-              RULER_H - topRulerBandH - 2
-            );
-            ctx.restore();
-          }
-        }
-      }
-    }
-
     // 6. Drag Range Selection Overlay (works down to 10ms / 4px at any zoom up to 2400x!)
     const minRatioSpan = Math.max(0.01 / totalSec, 0.004 / zoom);
     const visibleSecOverlay = totalSec * visibleSpan;
@@ -4712,9 +4712,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
         ctx.strokeStyle = '#22d3ee';
         ctx.lineWidth = 1.5;
+      } else if (selectionMode === 'free') {
+        ctx.setLineDash([2, 2]);
+        ctx.strokeStyle = 'rgba(251, 146, 60, 0.62)';
+        ctx.lineWidth = 1.1;
       } else {
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = 'rgba(244, 244, 245, 0.28)';
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = 'rgba(96, 165, 250, 0.52)';
         ctx.lineWidth = 1;
       }
       ctx.beginPath();
@@ -4731,156 +4735,99 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           ? `🎧 ${baseLabel} · ${activeSkimRate.toFixed(1)}x`
           : isSkimmingVisual
             ? `⌘ ${baseLabel}`
-            : baseLabel;
+            : selectionMode === 'free'
+              ? `✂ ${baseLabel}`
+              : `🧲 ${baseLabel}`;
       ctx.font = wordTimelineMode
         ? '500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace'
         : '500 10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textBaseline = 'middle';
       const htw = ctx.measureText(hLabel).width;
       const pillX = Math.max(2, Math.min(W - htw - 10, hx - (htw + 8) / 2));
-      ctx.fillStyle = isSkimmingVisual ? 'rgba(8, 51, 68, 0.96)' : 'rgba(39, 39, 42, 0.94)';
+      ctx.fillStyle = isSkimmingVisual
+        ? 'rgba(8, 51, 68, 0.96)'
+        : selectionMode === 'free'
+          ? 'rgba(67, 20, 7, 0.92)'
+          : 'rgba(23, 37, 84, 0.92)';
       ctx.beginPath();
       ctx.roundRect(pillX, topBadgeY, htw + 8, topBadgeH, wordTimelineMode ? 3 : 3.5);
       ctx.fill();
-      ctx.strokeStyle = isSkimmingVisual ? 'rgba(34, 211, 238, 0.85)' : 'rgba(113, 113, 122, 0.5)';
-      ctx.lineWidth = isSkimmingVisual ? 1 : 0.75;
+      ctx.strokeStyle = isSkimmingVisual
+        ? 'rgba(34, 211, 238, 0.85)'
+        : selectionMode === 'free'
+          ? 'rgba(245, 158, 11, 0.78)'
+          : 'rgba(59, 130, 246, 0.72)';
+      ctx.lineWidth = isSkimmingVisual ? 1 : 0.85;
       ctx.stroke();
-      ctx.fillStyle = isSkimmingVisual ? '#cffafe' : '#e4e4e7';
+      ctx.fillStyle = isSkimmingVisual
+        ? '#cffafe'
+        : selectionMode === 'free'
+          ? '#fed7aa'
+          : '#dbeafe';
       ctx.fillText(hLabel, pillX + 4, topBadgeCenterY);
     }
 
-    // 7b. Real-time Active Spoken Word Highlight Inside Speech Clips (60fps Overlay)
-    const playRatioForText = totalSec > 0 ? playheadSec / totalSec : 0;
-    if (wordTimelineMode && renderedWordPillsRef.current.length > 0) {
-      for (let i = 0; i < renderedWordPillsRef.current.length; i++) {
-        const p = renderedWordPillsRef.current[i];
-        if (playheadSec < p.startSec - 0.01 || playheadSec > p.endSec + 0.015) continue;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
-        ctx.clip();
-
-        ctx.shadowColor = 'rgba(250, 204, 21, 0.75)';
-        ctx.shadowBlur = 6;
-        ctx.fillStyle = '#facc15';
-        ctx.beginPath();
-        ctx.roundRect(p.x, p.y, p.w, p.h, 3.5);
-        ctx.fill();
-
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = '#fef08a';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-
-        ctx.font = '700 11.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#09090b';
-        ctx.fillText(p.text, p.x + 4, p.y + p.h / 2);
-        ctx.restore();
-      }
-    } else if (!wordTimelineMode && renderedCaptionPillsRef.current.length > 0) {
-      const baseFont = '500 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-      const boldFont = '700 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-      for (let i = 0; i < renderedCaptionPillsRef.current.length; i++) {
-        const cap = renderedCaptionPillsRef.current[i];
-        if (playRatioForText < cap.r1 - 0.0005 || playRatioForText > cap.r2 + 0.0005) continue;
-        if (cap.tokens.length === 0) continue;
-
-        let activeTok = cap.tokens.find(
-          (t) => playheadSec >= t.startSec - 0.015 && playheadSec <= t.endSec + 0.02
-        );
-        if (!activeTok) {
-          for (let j = cap.tokens.length - 1; j >= 0; j--) {
-            if (playheadSec >= cap.tokens[j].startSec - 0.02) {
-              activeTok = cap.tokens[j];
-              break;
-            }
-          }
-        }
-        if (!activeTok) continue;
-
-        ctx.save();
-        ctx.font = baseFont;
-        ctx.textBaseline = 'middle';
-
-        const prefixStr = cap.text.slice(0, activeTok.charStart);
-        const activeStr = cap.text.slice(activeTok.charStart, activeTok.charEnd);
-        const suffixStr = cap.text.slice(activeTok.charEnd);
-
-        const prefixW = prefixStr ? ctx.measureText(prefixStr).width : 0;
-        ctx.font = boldFont;
-        const activeW = ctx.measureText(activeStr).width;
-        ctx.font = baseFont;
-
-        // Auto-pan caption text horizontally inside narrow clip pills so active word stays visible
-        const shiftX = Math.max(0, prefixW + activeW + 14 - cap.w);
-        const textStartX = cap.x + 5 - shiftX;
-        const textMidY = cap.y + cap.h / 2;
-
-        ctx.beginPath();
-        ctx.roundRect(cap.x - 1, cap.y - 1, cap.w + 2, cap.h + 2, 4);
-        ctx.clip();
-
-        ctx.fillStyle = 'rgba(9, 9, 11, 0.95)';
-        ctx.beginPath();
-        ctx.roundRect(cap.x, cap.y, cap.w, cap.h, 3.5);
-        ctx.fill();
-
-        ctx.strokeStyle = hexToRgba(cap.trackColor, 0.95);
-        ctx.lineWidth = 1.15;
-        ctx.stroke();
-
-        // Active word high-contrast pill background
-        ctx.fillStyle = '#facc15';
-        ctx.beginPath();
-        ctx.roundRect(textStartX + prefixW - 2, cap.y + 1.5, activeW + 4, cap.h - 3, 2.5);
-        ctx.fill();
-
-        if (prefixStr) {
-          ctx.fillStyle = 'rgba(228, 228, 231, 0.92)';
-          ctx.fillText(prefixStr, textStartX, textMidY);
-        }
-
-        ctx.font = boldFont;
-        ctx.fillStyle = '#09090b';
-        ctx.fillText(activeStr, textStartX + prefixW, textMidY);
-
-        if (suffixStr) {
-          ctx.font = baseFont;
-          ctx.fillStyle = '#a1a1aa';
-          ctx.fillText(suffixStr, textStartX + prefixW + activeW, textMidY);
-        }
-
-        ctx.restore();
-      }
-    }
-
-    // 8. DAW Playhead Cursor (Draggable Pentagon Cap + Crisp Vertical Line)
+    // 8. DAW Playhead Cursor (Distinct color & shape for Snap vs Free selection modes)
     const playRatio = playheadSec / totalSec;
     if (playRatio >= viewStartRatio - 0.002 && playRatio <= viewEndRatio + 0.002) {
       const px = Math.max(0.5, Math.min(W - 0.5, ratioToX(playRatio)));
       const headHighlighted = playheadDragging || hoverZoneRef.current === 'playhead';
       const lineStartY = wordTimelineMode ? topRulerBandH - 0.5 : RULER_H;
+      const isFreeCursor = selectionMode === 'free';
 
-      ctx.strokeStyle = headHighlighted
-        ? 'rgba(248, 113, 113, 0.45)'
-        : 'rgba(239, 68, 68, 0.28)';
+      ctx.save();
+      ctx.strokeStyle = isFreeCursor
+        ? headHighlighted
+          ? 'rgba(251, 146, 60, 0.48)'
+          : 'rgba(249, 115, 22, 0.30)'
+        : headHighlighted
+          ? 'rgba(125, 211, 252, 0.48)'
+          : 'rgba(56, 189, 248, 0.30)';
       ctx.lineWidth = headHighlighted ? 6 : 4;
       ctx.beginPath();
       ctx.moveTo(px, lineStartY);
       ctx.lineTo(px, H);
       ctx.stroke();
 
-      ctx.strokeStyle = headHighlighted ? '#fca5a5' : '#ef4444';
+      if (isFreeCursor) {
+        ctx.setLineDash([5, 3]);
+      }
+      ctx.strokeStyle = isFreeCursor
+        ? headHighlighted
+          ? '#fdba74'
+          : '#fb923c'
+        : headHighlighted
+          ? '#7dd3fc'
+          : '#38bdf8';
       ctx.lineWidth = headHighlighted ? 2 : 1.5;
       ctx.beginPath();
       ctx.moveTo(px, wordTimelineMode ? topRulerBandH - 0.5 : RULER_H - 2);
       ctx.lineTo(px, H);
       ctx.stroke();
+      ctx.setLineDash([]);
 
-      ctx.fillStyle = headHighlighted ? '#f87171' : '#ef4444';
+      ctx.fillStyle = isFreeCursor
+        ? headHighlighted
+          ? '#fdba74'
+          : '#f97316'
+        : headHighlighted
+          ? '#7dd3fc'
+          : '#0ea5e9';
       ctx.beginPath();
-      if (wordTimelineMode) {
+      if (isFreeCursor) {
+        // Free mode: sharp inverted triangle cap
+        const capHalfW = wordTimelineMode
+          ? headHighlighted
+            ? 6
+            : 5
+          : headHighlighted
+            ? 7
+            : 6;
+        const capBottomY = wordTimelineMode ? 13.5 : 18.5;
+        ctx.moveTo(px - capHalfW, wordTimelineMode ? 1 : 2);
+        ctx.lineTo(px + capHalfW, wordTimelineMode ? 1 : 2);
+        ctx.lineTo(px, capBottomY);
+      } else if (wordTimelineMode) {
         const capHalfW = headHighlighted ? 5.5 : 4.5;
         ctx.moveTo(px - capHalfW, 1);
         ctx.lineTo(px + capHalfW, 1);
@@ -4902,6 +4849,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         ctx.lineWidth = 1;
         ctx.stroke();
       }
+      ctx.restore();
     }
 
     ctx.restore();
@@ -4921,6 +4869,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     wordTimelineMode,
     rulerHeightPx,
     visibleWordAnnotations,
+    selectionMode,
     selStartRatio,
     selEndRatio,
     selLaneIdx,
@@ -5004,7 +4953,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     rectWidth: number,
     rectHeight: number
   ): 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge' => {
-    if (showCutMarkers && cutBadgeHitBoxesRef.current.length > 0) {
+    if ((showCutMarkers || cutOverviewActive) && cutBadgeHitBoxesRef.current.length > 0) {
       for (const box of cutBadgeHitBoxesRef.current) {
         if (localX >= box.x1 && localX <= box.x2 && localY >= box.y1 && localY <= box.y2) {
           return 'cut_badge';
@@ -5543,9 +5492,9 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   };
 
   const handleFocusPrecisionWindow = () => {
-    // One-click jump into a >=100x word/character annotated timeline window (further zoomable down to 0.25s)
+    // One-click jump into a >100x word/character annotated timeline window (further zoomable down to 0.25s)
     const targetSec = visibleWindowSec <= 5 ? Math.max(MIN_VISIBLE_SEC, visibleWindowSec / 2.5) : 4.0;
-    const desiredZoom = Math.min(maxZoom, Math.max(100, totalSec / targetSec));
+    const desiredZoom = Math.min(maxZoom, Math.max(WORD_TIMELINE_MIN_ZOOM, totalSec / targetSec));
     applyZoomAtAnchor(desiredZoom);
   };
 
@@ -6337,16 +6286,16 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               <Plus className="w-3 h-3" />
             </button>
             <button
-              onClick={() => applyZoomAtAnchor(100)}
+              onClick={() => applyZoomAtAnchor(Math.min(maxZoom, 150))}
               disabled={!hasLoadedTimeline}
-              title="一键切换至 100x 按字词标注时间轴视图"
+              title="一键切换至 150x 按字词标注时间轴视图"
               className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold inline-flex items-center gap-0.5 cursor-pointer disabled:opacity-35 disabled:cursor-default transition ${
                 wordTimelineMode
                   ? 'bg-sky-500/25 border-sky-400/60 text-sky-200'
                   : 'bg-zinc-900 hover:bg-zinc-800 border-zinc-700 text-zinc-300'
               }`}
             >
-              <span>100x字词</span>
+              <span>150x字词</span>
             </button>
             <button
               onClick={handleFocusPrecisionWindow}
@@ -6788,9 +6737,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                   (b) => localX >= b.x1 && localX <= b.x2 && localY >= b.y1 && localY <= b.y2
                 );
                 if (hitBox && cutPoints.length > 0 && onInspectCutPoint) {
-                  let best = cutPoints[0];
+                  const candidateCuts =
+                    cutOverviewActive && cutCategoryFilter !== 'all'
+                      ? cutPoints.filter((c) => c.category === cutCategoryFilter)
+                      : cutPoints;
+                  const pool = candidateCuts.length > 0 ? candidateCuts : cutPoints;
+                  let best = pool[0];
                   let bestDiff = Math.abs((best.editedSec - bodyOffsetSec) - hitBox.editedSec);
-                  for (const c of cutPoints) {
+                  for (const c of pool) {
                     const diff = Math.abs((c.editedSec - bodyOffsetSec) - hitBox.editedSec);
                     if (diff < bestDiff) {
                       best = c;

@@ -1141,12 +1141,7 @@ impl<'a> LiveMixRenderSession<'a> {
         // Fast 2.5ms gate-open attack preserves consonant onsets; 45ms smooth release prevents pumping
         let coeff_att = 1.0 / (0.0025 * MIX_SAMPLE_RATE_F64 as f32);
         let coeff_rel = 1.0 / (0.045 * MIX_SAMPLE_RATE_F64 as f32);
-        let overlap_duck_linear = if self.mix.auto_solo_mode == "hard_mute" {
-            self.mix.duck_linear
-        } else {
-            (self.mix.duck_linear * 2.0).clamp(0.22, 0.38)
-        };
-        // Deep attenuation for cross-mic room bleed/echo & ambient noise when only 1 speaker talks
+        // Deep attenuation for cross-mic room bleed/echo & low-level noise floor on non-speaking tracks
         let single_bleed_gain = if self.mix.auto_solo_mode == "hard_mute" {
             0.02
         } else {
@@ -1265,17 +1260,25 @@ impl<'a> LiveMixRenderSession<'a> {
                             };
                         } else if max_rms >= 0.016 && dom_ratio < 0.35 {
                             // Room echo/bleed from primary speaker on another track -> suppress deeply!
+                            self.hold_frames_rem[ti] = 0;
                             targets[ti] = single_bleed_gain;
-                        } else if eff_rms >= 0.014 || transcript_active {
-                            targets[ti] = overlap_duck_linear;
+                        } else if eff_rms >= 0.014 || (transcript_active && eff_rms >= 0.008) {
+                            // Other speaker has genuine speech -> keep full volume for editor to handle
+                            self.hold_frames_rem[ti] = 7_680;
+                            targets[ti] = 1.0;
+                        } else if self.hold_frames_rem[ti] > 0 && dom_ratio >= 0.22 {
+                            self.hold_frames_rem[ti] = self.hold_frames_rem[ti].saturating_sub(sub_len);
+                            targets[ti] = 1.0;
                         } else {
+                            // Low-level noise floor on non-primary track -> suppress
+                            self.hold_frames_rem[ti] = 0;
                             targets[ti] = single_bleed_gain;
                         }
                     } else if is_laughter {
                         targets[ti] = if eff_rms >= floor_thr * 0.8 || dom_ratio >= 0.28 {
                             1.0
                         } else {
-                            overlap_duck_linear
+                            single_bleed_gain
                         };
                     } else if max_rms >= 0.014 {
                         if dom_ratio >= 0.70 || acoustic_indep_speech {

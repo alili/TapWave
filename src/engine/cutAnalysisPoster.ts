@@ -84,7 +84,7 @@ export async function renderCutAnalysisReportImageDataUrl(
   totalH += 44; // section header
   const speakerCardHeights: number[] = [];
   for (const sp of report.speakerSuggestions) {
-    let ch = 128; // speaker header + metrics row
+    let ch = 148; // speaker header + metrics row + category pills
     for (const st of sp.strengths) {
       ch += wrapLines(mctx, `✓ ${st}`, CONTENT_W - 72).length * 29 + 6;
     }
@@ -298,18 +298,19 @@ export async function renderCutAnalysisReportImageDataUrl(
     ctx.fillStyle = '#60a5fa';
     ctx.font = '600 18px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.fillText(
-      `综合 ${sp.overallScore}分 · ${sp.avgCpm}字/分 · 剪除 ${sp.cutCount}处 (${sp.cutRatioPct}%)`,
+      `有效发言 ${formatMmSs(sp.speakingSec)} · ${sp.avgCpm}字/分 · 剪除 ${sp.cutCount}处 (${sp.cutRatioPct}%)`,
       PAD + 28,
       y + 74
     );
 
-    // Dimension pills
+    // Category breakdown pills (objective data only)
     let dx = PAD + 28;
     const dy = y + 96;
     ctx.font = '500 15px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-    sp.dimensions.forEach((dim) => {
-      const txt = `${dim.label} ${dim.score}`;
+    sp.categoryBreakdown.forEach((b) => {
+      const txt = `${b.label} ${b.count}处·${b.savedSec.toFixed(1)}s`;
       const tw = ctx.measureText(txt).width + 20;
+      if (dx + tw > PAD + CONTENT_W - 20) return;
       ctx.fillStyle = '#27272a';
       drawRoundRect(ctx, dx, dy, tw, 28, 8);
       ctx.fill();

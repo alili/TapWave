@@ -270,8 +270,10 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
   useEffect(() => {
     if (!isPlaying) return;
     let rafId = 0;
+    let cancelled = false;
     let lastMs = performance.now();
     const tick = (nowMs: number) => {
+      if (cancelled) return;
       const dt = Math.min(0.1, Math.max(0, (nowMs - lastMs) / 1000));
       lastMs = nowMs;
       const { nextPlayheadSec } = audioPreview.advanceAndSyncPlayback(
@@ -293,7 +295,10 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
       rafId = window.requestAnimationFrame(tick);
     };
     rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(rafId);
+    };
   }, [isPlaying, totalEditedSec, outroStartSec]);
 
   const togglePlay = () => {
@@ -309,13 +314,13 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
     playheadRef.current = startAt;
     setPlayheadSec(startAt);
     updatePlayheadDom(startAt);
-    audioPreview.syncMultiTrackPlayback(stateRef.current, timelineRef.current, startAt, true);
+    audioPreview.startFromUserGesture(stateRef.current, timelineRef.current, startAt);
     setIsPlaying(true);
   };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === 'Space' || e.key === ' ') {
+      if ((e.code === 'Space' || e.key === ' ') && !e.repeat) {
         const tag = (e.target as HTMLElement | null)?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         e.preventDefault();
@@ -810,7 +815,10 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={togglePlay}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                togglePlay();
+              }}
               title="播放 / 暂停片尾预览 (Space)"
               className={`px-2.5 py-0.5 rounded font-semibold flex items-center gap-1 cursor-pointer transition ${
                 isPlaying ? 'bg-amber-500 text-zinc-950' : 'bg-emerald-600 hover:bg-emerald-500 text-white'

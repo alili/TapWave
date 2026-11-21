@@ -922,8 +922,6 @@ export const TranscriptWorkspace: React.FC<TranscriptWorkspaceProps> = React.mem
               sourceStartMs: ov.sourceStartMs,
               sourceEndMs: ov.sourceEndMs,
             };
-            const isAutoDucked =
-              !ov.muted && !ov.keepFullVolume && state.autoSoloMode !== 'off';
 
             return (
               <div
@@ -958,10 +956,6 @@ export const TranscriptWorkspace: React.FC<TranscriptWorkspaceProps> = React.mem
                   {ov.muted ? (
                     <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[11px]">
                       副轨已静音
-                    </span>
-                  ) : isAutoDucked ? (
-                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px]">
-                      非主讲已自动降音
                     </span>
                   ) : (
                     <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px]">

@@ -28,13 +28,13 @@ import {
 } from './engine/preferenceCutEngine';
 import { SmartCutConfirmModal } from './components/SmartCutConfirmModal';
 import { HighlightEditModal } from './components/HighlightEditModal';
-import { CutDetailPopover } from './components/CutDetailPopover';
 import {
   CutModalTab,
   CutReportAndProfileModal,
 } from './components/CutReportAndProfileModal';
 import {
   applyEditingHabitProfileConfig,
+  CutCategory,
   CutPointItem,
   extractAllCutPoints,
   PodcraftEditingHabitConfig,
@@ -244,7 +244,8 @@ export const App: React.FC = () => {
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [lastClickedIdx, setLastClickedIdx] = useState<number | null>(null);
-  const [activeRightTab, setActiveRightTab] = useState<'coach' | 'glossary'>('coach');
+  const [activeRightTab, setActiveRightTab] = useState<'coach' | 'cuts' | 'glossary'>('coach');
+  const [rightCutCategoryFilter, setRightCutCategoryFilter] = useState<CutCategory | 'all'>('all');
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(() =>
     readStoredPaneBool('podcraft.leftPaneCollapsed', false)
   );
@@ -626,7 +627,7 @@ export const App: React.FC = () => {
     const maxDur = Math.max(0, timelineRef.current.totalEditedDurationSec);
     if (maxDur <= 0) return;
     const clamped = Math.max(0, Math.min(maxDur, Number(sec.toFixed(3))));
-    const safeRate = Math.max(0.5, Math.min(3.5, rate || 1.0));
+    const safeRate = 1.0;
     const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     if (!hoverScrubActiveRef.current) {
@@ -685,9 +686,12 @@ export const App: React.FC = () => {
   const handleHoverScrubStop = useCallback(() => {
     if (!hoverScrubActiveRef.current) return;
     hoverScrubActiveRef.current = false;
+    const shouldResumePlayback =
+      wasPlayingBeforeHoverScrubRef.current && isPlayingRef.current;
+    wasPlayingBeforeHoverScrubRef.current = false;
     audioPreview.stopSkim();
     const baseRate = stateRef.current.playbackRate || 1.0;
-    if (wasPlayingBeforeHoverScrubRef.current) {
+    if (shouldResumePlayback) {
       audioPreview.requestSeek();
       audioPreview.syncMultiTrackPlayback(
         stateRef.current,
@@ -850,6 +854,7 @@ export const App: React.FC = () => {
         audioPreview.requestSeek();
         const resolved = resolveEditedPlayheadToSource(nextState, nextTimeline, prerollSec);
         setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
+        isPlayingRef.current = true;
         audioPreview.startFromUserGesture(nextState, nextTimeline, prerollSec, notify);
         setIsPlaying(true);
         return;
@@ -900,6 +905,8 @@ export const App: React.FC = () => {
 
     if (isPlayingRef.current) {
       isPlayingRef.current = false;
+      hoverScrubActiveRef.current = false;
+      wasPlayingBeforeHoverScrubRef.current = false;
       audioPreview.pauseMultiTrackPlayback();
       setIsPlaying(false);
       return;
@@ -1059,11 +1066,15 @@ export const App: React.FC = () => {
     }
 
     let rafId = 0;
+    let cancelled = false;
     let lastFrameMs = performance.now();
     let lastUiCommitTok: string | null = null;
     let prevWasBleeped = false;
 
     const tick = (nowMs: number) => {
+      if (cancelled || !isPlayingRef.current) {
+        return;
+      }
       const dtRealSec = Math.min(0.12, Math.max(0, (nowMs - lastFrameMs) / 1000));
       lastFrameMs = nowMs;
 
@@ -1113,19 +1124,22 @@ export const App: React.FC = () => {
     };
 
     rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(rafId);
+    };
   }, [isPlaying]);
 
   // Lightweight live playbackRate update (no seek / no AutoSolo re-eval / no buffer reset)
   useEffect(() => {
-    if (isPlaying && !hoverScrubActiveRef.current) {
+    if (isPlaying && isPlayingRef.current && !hoverScrubActiveRef.current) {
       audioPreview.setLivePlaybackRate(state.playbackRate || 1.0);
     }
   }, [isPlaying, state.playbackRate]);
 
   // Immediately update live track gains / BGM beds if user toggles Solo/Mute/Loudness/BGM while playing
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && isPlayingRef.current) {
       audioPreview.syncMultiTrackPlayback(state, timeline, playheadRef.current, true);
     }
   }, [
@@ -2527,7 +2541,7 @@ export const App: React.FC = () => {
       cutAuditionTimerRef.current = null;
     }
     setAuditioningCutItemId(null);
-    if (wasAuditioning && isPlayingRef.current) {
+    if (wasAuditioning || isPlayingRef.current) {
       isPlayingRef.current = false;
       audioPreview.pauseMultiTrackPlayback();
       setIsPlaying(false);
@@ -2537,7 +2551,7 @@ export const App: React.FC = () => {
   const handleAuditionCutPoint = useCallback(
     (item: SmartCutActionItem) => {
       // 若当前正在收听同一项，再次点击则停止
-      if (auditioningCutItemId === item.id && isPlayingRef.current) {
+      if (auditioningCutItemId === item.id && (isPlayingRef.current || cutAuditionTimerRef.current !== null)) {
         handleStopCutAudition();
         return;
       }
@@ -2566,6 +2580,7 @@ export const App: React.FC = () => {
       );
       setActivePlaybackTarget(resolved.activeBlockId, resolved.activeTokenId);
 
+      isPlayingRef.current = true;
       audioPreview.startFromUserGesture(
         stateRef.current,
         timelineRef.current,
@@ -2577,6 +2592,7 @@ export const App: React.FC = () => {
 
       // 到达预听时长后自动暂停并重置试听状态
       cutAuditionTimerRef.current = window.setTimeout(() => {
+        isPlayingRef.current = false;
         audioPreview.pauseMultiTrackPlayback();
         setIsPlaying(false);
         setAuditioningCutItemId(null);
@@ -2612,6 +2628,8 @@ export const App: React.FC = () => {
   const handleInspectCutPoint = useLatestCallback(
     (cut: CutPointItem, anchor?: { x: number; y: number }) => {
       setInspectedCutState({ cut, anchor });
+      setRightPaneCollapsed(false);
+      setActiveRightTab('cuts');
     }
   );
 
@@ -4484,6 +4502,9 @@ export const App: React.FC = () => {
             onOpenIntroEditor={stableSwitchToIntroView}
             onNotify={notify}
             cutPoints={allCutPoints}
+            cutOverviewActive={!rightPaneCollapsed && activeRightTab === 'cuts'}
+            cutCategoryFilter={rightCutCategoryFilter}
+            inspectedCutId={inspectedCutState?.cut.id ?? null}
             onInspectCutPoint={handleInspectCutPoint}
             onOpenCutReportModal={handleOpenCutReportModal}
           />
@@ -4554,6 +4575,16 @@ export const App: React.FC = () => {
                   onExportAudio={stableExportAudio}
                   onOpenShownotes={() => handleOpenShownotes('summary')}
                   onOpenCutReportModal={handleOpenCutReportModal}
+                  inspectedCut={inspectedCutState?.cut ?? null}
+                  allCuts={allCutPoints}
+                  cutCategoryFilter={rightCutCategoryFilter}
+                  onChangeCutCategoryFilter={setRightCutCategoryFilter}
+                  onSelectCut={(cut) => setInspectedCutState({ cut })}
+                  onCloseInspectedCut={() => setInspectedCutState(null)}
+                  onUndoCut={handleUndoCutPoint}
+                  onAuditionCut={(cut) => {
+                    audioPreview.playSpliceAudition(cut.speakerId);
+                  }}
                   onNotify={notify}
                   onCollapsePane={stableToggleRightPane}
                 />
@@ -4674,18 +4705,6 @@ export const App: React.FC = () => {
         onConfirm={handleConfirmPreferenceSmartCut}
         onCancel={handleCancelPreferenceSmartCut}
         onSeekToSec={stableSeekToSec}
-      />
-
-      <CutDetailPopover
-        cut={inspectedCutState?.cut ?? null}
-        anchorPos={inspectedCutState?.anchor ?? null}
-        onClose={() => setInspectedCutState(null)}
-        onUndoCut={handleUndoCutPoint}
-        onSeekToSec={stableSeekToSec}
-        onAudition={(cut) => {
-          audioPreview.playSpliceAudition(cut.speakerId);
-        }}
-        onOpenAllCuts={() => handleOpenCutReportModal('cuts')}
       />
 
       <CutReportAndProfileModal

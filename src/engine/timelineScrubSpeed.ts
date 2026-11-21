@@ -5,20 +5,18 @@ export interface TimelineScrubSample {
 }
 
 export interface TimelineScrubResult {
-  /** Clamped pitch-preserving playback rate in [0.5, 3.5]. */
+  /** Fixed 1.0x original-speed playback rate during hover scrub. */
   rate: number;
   /** 1 = forward, -1 = backward, 0 = stationary/initial. */
   direction: -1 | 0 | 1;
   nextSample: TimelineScrubSample;
 }
 
-export const HOVER_SCRUB_MIN_RATE = 0.5;
-export const HOVER_SCRUB_MAX_RATE = 3.5;
+export const HOVER_SCRUB_MIN_RATE = 1.0;
+export const HOVER_SCRUB_MAX_RATE = 1.0;
 
 /**
- * Computes a smoothed playback rate from mouse movement velocity along the timeline.
- * Slow movement plays back at 0.5x–1.2x for clear word-level auditioning;
- * faster sweeps accelerate smoothly up to 3.5x.
+ * Tracks hover-scrub direction along the timeline while keeping playback at original 1.0x speed.
  */
 export function computeHoverScrubRate(
   prevSample: TimelineScrubSample | null,

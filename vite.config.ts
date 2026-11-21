@@ -1224,10 +1224,6 @@ function podcraftLocalSidecarPlugin(): Plugin {
         const coeffRel = 1 / (0.045 * 48000);
         const activeCount = mix.tracks.filter((t) => !t.mutedOrUnsoloed).length;
         const useAutomix = activeCount > 1 && mix.autoSoloMode !== 'off';
-        const overlapDuckLinear =
-          mix.autoSoloMode === 'hard_mute'
-            ? mix.duckLinear
-            : Math.min(0.38, Math.max(0.22, mix.duckLinear * 2.0));
         const singleBleedGain =
           mix.autoSoloMode === 'hard_mute'
             ? 0.02
@@ -1310,10 +1306,16 @@ function podcraftLocalSidecarPlugin(): Plugin {
                   if (isPriArr[ti]) {
                     tgt = eff >= floorThr * 0.7 || trActive ? 1 : Math.max(0.45, idleNoiseGain);
                   } else if (maxRms >= 0.016 && domRatio < 0.35) {
+                    holdRem[ti] = 0;
                     tgt = singleBleedGain;
-                  } else if (eff >= 0.014 || trActive) {
-                    tgt = overlapDuckLinear;
+                  } else if (eff >= 0.014 || (trActive && eff >= 0.008)) {
+                    holdRem[ti] = 7680;
+                    tgt = 1;
+                  } else if (holdRem[ti] > 0 && domRatio >= 0.22) {
+                    holdRem[ti] = Math.max(0, holdRem[ti] - subLen);
+                    tgt = 1;
                   } else {
+                    holdRem[ti] = 0;
                     tgt = singleBleedGain;
                   }
                 } else if (maxRms >= 0.014) {

@@ -650,6 +650,7 @@ class AudioPreviewEngine {
   private introVoiceoverTimelineEl: ManagedAudioHolder | null = null;
   private forceSeekPending = true;
   private wasPlaying = false;
+  private playbackGeneration = 0;
   private playStartPerfMs = 0;
   private lastSpanIndex: number | null = null;
   private lastHeldSpeakerId: string | null = null;
@@ -658,6 +659,30 @@ class AudioPreviewEngine {
   private cachedAcousticProfiles: Map<string, TrackAcousticProfile> = new Map();
   private onPlaybackError: ((msg: string) => void) | null = null;
   private reportedErrorKeys: Set<string> = new Set();
+  private deviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly handleDeviceChangeBound = () => {
+    if (this.deviceChangeTimer) {
+      clearTimeout(this.deviceChangeTimer);
+    }
+    this.deviceChangeTimer = setTimeout(() => {
+      this.deviceChangeTimer = null;
+      this.handleAudioDeviceChange();
+    }, 220);
+  };
+
+  constructor() {
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.addEventListener === 'function'
+    ) {
+      try {
+        navigator.mediaDevices.addEventListener('devicechange', this.handleDeviceChangeBound);
+      } catch {
+        // Ignore environments that disallow mediaDevices listeners
+      }
+    }
+  }
 
   private resolveLocalFilePath(rawUrl?: string, filePath?: string): string | undefined {
     if (filePath && filePath.trim().length > 0) return filePath;
@@ -907,6 +932,36 @@ class AudioPreviewEngine {
     };
   }
 
+  /**
+   * Starts an HTMLAudioElement guarded by `playbackGeneration` so any async `play()` Promise
+   * resolving after `pauseMultiTrackPlayback()` immediately re-pauses the element.
+   */
+  private safePlayElement(
+    el: HTMLAudioElement,
+    gen: number,
+    onError?: (err: unknown) => void
+  ): void {
+    if (gen !== this.playbackGeneration || !this.wasPlaying) return;
+    try {
+      const p = el.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          if (gen !== this.playbackGeneration || !this.wasPlaying) {
+            try {
+              el.pause();
+            } catch {
+              // Ignore pause errors
+            }
+          }
+        }).catch((err) => {
+          onError?.(err);
+        });
+      }
+    } catch (err) {
+      onError?.(err);
+    }
+  }
+
   private ensureMixAudioHolder(): NonNullable<AudioPreviewEngine['mixHolder']> | null {
     if (typeof window === 'undefined' || typeof Audio === 'undefined') return null;
     if (this.mixHolder) return this.mixHolder;
@@ -938,7 +993,7 @@ class AudioPreviewEngine {
       }
       if (holder.pendingPlayAfterLoad && this.wasPlaying && el.paused) {
         holder.pendingPlayAfterLoad = false;
-        void el.play().catch(() => {});
+        this.safePlayElement(el, this.playbackGeneration);
       }
     });
 
@@ -1096,8 +1151,9 @@ class AudioPreviewEngine {
     }
     const ctx = this.ensureContext();
     if (!ctx) return false;
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       void ctx.resume();
+      return false;
     }
 
     const dur = Math.max(0.05, buffer.duration);
@@ -1166,20 +1222,188 @@ class AudioPreviewEngine {
     return true;
   }
 
+  private unlockContextOnGesture(ctx: AudioContext): void {
+    try {
+      const stateStr = ctx.state as string;
+      if (stateStr === 'suspended' || stateStr === 'interrupted') {
+        void ctx.resume();
+      }
+      const buf = ctx.createBuffer(1, 1, Math.max(8000, ctx.sampleRate || 22050));
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {
+      // Ignore unlock failures
+    }
+  }
+
   private ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
+    if (this.ctx && (this.ctx.state as string) === 'closed') {
+      this.ctx = null;
+    }
     if (!this.ctx) {
       const Ctx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (Ctx) {
-        this.ctx = new Ctx();
+        const created = new Ctx();
+        created.addEventListener?.('statechange', () => {
+          if (this.ctx !== created) return;
+          const st = created.state as string;
+          if ((st === 'suspended' || st === 'interrupted') && this.wasPlaying) {
+            void created.resume().catch(() => {});
+          } else if (st === 'closed') {
+            this.ctx = null;
+          }
+        });
+        this.ctx = created;
       }
     }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      void this.ctx.resume();
+    if (this.ctx) {
+      const st = this.ctx.state as string;
+      if (st === 'suspended' || st === 'interrupted') {
+        void this.ctx.resume().catch(() => {});
+      }
     }
     return this.ctx;
+  }
+
+  private rebindAudioElementForDeviceChange(
+    el: HTMLAudioElement,
+    holder?: ManagedAudioHolder | null
+  ): void {
+    const sinkEl = el as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+    if (typeof sinkEl.setSinkId === 'function') {
+      void sinkEl.setSinkId('').catch(() => {});
+    }
+
+    const hasSource = Boolean(el.getAttribute('src') || el.src);
+    if (!hasSource || el.readyState === 0) return;
+
+    const wasActive = !el.paused && !el.ended;
+    const curTime = Number.isFinite(el.currentTime) ? Math.max(0, el.currentTime) : 0;
+
+    if (holder) {
+      holder.pendingSeekSec = curTime;
+      holder.lastPlayRetryPerfMs = 0;
+      try {
+        el.pause();
+      } catch {
+        // Ignore pause errors
+      }
+      try {
+        el.load();
+      } catch {
+        // Ignore load errors
+      }
+      return;
+    }
+
+    // Standalone HTMLAudioElement (e.g. bgmPreviewAudio)
+    try {
+      el.pause();
+    } catch {
+      // Ignore pause errors
+    }
+    const onReloaded = () => {
+      el.removeEventListener('loadedmetadata', onReloaded);
+      try {
+        const maxDur =
+          el.duration && Number.isFinite(el.duration) ? Math.max(0, el.duration - 0.02) : curTime;
+        el.currentTime = Math.max(0, Math.min(curTime, maxDur));
+      } catch {
+        // Ignore seek errors
+      }
+      if (wasActive) {
+        void el.play().catch(() => {});
+      }
+    };
+    el.addEventListener('loadedmetadata', onReloaded);
+    try {
+      el.load();
+    } catch {
+      el.removeEventListener('loadedmetadata', onReloaded);
+    }
+  }
+
+  public handleAudioDeviceChange(): void {
+    // 1. Tear down active WebAudio nodes & recreate AudioContext so OS audio unit binds to new output device
+    this.stopSkim();
+    this.stopWebAudioMainTracks(true);
+    this.stopWebAudioAux('intro_bgm');
+    this.stopWebAudioAux('outro_bgm');
+    this.stopWebAudioAux('intro_vo');
+    for (const node of this.activeNodes) {
+      try {
+        if ('stop' in node && typeof (node as OscillatorNode).stop === 'function') {
+          (node as OscillatorNode).stop();
+        }
+        node.disconnect();
+      } catch {
+        // Ignore already stopped nodes
+      }
+    }
+    this.activeNodes = [];
+    this.stretchedChunkCache.clear();
+
+    if (this.ctx) {
+      const oldCtx = this.ctx;
+      this.ctx = null;
+      try {
+        void oldCtx.close().catch(() => {});
+      } catch {
+        // Ignore close errors
+      }
+    }
+
+    // 2. Rebind native HTMLAudioElements to the new OS default output device
+    for (const holder of this.trackElements.values()) {
+      this.rebindAudioElementForDeviceChange(holder.audio, holder);
+    }
+    for (const clipHolder of this.coldOpenClipElements.values()) {
+      this.rebindAudioElementForDeviceChange(clipHolder.audio, clipHolder);
+    }
+    for (const slot of ['intro', 'outro'] as const) {
+      const b = this.bgmTimelineElements[slot];
+      if (b) {
+        this.rebindAudioElementForDeviceChange(b.audio, b);
+      }
+    }
+    if (this.introVoiceoverTimelineEl) {
+      this.rebindAudioElementForDeviceChange(
+        this.introVoiceoverTimelineEl.audio,
+        this.introVoiceoverTimelineEl
+      );
+    }
+    if (this.mixHolder) {
+      const el = this.mixHolder.audio;
+      const sinkEl = el as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+      if (typeof sinkEl.setSinkId === 'function') {
+        void sinkEl.setSinkId('').catch(() => {});
+      }
+      if (el.getAttribute('src') && el.readyState > 0) {
+        const curTime = Number.isFinite(el.currentTime) ? Math.max(0, el.currentTime) : 0;
+        this.mixHolder.pendingSeekSec = curTime;
+        this.mixHolder.pendingPlayAfterLoad = this.wasPlaying;
+        try {
+          el.pause();
+          el.load();
+        } catch {
+          // Ignore reload errors
+        }
+      }
+    }
+    if (this.bgmPreviewAudio) {
+      this.rebindAudioElementForDeviceChange(this.bgmPreviewAudio, null);
+    }
+
+    // 3. Re-arm AudioContext & force next sync frame to re-sync playback smoothly if currently playing
+    if (this.wasPlaying) {
+      this.forceSeekPending = true;
+      this.ensureContext();
+    }
   }
 
   private emitPlaybackErrorOnce(key: string, message: string): void {
@@ -1242,7 +1466,7 @@ class AudioPreviewEngine {
         }
       }
       if (this.wasPlaying && el.paused && !el.ended) {
-        void el.play().catch(() => {});
+        this.safePlayElement(el, this.playbackGeneration);
       }
     });
 
@@ -1257,7 +1481,7 @@ class AudioPreviewEngine {
           el.src = altSourceUrl;
           el.load();
           if (this.wasPlaying) {
-            void el.play().catch(() => {});
+            this.safePlayElement(el, this.playbackGeneration);
           }
           return;
         }
@@ -1272,7 +1496,7 @@ class AudioPreviewEngine {
           el.src = fallbackWavUrl;
           el.load();
           if (this.wasPlaying) {
-            void el.play().catch(() => {});
+            this.safePlayElement(el, this.playbackGeneration);
           }
           return;
         }
@@ -1439,6 +1663,7 @@ class AudioPreviewEngine {
           tr.sourceFilePath
         );
         if (created) {
+          created.sourceKey = sourceKey;
           this.trackElements.set(tr.id, created);
         }
       }
@@ -1593,9 +1818,15 @@ class AudioPreviewEngine {
     if (onError) {
       this.onPlaybackError = onError;
     }
+    this.playbackGeneration += 1;
+    const playGen = this.playbackGeneration;
+    this.wasPlaying = true;
     this.reportedErrorKeys.clear();
     this.lastKnownPlayheadSec = playheadSec;
-    this.ensureContext();
+    const ctx = this.ensureContext();
+    if (ctx && ctx.state !== 'running') {
+      this.unlockContextOnGesture(ctx);
+    }
     const playable = selectPlayableTracks(state);
     const needsTrackWarmup = playable.some((tr) => !this.trackElements.has(tr.id));
     if (needsTrackWarmup) {
@@ -1612,21 +1843,51 @@ class AudioPreviewEngine {
       timeline.coldOpenDurationSec + timeline.introVoiceoverDurationSec;
     const inIntroOnlyStart = playheadSec < Math.max(0, prefixTotalSec - 1.5);
 
-    // Seek BEFORE play() synchronously inside user gesture so AVPlayer unlocks needed stems
+    // Seek BEFORE play() synchronously inside user gesture so AVPlayer unlocks needed stems.
+    // Skip <audio> seek+play if WebAudio main tracks already have all current chunks decoded and ready,
+    // avoiding a redundant seek -> play -> immediate-pause media pipeline thrash.
     const mapped = resolveEditedPlayheadToSource(state, timeline, playheadSec);
-    for (const tr of playable) {
-      const holder = this.trackElements.get(tr.id);
-      if (!holder || holder.failedFatal) continue;
-      const effOffset = state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
-      const targetSec =
-        mapped.sourceSec !== null && !mapped.inIntroOrGapSilence
-          ? Math.max(0, mapped.sourceSec - effOffset)
-          : 0;
-      this.seekHolderOnSpliceOnly(holder, targetSec, true);
-      if (!inIntroOnlyStart && (holder.audio.paused || holder.audio.ended)) {
-        holder.audio.volume = 0;
-        holder.lastPlayRetryPerfMs = this.playStartPerfMs;
-        void holder.audio.play().catch(() => {});
+    const useProxy = state.proxyEditingEnabled !== false;
+    const anySolo = state.tracks.some((t) => t.solo) || Boolean(state.introBgm?.solo);
+    let webAudioMainReady =
+      useProxy &&
+      Boolean(ctx && ctx.state === 'running') &&
+      !mapped.inColdOpen &&
+      !mapped.inIntroOrGapSilence &&
+      mapped.sourceSec !== null &&
+      playable.length > 0;
+    if (webAudioMainReady && mapped.sourceSec !== null) {
+      for (const tr of playable) {
+        if (tr.muted || (anySolo && !tr.solo)) continue;
+        const effOffset =
+          state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+        const trAbsSec = Math.max(0, mapped.sourceSec - effOffset);
+        const chunkIdx = Math.max(0, Math.floor(trAbsSec / SKIM_CHUNK_DURATION_SEC));
+        const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+        const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+        if (!chunkUrl || !this.decodedAuxBuffers.has(chunkUrl)) {
+          webAudioMainReady = false;
+          break;
+        }
+      }
+    }
+
+    if (!webAudioMainReady) {
+      for (const tr of playable) {
+        const holder = this.trackElements.get(tr.id);
+        if (!holder || holder.failedFatal) continue;
+        const effOffset =
+          state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+        const targetSec =
+          mapped.sourceSec !== null && !mapped.inIntroOrGapSilence
+            ? Math.max(0, mapped.sourceSec - effOffset)
+            : 0;
+        this.seekHolderOnSpliceOnly(holder, targetSec, true);
+        if (!inIntroOnlyStart && (holder.audio.paused || holder.audio.ended)) {
+          holder.audio.volume = 0;
+          holder.lastPlayRetryPerfMs = this.playStartPerfMs;
+          this.safePlayElement(holder.audio, playGen);
+        }
       }
     }
 
@@ -1651,7 +1912,7 @@ class AudioPreviewEngine {
         if (isCurrentHl && (clipEl.paused || clipEl.ended)) {
           clipEl.volume = 0;
           clipHolder.lastPlayRetryPerfMs = this.playStartPerfMs;
-          void clipEl.play().catch(() => {});
+          this.safePlayElement(clipEl, playGen);
         }
       }
     }
@@ -1681,7 +1942,7 @@ class AudioPreviewEngine {
         if (voEl.paused || voEl.ended) {
           voEl.volume = 0;
           this.introVoiceoverTimelineEl.lastPlayRetryPerfMs = this.playStartPerfMs;
-          void voEl.play().catch(() => {});
+          this.safePlayElement(voEl, playGen);
         }
       }
     }
@@ -1758,7 +2019,7 @@ class AudioPreviewEngine {
         if (inWindowNow && (bgmEl.paused || bgmEl.ended)) {
           bgmEl.volume = 0;
           bgmHolder.lastPlayRetryPerfMs = this.playStartPerfMs;
-          void bgmEl.play().catch(() => {});
+          this.safePlayElement(bgmEl, playGen);
         }
       }
     }
@@ -1784,8 +2045,13 @@ class AudioPreviewEngine {
 
   public stopBgmPreview(): void {
     if (this.bgmPreviewAudio) {
-      this.bgmPreviewAudio.pause();
-      this.bgmPreviewAudio.removeAttribute('src');
+      try {
+        this.bgmPreviewAudio.pause();
+        this.bgmPreviewAudio.removeAttribute('src');
+        this.bgmPreviewAudio.load();
+      } catch {
+        // Ignore cleanup errors
+      }
       this.bgmPreviewAudio = null;
     }
     this.bgmPreviewSlot = null;
@@ -1813,17 +2079,41 @@ class AudioPreviewEngine {
     el.preload = 'auto';
     el.volume = slot === 'intro_vo' ? 0.94 : 0.78;
     let retried = false;
+    const playPreviewEl = () => {
+      try {
+        const p = el.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            if (this.bgmPreviewAudio !== el) {
+              try {
+                el.pause();
+              } catch {
+                // Ignore pause errors
+              }
+            }
+          }).catch(() => {
+            if (this.bgmPreviewAudio === el) {
+              this.stopBgmPreview();
+              onEnded?.();
+            }
+          });
+        }
+      } catch {
+        if (this.bgmPreviewAudio === el) {
+          this.stopBgmPreview();
+          onEnded?.();
+        }
+      }
+    };
     el.onerror = () => {
+      if (this.bgmPreviewAudio !== el) return;
       if (!retried) {
         const fallback = normalizePlayableAudioUrl(audioUrl, filePath, true);
         if (fallback && fallback !== resolvedUrl) {
           retried = true;
           el.src = fallback;
           el.load();
-          void el.play().catch(() => {
-            this.stopBgmPreview();
-            onEnded?.();
-          });
+          playPreviewEl();
           return;
         }
       }
@@ -1831,16 +2121,14 @@ class AudioPreviewEngine {
       onEnded?.();
     };
     el.onended = () => {
+      if (this.bgmPreviewAudio !== el) return;
       this.bgmPreviewSlot = null;
       this.bgmPreviewAudio = null;
       onEnded?.();
     };
     this.bgmPreviewAudio = el;
     this.bgmPreviewSlot = slot;
-    void el.play().catch(() => {
-      this.stopBgmPreview();
-      onEnded?.();
-    });
+    playPreviewEl();
     return true;
   }
 
@@ -1886,36 +2174,64 @@ class AudioPreviewEngine {
   }
 
   public pauseMultiTrackPlayback(): void {
+    this.playbackGeneration += 1;
     this.wasPlaying = false;
     this.forceSeekPending = true;
     this.lastSpanIndex = null;
-    this.stopWebAudioMainTracks();
+    this.stopSkim(true);
+    this.stopWebAudioMainTracks(true);
+    this.stopBgmPreview();
+    for (const node of this.activeNodes) {
+      try {
+        if ('stop' in node && typeof (node as OscillatorNode).stop === 'function') {
+          (node as OscillatorNode).stop();
+        }
+        node.disconnect();
+      } catch {
+        // Ignore already stopped nodes
+      }
+    }
+    this.activeNodes = [];
     if (this.mixHolder) {
       this.mixHolder.pendingPlayAfterLoad = false;
-      if (!this.mixHolder.audio.paused) {
+      try {
         this.mixHolder.audio.pause();
+      } catch {
+        // Ignore pause errors
       }
     }
     for (const entry of this.trackElements.values()) {
-      if (!entry.audio.paused) {
+      try {
         entry.audio.pause();
+      } catch {
+        // Ignore pause errors
       }
     }
     for (const clipEntry of this.coldOpenClipElements.values()) {
-      if (!clipEntry.audio.paused) {
+      try {
         clipEntry.audio.pause();
+      } catch {
+        // Ignore pause errors
       }
     }
-    if (this.introVoiceoverTimelineEl && !this.introVoiceoverTimelineEl.audio.paused) {
-      this.introVoiceoverTimelineEl.audio.pause();
+    if (this.introVoiceoverTimelineEl) {
+      try {
+        this.introVoiceoverTimelineEl.audio.pause();
+      } catch {
+        // Ignore pause errors
+      }
     }
     this.stopWebAudioAux('intro_bgm');
     this.stopWebAudioAux('outro_bgm');
     this.stopWebAudioAux('intro_vo');
     for (const slot of ['intro', 'outro'] as const) {
       const b = this.bgmTimelineElements[slot];
-      if (b && !b.audio.paused) {
-        b.audio.pause();
+      if (b) {
+        try {
+          b.audio.pause();
+        } catch {
+          // Ignore pause errors
+        }
       }
     }
   }
@@ -1932,6 +2248,9 @@ class AudioPreviewEngine {
     currentPlayheadSec: number,
     dtRealSec: number
   ): { nextPlayheadSec: number; resolved: ResolvedPlayheadTarget | null } {
+    if (!this.wasPlaying) {
+      return { nextPlayheadSec: currentPlayheadSec, resolved: null };
+    }
     this.lastKnownPlayheadSec = currentPlayheadSec;
     const playbackRate = Math.max(0.5, Math.min(3.5, state.playbackRate || 1.0));
     const prefixSec =
@@ -2064,9 +2383,38 @@ class AudioPreviewEngine {
           }
         }
 
-        // 2. 在连续未切剪片段内部（避开切片首尾接缝），挑选一条正在发声的硬件音轨做温和漂移软校准
-        //    若当前正由 Web Audio 分块引擎驱动，硬件时钟已零漂移锁相，无需再做 <audio> 校准
+        // 2. 在连续未切剪片段内部（避开切片首尾接缝），锁相到硬件音频时钟：
+        //    - 若当前由 Web Audio 分块引擎驱动，直接锁相到 AudioContext.currentTime，防止 rAF 掉帧引起假漂移和打断重播；
+        //    - 否则从正在发声的 <audio> 硬件音轨做温和漂移软校准。
         if (
+          this.activeWebAudioMainTracks.size > 0 &&
+          spanHit &&
+          this.lastSpanIndex === spanHit.span.spanIndex &&
+          nextPlayheadSec > currentPlayheadSec &&
+          this.ctx?.state === 'running'
+        ) {
+          const ctxNow = this.ctx.currentTime;
+          const { span } = spanHit;
+          for (const tr of playable) {
+            const entry = this.activeWebAudioMainTracks.get(tr.id);
+            if (!entry) continue;
+            const effOffset =
+              state.recordingMode === 'same_room_sync' ? 0 : (tr.syncOffsetMs || 0) / 1000;
+            const hwInChunkSec =
+              entry.startedInChunkSec +
+              Math.max(0, ctxNow - entry.startedCtxTime) * entry.playbackRate;
+            const hwSourceSec = entry.chunkIdx * SKIM_CHUNK_DURATION_SEC + hwInChunkSec + effOffset;
+            const hwEditedSec = span.editedStartSec + (hwSourceSec - span.sourceStartSec);
+            if (
+              hwEditedSec >= span.editedStartSec &&
+              hwEditedSec <= span.editedEndSec &&
+              Math.abs(hwEditedSec - nextPlayheadSec) < 0.8
+            ) {
+              nextPlayheadSec = Math.max(currentPlayheadSec, hwEditedSec);
+            }
+            break;
+          }
+        } else if (
           this.activeWebAudioMainTracks.size === 0 &&
           spanHit &&
           this.lastSpanIndex === spanHit.span.spanIndex &&
@@ -2109,12 +2457,17 @@ class AudioPreviewEngine {
                   const hwEditedSec = span.editedStartSec + sourceOffset;
                   const drift = hwEditedSec - nextPlayheadSec;
                   const rateScale = Math.max(1, playbackRate);
+                  const inStartSettlingWindow = nowPerf - this.playStartPerfMs < 500;
                   if (Math.abs(drift) > 0.08 * rateScale && Math.abs(drift) < 0.5 * rateScale) {
                     nextPlayheadSec = Math.max(
                       currentPlayheadSec + stepSec * 0.8,
                       Math.min(currentPlayheadSec + stepSec * 1.2, nextPlayheadSec + drift * 0.12)
                     );
-                  } else if (Math.abs(drift) >= 0.5 * rateScale && Math.abs(drift) < 2.0 * rateScale) {
+                  } else if (
+                    !inStartSettlingWindow &&
+                    Math.abs(drift) >= 0.5 * rateScale &&
+                    Math.abs(drift) < 2.0 * rateScale
+                  ) {
                     nextPlayheadSec =
                       drift > 0
                         ? Math.min(span.editedEndSec, nextPlayheadSec + drift * 0.25)
@@ -2354,7 +2707,7 @@ class AudioPreviewEngine {
         this.applySlewedVolume(clipHolder, clipGain, !this.wasPlaying || this.forceSeekPending);
         if ((clipEl.paused || clipEl.ended) && nowPerf - clipHolder.lastPlayRetryPerfMs > 240) {
           clipHolder.lastPlayRetryPerfMs = nowPerf;
-          void clipEl.play().catch(() => {});
+          this.safePlayElement(clipEl, this.playbackGeneration);
         }
       }
     }
@@ -2527,7 +2880,7 @@ class AudioPreviewEngine {
           state.loudnessAligned
         );
 
-        // Primary-Speaker Priority Auto-Ducking fallback (automatically lowers non-primary speaker tracks, including during speech overlaps!)
+        // Primary-Speaker Priority Auto-Ducking fallback (only ducks low-level floor noise/bleed; genuine speech on other tracks is left to the editor)
         const trackRecentlyOrSoonSpeaking =
           (this.speakerHoldUntilPerfMs.get(tr.id) ?? 0) > nowPerf;
 
@@ -2545,7 +2898,8 @@ class AudioPreviewEngine {
           state.autoSoloMode !== 'off' &&
           dominantSpeakerId &&
           dominantSpeakerId !== tr.id &&
-          !activeOvForTrack?.keepFullVolume
+          !trackRecentlyOrSoonSpeaking &&
+          !activeOvForTrack
         ) {
           if (state.autoSoloMode === 'hard_mute') {
             gain *= 0.06;
@@ -2554,12 +2908,11 @@ class AudioPreviewEngine {
               0.02,
               Math.min(0.50, Math.pow(10, state.duckAttenuationDb / 20))
             );
-            const overlapDuck = Math.max(0.22, Math.min(0.38, baseDuck * 2.0));
             const silentTurnDuck =
               state.recordingMode === 'same_room_sync'
                 ? Math.min(baseDuck, 0.04)
                 : baseDuck;
-            gain *= trackRecentlyOrSoonSpeaking || activeOvForTrack ? overlapDuck : silentTurnDuck;
+            gain *= silentTurnDuck;
           }
         }
       }
@@ -2596,7 +2949,7 @@ class AudioPreviewEngine {
             // ignore
           }
         }
-        void audioEl.play().catch((err) => {
+        this.safePlayElement(audioEl, this.playbackGeneration, (err) => {
           if (String(err).includes('NotAllowedError')) {
             this.emitPlaybackErrorOnce(
               `autoplay_${tr.id}`,
@@ -2670,13 +3023,13 @@ class AudioPreviewEngine {
     }
   > = new Map();
 
-  private stopWebAudioMainTracks(): void {
+  private stopWebAudioMainTracks(immediate = false): void {
     if (this.activeWebAudioMainTracks.size === 0) return;
     const ctx = this.ctx;
     const entries = Array.from(this.activeWebAudioMainTracks.values());
     this.activeWebAudioMainTracks.clear();
     for (const entry of entries) {
-      this.retireSkimTrack(entry, ctx, 0.012);
+      this.retireSkimTrack(entry, ctx, 0.012, immediate);
     }
   }
 
@@ -2695,8 +3048,10 @@ class AudioPreviewEngine {
   ): boolean {
     const ctx = this.ensureContext();
     if (!ctx) return false;
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       void ctx.resume();
+      this.stopWebAudioMainTracks();
+      return false;
     }
 
     const preloadTriggerInChunkSec = Math.max(
@@ -2784,7 +3139,8 @@ class AudioPreviewEngine {
           state.autoSoloMode !== 'off' &&
           dominantSpeakerId &&
           dominantSpeakerId !== tr.id &&
-          !activeOvForTrack?.keepFullVolume
+          !trackRecentlyOrSoonSpeaking &&
+          !activeOvForTrack
         ) {
           if (state.autoSoloMode === 'hard_mute') {
             gain *= 0.06;
@@ -2793,12 +3149,11 @@ class AudioPreviewEngine {
               0.02,
               Math.min(0.5, Math.pow(10, state.duckAttenuationDb / 20))
             );
-            const overlapDuck = Math.max(0.22, Math.min(0.38, baseDuck * 2.0));
             const silentTurnDuck =
               state.recordingMode === 'same_room_sync'
                 ? Math.min(baseDuck, 0.04)
                 : baseDuck;
-            gain *= trackRecentlyOrSoonSpeaking || activeOvForTrack ? overlapDuck : silentTurnDuck;
+            gain *= silentTurnDuck;
           }
         }
       }
@@ -2824,7 +3179,7 @@ class AudioPreviewEngine {
           crossedCutOrScrub ||
           existing.chunkIdx !== chunkIdx ||
           Math.abs(existing.playbackRate - effectiveRate) > 0.015 ||
-          drift > 0.045 * effectiveRate ||
+          drift > 0.15 * effectiveRate ||
           expectedInChunk >= buf.duration - 0.04 * effectiveRate;
         if (!needsResync) {
           existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
@@ -2941,7 +3296,7 @@ class AudioPreviewEngine {
           this.seekHolderOnSpliceOnly(voHolder, offsetInVo, voNeedInitialSeek && crossedCutOrScrub, 0.9, 1200);
           if (voEl.paused && !voEl.ended && !voEl.seeking && nowPerf - voHolder.lastPlayRetryPerfMs > 300) {
             voHolder.lastPlayRetryPerfMs = nowPerf;
-            void voEl.play().catch(() => {});
+            this.safePlayElement(voEl, this.playbackGeneration);
           }
         }
       }
@@ -3059,7 +3414,7 @@ class AudioPreviewEngine {
         nowPerf - holder.lastPlayRetryPerfMs > 300
       ) {
         holder.lastPlayRetryPerfMs = nowPerf;
-        void holder.audio.play().catch(() => {});
+        this.safePlayElement(holder.audio, this.playbackGeneration);
       }
     };
 
@@ -3281,8 +3636,23 @@ class AudioPreviewEngine {
       gainNode: GainNode;
     },
     ctx: AudioContext | null,
-    fadeSec = 0.014
+    fadeSec = 0.014,
+    immediate = false
   ): void {
+    if (immediate) {
+      try {
+        entry.source.stop();
+      } catch {
+        // Ignore already-stopped source
+      }
+      try {
+        entry.source.disconnect();
+        entry.gainNode.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
+      return;
+    }
     try {
       if (ctx) {
         const now = ctx.currentTime;
@@ -3294,15 +3664,19 @@ class AudioPreviewEngine {
         entry.source.stop();
       }
     } catch {
-      // Ignore already-stopped source
+      try {
+        entry.source.stop();
+      } catch {
+        // Ignore already-stopped source
+      }
     }
   }
 
   /** Resumes Web AudioContext on user gesture (keydown / pointerdown) so skimming never stays muted */
   public resumeContextForUserGesture(): void {
     const ctx = this.ensureContext();
-    if (ctx && ctx.state === 'suspended') {
-      void ctx.resume();
+    if (ctx && ctx.state !== 'running') {
+      this.unlockContextOnGesture(ctx);
     }
   }
 
@@ -3322,13 +3696,13 @@ class AudioPreviewEngine {
   }
 
   /** Smoothly fades out and stops all active Web Audio skim sources */
-  public stopSkim(): void {
+  public stopSkim(immediate = false): void {
     if (this.activeSkimTracks.size === 0) return;
     const ctx = this.ctx;
     const entries = Array.from(this.activeSkimTracks.values());
     this.activeSkimTracks.clear();
     for (const entry of entries) {
-      this.retireSkimTrack(entry, ctx, 0.018);
+      this.retireSkimTrack(entry, ctx, 0.018, immediate);
     }
   }
 
@@ -3346,8 +3720,9 @@ class AudioPreviewEngine {
   ): boolean {
     const ctx = this.ensureContext();
     if (!ctx) return false;
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       void ctx.resume();
+      return false;
     }
 
     const useProxy = state.proxyEditingEnabled !== false;
@@ -3380,10 +3755,11 @@ class AudioPreviewEngine {
     if (!anyDecoded) return false;
 
     const now = ctx.currentTime;
-    const safeRate = Math.max(0.5, Math.min(3.5, playbackRate || 1.0));
+    const safeRate = 1.0;
     const anySolo = playableTracks.some((t) => t.solo);
     const playableAutoGainDbs = playableTracks.map((t) => t.autoGainDb || 0);
     const dominantSpeakerId = mapped.activeSpeakerId ?? this.lastHeldSpeakerId;
+    const acousticProfiles = this.getAcousticProfiles(state.tracks);
     const activeIds = new Set<string>();
 
     for (const tr of playableTracks) {
@@ -3422,11 +3798,19 @@ class AudioPreviewEngine {
         playableAutoGainDbs,
         state.loudnessAligned
       );
+      const skimVocalActivity = sampleNormalizedVocalActivity(
+        tr,
+        acousticProfiles.get(tr.id),
+        mapped.sourceSec * 1000,
+        state.recordingMode,
+        55
+      );
       if (
         playableTracks.length > 1 &&
         state.autoSoloMode !== 'off' &&
         dominantSpeakerId &&
-        dominantSpeakerId !== tr.id
+        dominantSpeakerId !== tr.id &&
+        skimVocalActivity < 0.24
       ) {
         if (state.autoSoloMode === 'hard_mute') {
           gain *= 0.06;
@@ -3445,14 +3829,10 @@ class AudioPreviewEngine {
           existing.startedSourceSec + (now - existing.startedCtxTime) * existing.playbackRate;
         const drift = targetSec - expectedSec;
         if (drift >= -0.025 && drift <= 0.055 && expectedSec < buf.duration - 0.05) {
-          const steeredRate = Math.max(
-            0.5,
-            Math.min(3.5, safeRate + drift * 3.0)
-          );
           existing.startedSourceSec = expectedSec;
           existing.startedCtxTime = now;
-          existing.playbackRate = steeredRate;
-          existing.source.playbackRate.setTargetAtTime(steeredRate, now, 0.015);
+          existing.playbackRate = safeRate;
+          existing.source.playbackRate.setTargetAtTime(safeRate, now, 0.015);
           existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
           activeIds.add(tr.id);
           continue;

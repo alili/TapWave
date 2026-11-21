@@ -3,6 +3,9 @@ import { createEmptyProjectState } from '../data/emptyProject';
 import {
   applyEditingHabitProfileConfig,
   buildEditingHabitProfileConfig,
+  computeTimelineCutIntervalSec,
+  CUT_CATEGORY_META,
+  CUT_CATEGORY_ORDER,
   extractAllCutPoints,
   generateCutAnalysisReport,
   undoCutPoint,
@@ -240,5 +243,52 @@ describe('cutAnalysisEngine', () => {
     expect(nextState.stripSilenceThresholdSec).toBe(0.72);
     expect(nextState.cutPrerollSec).toBe(1.5);
     expect(appliedProfile.cutPrerollSec).toBe(1.5);
+  });
+
+  it('provides distinct category metadata colors and timeline cut intervals for sidebar & waveform sync', () => {
+    const colors = new Set(CUT_CATEGORY_ORDER.map((cat) => CUT_CATEGORY_META[cat].color));
+    expect(colors.size).toBe(CUT_CATEGORY_ORDER.length);
+    for (const cat of CUT_CATEGORY_ORDER) {
+      expect(CUT_CATEGORY_META[cat].label.length).toBeGreaterThan(0);
+      expect(CUT_CATEGORY_META[cat].shortLabel.length).toBeGreaterThan(0);
+    }
+
+    const state = buildTestProject();
+    const timeline = computeEditedTimeline(state);
+    const cuts = extractAllCutPoints(state, timeline);
+    const muteCut = cuts.find((c) => c.category === 'track_mute');
+    const fillerCut = cuts.find((c) => c.category === 'filler');
+    expect(muteCut).toBeDefined();
+    expect(fillerCut).toBeDefined();
+
+    const muteSpan = computeTimelineCutIntervalSec(muteCut!);
+    expect(muteSpan.isSpan).toBe(true);
+    expect(muteSpan.endSec).toBeGreaterThan(muteSpan.startSec);
+
+    const fillerSpan = computeTimelineCutIntervalSec(fillerCut!);
+    expect(fillerSpan.isSpan).toBe(false);
+    expect(fillerSpan.endSec).toBe(fillerSpan.startSec);
+  });
+
+  it('aggregates per-speaker cut category breakdown in analysis report', () => {
+    const state = buildTestProject();
+    const timeline = computeEditedTimeline(state);
+    const report = generateCutAnalysisReport(state, timeline);
+
+    const host = report.speakerSuggestions.find((s) => s.speakerId === 'sp_host');
+    const guest = report.speakerSuggestions.find((s) => s.speakerId === 'sp_guest');
+    expect(host).toBeDefined();
+    expect(guest).toBeDefined();
+
+    expect(host!.categoryBreakdown.some((b) => b.category === 'filler' && b.count >= 1)).toBe(true);
+    expect(host!.categoryBreakdown.some((b) => b.category === 'track_mute' && b.count >= 1)).toBe(true);
+    expect(guest!.categoryBreakdown.some((b) => b.category === 'filler' && b.count >= 1)).toBe(true);
+    expect(guest!.categoryBreakdown.some((b) => b.category === 'pause_tighten' && b.count >= 1)).toBe(true);
+    expect(guest!.categoryBreakdown.some((b) => b.category === 'waveform_cut' && b.count >= 1)).toBe(true);
+
+    const hostSumCount = host!.categoryBreakdown.reduce((s, b) => s + b.count, 0);
+    const guestSumCount = guest!.categoryBreakdown.reduce((s, b) => s + b.count, 0);
+    expect(hostSumCount).toBe(host!.cutCount);
+    expect(guestSumCount).toBe(guest!.cutCount);
   });
 });

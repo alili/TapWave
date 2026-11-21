@@ -1790,7 +1790,7 @@ export function computeAutoScrollViewStartRatio(input: WaveformAutoScrollInput):
   return curStart;
 }
 
-export const WORD_TIMELINE_MIN_ZOOM = 100;
+export const WORD_TIMELINE_MIN_ZOOM = 101;
 
 export function isWordTimelineZoom(zoom: number): boolean {
   return Number.isFinite(zoom) && Math.round(zoom) >= WORD_TIMELINE_MIN_ZOOM;

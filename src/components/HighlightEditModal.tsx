@@ -136,9 +136,16 @@ export const HighlightEditModal: React.FC<HighlightEditModalProps> = ({
             { once: true }
           );
         }
-        void audio.play().catch((err) => {
-          console.warn('Audio preview play non-fatal error:', err);
-        });
+        void audio
+          .play()
+          .then(() => {
+            if (audioRef.current !== audio) {
+              audio?.pause();
+            }
+          })
+          .catch((err) => {
+            console.warn('Audio preview play non-fatal error:', err);
+          });
       } catch (err) {
         console.warn('Failed to create preview Audio element:', err);
       }

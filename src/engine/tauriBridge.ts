@@ -515,9 +515,16 @@ export async function saveTextOrJsonFile(
       filters: [{ name: filterName, extensions }],
     });
     if (!chosen) return null;
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    await writeTextFile(chosen, content);
-    return chosen;
+    try {
+      return await invoke<string>('save_project_file', {
+        filePath: chosen,
+        contentJson: content,
+      });
+    } catch {
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+      await writeTextFile(chosen, content);
+      return chosen;
+    }
   }
 
   triggerBrowserBlobDownload(
@@ -535,6 +542,9 @@ export async function savePngDataUrlFile(
   dataUrl: string
 ): Promise<string | null> {
   const base64 = dataUrl.split(',')[1] ?? '';
+  if (!base64) {
+    throw new Error('PNG 图像渲染结果为空');
+  }
   const binStr = atob(base64);
   const bytes = new Uint8Array(binStr.length);
   for (let i = 0; i < binStr.length; i++) {
@@ -548,9 +558,17 @@ export async function savePngDataUrlFile(
       filters: [{ name: 'PNG 图片', extensions: ['png'] }],
     });
     if (!chosen) return null;
-    const { writeFile } = await import('@tauri-apps/plugin-fs');
-    await writeFile(chosen, bytes);
-    return chosen;
+    const targetPath = chosen.toLowerCase().endsWith('.png') ? chosen : `${chosen}.png`;
+    try {
+      return await invoke<string>('save_binary_file', {
+        filePath: targetPath,
+        bytes: Array.from(bytes),
+      });
+    } catch {
+      const { writeFile } = await import('@tauri-apps/plugin-fs');
+      await writeFile(targetPath, bytes);
+      return targetPath;
+    }
   }
 
   triggerBrowserBlobDownload(
