@@ -1,6 +1,6 @@
 [package]
 name = "podcraft-studio"
-version = "2.2.1"
+version = "2.2.2"
 description = "点波 TapWave"
 authors = ["TapWave Team"]
 edition = "2021"

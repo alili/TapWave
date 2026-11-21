@@ -20,8 +20,10 @@ import {
   Library,
   LocateFixed,
   Music,
+  PanelBottom,
   PanelLeft,
   PanelRight,
+  PanelTop,
   Pause,
   Play,
   Radio,
@@ -80,6 +82,8 @@ interface TopStudioBarProps {
   rightPaneCollapsed?: boolean;
   onToggleLeftPane?: () => void;
   onToggleRightPane?: () => void;
+  speakerDeckPosition?: 'top' | 'bottom';
+  onChangeSpeakerDeckPosition?: (pos: 'top' | 'bottom') => void;
   onOpenShortcuts?: () => void;
   onOpenGlobalAuxLibrary?: (slot?: AuxAudioSlot) => void;
   onOpenIntroEditor?: () => void;
@@ -128,6 +132,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
   rightPaneCollapsed = false,
   onToggleLeftPane,
   onToggleRightPane,
+  speakerDeckPosition = 'top',
+  onChangeSpeakerDeckPosition,
   onOpenShortcuts,
   onOpenGlobalAuxLibrary,
   onOpenIntroEditor,
@@ -141,7 +147,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
 }) => {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(state.projectTitle);
-  const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'view' | 'settings' | 'aux_bgm' | null>(null);
+  const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'view' | 'tools' | null>(null);
+  const [toolsSubAuxOpen, setToolsSubAuxOpen] = useState(false);
   const menuBarRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -314,6 +321,22 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                     type="button"
                     onClick={() => {
                       setOpenMenu(null);
+                      onOpenImportModal();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
+                  >
+                    <span className="flex items-center gap-2">
+                      <FolderPlus className="w-3.5 h-3.5 text-blue-400" />
+                      <span>导入音频与 AI 识别...</span>
+                    </span>
+                  </button>
+
+                  <div className="my-1 border-t border-zinc-800" />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
                       onSaveProjectFile(false);
                     }}
                     className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
@@ -338,6 +361,21 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                       <span>另存为...</span>
                     </span>
                     <span className="text-[11px] font-mono text-zinc-500">⇧⌘S</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!hasContent}
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onQuickExportAudio();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-200 flex items-center justify-between cursor-pointer transition"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Download className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>导出 MP3 成片 (-16 LUFS)</span>
+                    </span>
                   </button>
 
                   {onRegisterFileAssociation && (
@@ -418,13 +456,19 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
               )}
             </div>
 
-            {/* Edit 菜单 */}
+            {/* Edit 菜单：剪辑策略与音频处理 */}
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setOpenMenu(openMenu === 'edit' ? null : 'edit')}
+                onClick={() => {
+                  setToolsSubAuxOpen(false);
+                  setOpenMenu(openMenu === 'edit' ? null : 'edit');
+                }}
                 onMouseEnter={() => {
-                  if (openMenu && openMenu !== 'edit') setOpenMenu('edit');
+                  if (openMenu && openMenu !== 'edit') {
+                    setToolsSubAuxOpen(false);
+                    setOpenMenu('edit');
+                  }
                 }}
                 className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
                   openMenu === 'edit'
@@ -436,292 +480,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
               </button>
 
               {openMenu === 'edit' && (
-                <div className="absolute left-0 mt-1 w-64 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-1.5 z-50 text-xs backdrop-blur-md space-y-0.5">
-                  {onOpenShortcuts && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenMenu(null);
-                        onOpenShortcuts();
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Keyboard className="w-3.5 h-3.5 text-blue-400" />
-                        <span>快捷键说明...</span>
-                      </span>
-                      <span className="text-[11px] font-mono text-zinc-500">?</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* View 菜单 */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setOpenMenu(openMenu === 'view' ? null : 'view')}
-                onMouseEnter={() => {
-                  if (openMenu && openMenu !== 'view') setOpenMenu('view');
-                }}
-                className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
-                  openMenu === 'view'
-                    ? 'bg-zinc-800 text-white'
-                    : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60'
-                }`}
-              >
-                视图
-              </button>
-
-              {openMenu === 'view' && (
-                <div className="absolute left-0 mt-1 w-64 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-1.5 z-50 text-xs backdrop-blur-md space-y-0.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      onSetWorkspaceLayout('multitrack');
-                    }}
-                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
-                      layoutMode === 'multitrack'
-                        ? 'bg-emerald-500/15 text-emerald-300 font-medium'
-                        : 'hover:bg-zinc-800 text-zinc-200'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2">
-                      <span>🎛️</span>
-                      <span>音轨主视图</span>
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-mono text-zinc-500">⌥ 1</span>
-                      {layoutMode === 'multitrack' && (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      )}
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      onSetWorkspaceLayout('transcript');
-                    }}
-                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
-                      layoutMode === 'transcript'
-                        ? 'bg-blue-500/15 text-blue-300 font-medium'
-                        : 'hover:bg-zinc-800 text-zinc-200'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2">
-                      <span>📝</span>
-                      <span>文稿视图</span>
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-mono text-zinc-500">⌥ 2</span>
-                      {layoutMode === 'transcript' && (
-                        <Check className="w-3.5 h-3.5 text-blue-400" />
-                      )}
-                    </div>
-                  </button>
-
-                  {(onToggleLeftPane || onToggleRightPane) && (
-                    <div className="my-1 border-t border-zinc-800" />
-                  )}
-
-                  {onToggleLeftPane && (
-                    <button
-                      type="button"
-                      disabled={layoutMode === 'transcript'}
-                      onClick={() => {
-                        setOpenMenu(null);
-                        onToggleLeftPane();
-                      }}
-                      className={`w-full px-2.5 py-1.5 rounded-lg text-zinc-200 flex items-center justify-between cursor-pointer transition ${
-                        layoutMode === 'transcript'
-                          ? 'opacity-40 cursor-not-allowed text-zinc-500'
-                          : 'hover:bg-zinc-800'
-                      }`}
-                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
-                    >
-                      <span className="flex items-center gap-2">
-                        <PanelLeft className="w-3.5 h-3.5 text-zinc-400" />
-                        <span>左侧音轨栏</span>
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-zinc-500">⌘ [</span>
-                        {layoutMode === 'transcript' ? (
-                          <span className="text-[10px] text-zinc-500">文稿全宽</span>
-                        ) : !leftPaneCollapsed ? (
-                          <span className="text-[10px] text-emerald-400 font-medium">显示</span>
-                        ) : (
-                          <span className="text-[10px] text-zinc-500">隐藏</span>
-                        )}
-                      </div>
-                    </button>
-                  )}
-
-                  {onToggleRightPane && (
-                    <button
-                      type="button"
-                      disabled={!hasContent || layoutMode === 'transcript'}
-                      onClick={() => {
-                        setOpenMenu(null);
-                        onToggleRightPane();
-                      }}
-                      className={`w-full px-2.5 py-1.5 rounded-lg text-zinc-200 flex items-center justify-between cursor-pointer transition ${
-                        !hasContent || layoutMode === 'transcript'
-                          ? 'opacity-40 cursor-not-allowed text-zinc-500'
-                          : 'hover:bg-zinc-800'
-                      }`}
-                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
-                    >
-                      <span className="flex items-center gap-2">
-                        <PanelRight className="w-3.5 h-3.5 text-zinc-400" />
-                        <span>右侧 AI 工作台</span>
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-zinc-500">⌘ ]</span>
-                        {layoutMode === 'transcript' ? (
-                          <span className="text-[10px] text-zinc-500">文稿全宽</span>
-                        ) : hasContent && !rightPaneCollapsed ? (
-                          <span className="text-[10px] text-emerald-400 font-medium">显示</span>
-                        ) : (
-                          <span className="text-[10px] text-zinc-500">隐藏</span>
-                        )}
-                      </div>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* 音频与剪辑设置 下拉菜单 */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setOpenMenu(openMenu === 'settings' ? null : 'settings')}
-                onMouseEnter={() => {
-                  if (openMenu && openMenu !== 'settings') setOpenMenu('settings');
-                }}
-                className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1 ${
-                  openMenu === 'settings'
-                    ? 'bg-zinc-800 text-white'
-                    : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60'
-                }`}
-              >
-                <span>音频与剪辑</span>
-              </button>
-
-              {openMenu === 'settings' && (
                 <div className="absolute left-0 mt-1 w-80 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-2 z-50 text-xs backdrop-blur-md space-y-2 max-h-[85vh] overflow-y-auto">
-                  {/* 分组一：录音与多轨校准 */}
-                  <div className="space-y-1">
-                    <div className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
-                      <span>🎙️</span>
-                      <span>录音与多轨校准</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={onToggleRecordingMode}
-                      title="同屋模式默认各轨等长 0ms 免校准直通；异地模式按合并参考轨执行 GCC-PHAT 互相关偏移校准"
-                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
-                    >
-                      <span className="flex items-center gap-2">
-                        {state.recordingMode === 'same_room_sync' ? (
-                          <Home className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <Radio className="w-3.5 h-3.5 text-amber-400" />
-                        )}
-                        <span>录音校准模式</span>
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300">
-                        {state.recordingMode === 'same_room_sync' ? '同屋 0ms' : '多设备校准'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={onCycleAutoSolo}
-                      title="一人发言时自动抑制其余麦位房间回声、桌振串音与环境底噪"
-                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Sliders className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>非主讲抑回声</span>
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
-                          state.autoSoloMode !== 'off'
-                            ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300'
-                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
-                        }`}
-                      >
-                        {soloLabel}
-                      </span>
-                    </button>
-                  </div>
-
-                  <div className="border-t border-zinc-800/80 my-1" />
-
-                  {/* 分组二：声学处理与母带 */}
-                  <div className="space-y-1">
-                    <div className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
-                      <span>🎚️</span>
-                      <span>声学处理与母带</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={onToggleLoudness}
-                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Volume2 className="w-3.5 h-3.5 text-blue-400" />
-                        <span>广播级响度标准化</span>
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
-                          state.loudnessAligned
-                            ? 'border-blue-500/45 bg-blue-500/15 text-blue-300'
-                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
-                        }`}
-                      >
-                        {state.loudnessAligned ? '-16 LUFS' : '关'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={onCycleDeClick}
-                      title="实时审听与导出 MP3 自动抑制唇齿口水音、咂嘴瞬态与气口粘连杂音"
-                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Droplets className="w-3.5 h-3.5 text-teal-400" />
-                        <span>去除口水音滤波</span>
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
-                          state.deClickEnabled
-                            ? state.deClickStrength === 'strong'
-                              ? 'border-cyan-400/55 bg-cyan-500/20 text-cyan-200'
-                              : 'border-teal-500/45 bg-teal-500/15 text-teal-300'
-                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
-                        }`}
-                      >
-                        {state.deClickEnabled
-                          ? state.deClickStrength === 'strong'
-                            ? '强力'
-                            : '标准'
-                          : '关'}
-                      </span>
-                    </button>
-                  </div>
-
-                  <div className="border-t border-zinc-800/80 my-1" />
-
-                  {/* 分组三：智能剪辑与审听 */}
+                  {/* 分组一：智能剪辑与审听 */}
                   <div className="space-y-1">
                     <div className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
                       <span>✂️</span>
@@ -831,67 +591,375 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
 
                   <div className="border-t border-zinc-800/80 my-1" />
 
-                  {/* 分组四：运行环境与素材库 */}
+                  {/* 分组二：声学校准与母带处理 */}
                   <div className="space-y-1">
                     <div className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1">
-                      <span>⚙️</span>
-                      <span>运行环境与全局素材库</span>
+                      <span>🎚️</span>
+                      <span>声学校准与母带处理</span>
                     </div>
 
-                    {onOpenGlobalAuxLibrary && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpenMenu(null);
-                          onOpenGlobalAuxLibrary();
-                        }}
-                        className="w-full px-2 py-1.5 rounded-lg hover:bg-purple-500/15 flex items-center justify-between gap-2 text-xs text-purple-200 cursor-pointer transition"
-                      >
-                        <span className="flex items-center gap-2">
-                          <Library className="w-3.5 h-3.5 text-purple-400" />
-                          <span>固定口播 / 片头尾 BGM 库</span>
-                        </span>
-                        <span className="text-[10px] text-purple-300/80">管理 →</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={onToggleRecordingMode}
+                      title="同屋模式默认各轨等长 0ms 免校准直通；异地模式按合并参考轨执行 GCC-PHAT 互相关偏移校准"
+                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        {state.recordingMode === 'same_room_sync' ? (
+                          <Home className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Radio className="w-3.5 h-3.5 text-amber-400" />
+                        )}
+                        <span>录音校准模式</span>
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300">
+                        {state.recordingMode === 'same_room_sync' ? '同屋 0ms' : '多设备校准'}
+                      </span>
+                    </button>
 
-                    {onOpenDepGuide && (
+                    <button
+                      type="button"
+                      onClick={onCycleAutoSolo}
+                      title="一人发言时自动抑制其余麦位房间回声、桌振串音与环境底噪"
+                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Sliders className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>非主讲抑回声</span>
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
+                          state.autoSoloMode !== 'off'
+                            ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300'
+                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
+                        }`}
+                      >
+                        {soloLabel}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={onToggleLoudness}
+                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Volume2 className="w-3.5 h-3.5 text-blue-400" />
+                        <span>广播级响度标准化</span>
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
+                          state.loudnessAligned
+                            ? 'border-blue-500/45 bg-blue-500/15 text-blue-300'
+                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
+                        }`}
+                      >
+                        {state.loudnessAligned ? '-16 LUFS' : '关'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={onCycleDeClick}
+                      title="实时审听与导出 MP3 自动抑制唇齿口水音、咂嘴瞬态与气口粘连杂音"
+                      className="w-full px-2 py-1.5 rounded-lg hover:bg-zinc-800/90 flex items-center justify-between gap-2 text-xs text-zinc-200 cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Droplets className="w-3.5 h-3.5 text-teal-400" />
+                        <span>去除口水音滤波</span>
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[11px] ${
+                          state.deClickEnabled
+                            ? state.deClickStrength === 'strong'
+                              ? 'border-cyan-400/55 bg-cyan-500/20 text-cyan-200'
+                              : 'border-teal-500/45 bg-teal-500/15 text-teal-300'
+                            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
+                        }`}
+                      >
+                        {state.deClickEnabled
+                          ? state.deClickStrength === 'strong'
+                            ? '强力'
+                            : '标准'
+                          : '关'}
+                      </span>
+                    </button>
+                  </div>
+
+                  {onOpenShortcuts && (
+                    <>
+                      <div className="border-t border-zinc-800/80 my-1" />
                       <button
                         type="button"
                         onClick={() => {
                           setOpenMenu(null);
-                          onOpenDepGuide();
+                          onOpenShortcuts();
                         }}
-                        className="w-full px-2 py-1.5 rounded-lg hover:bg-cyan-500/15 flex items-center justify-between gap-2 text-xs text-cyan-200 cursor-pointer transition"
+                        className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
                       >
                         <span className="flex items-center gap-2">
-                          <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-                          <span>AI 语音引擎与离线模型环境</span>
+                          <Keyboard className="w-3.5 h-3.5 text-blue-400" />
+                          <span>快捷键说明...</span>
                         </span>
-                        <span className="text-[10px] text-cyan-400/80">检测/下载 →</span>
+                        <span className="text-[11px] font-mono text-zinc-500">?</span>
                       </button>
-                    )}
-                  </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* 片头口播与 BGM 下拉菜单 */}
+            {/* View 菜单：工作区模式与面板布局 */}
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setOpenMenu(openMenu === 'aux_bgm' ? null : 'aux_bgm')}
-                onMouseEnter={() => {
-                  if (openMenu && openMenu !== 'aux_bgm') setOpenMenu('aux_bgm');
+                onClick={() => {
+                  setToolsSubAuxOpen(false);
+                  setOpenMenu(openMenu === 'view' ? null : 'view');
                 }}
-                className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                  openMenu === 'aux_bgm'
+                onMouseEnter={() => {
+                  if (openMenu && openMenu !== 'view') {
+                    setToolsSubAuxOpen(false);
+                    setOpenMenu('view');
+                  }
+                }}
+                className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
+                  openMenu === 'view'
                     ? 'bg-zinc-800 text-white'
                     : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60'
                 }`}
               >
-                <Music className="w-3.5 h-3.5 text-blue-400" />
-                <span>片头口播与BGM</span>
+                视图
+              </button>
+
+              {openMenu === 'view' && (
+                <div className="absolute left-0 mt-1 w-68 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-1.5 z-50 text-xs backdrop-blur-md space-y-0.5">
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    工作区模式
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onSetWorkspaceLayout('multitrack');
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
+                      layoutMode === 'multitrack'
+                        ? 'bg-emerald-500/15 text-emerald-300 font-medium'
+                        : 'hover:bg-zinc-800 text-zinc-200'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>🎛️</span>
+                      <span>音轨主视图</span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-zinc-500">⌥ 1</span>
+                      {layoutMode === 'multitrack' && (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onSetWorkspaceLayout('transcript');
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
+                      layoutMode === 'transcript'
+                        ? 'bg-blue-500/15 text-blue-300 font-medium'
+                        : 'hover:bg-zinc-800 text-zinc-200'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>📝</span>
+                      <span>文稿视图</span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-zinc-500">⌥ 2</span>
+                      {layoutMode === 'transcript' && (
+                        <Check className="w-3.5 h-3.5 text-blue-400" />
+                      )}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onSetWorkspaceLayout('intro');
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
+                      layoutMode === 'intro'
+                        ? 'bg-purple-500/15 text-purple-300 font-medium'
+                        : 'hover:bg-zinc-800 text-zinc-200'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>🎬</span>
+                      <span>片头视图</span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-zinc-500">⌥ 3</span>
+                      {layoutMode === 'intro' && (
+                        <Check className="w-3.5 h-3.5 text-purple-400" />
+                      )}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onSetWorkspaceLayout('outro');
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between cursor-pointer transition ${
+                      layoutMode === 'outro'
+                        ? 'bg-emerald-500/15 text-emerald-300 font-medium'
+                        : 'hover:bg-zinc-800 text-zinc-200'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span>🎵</span>
+                      <span>片尾视图</span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-zinc-500">⌥ 4</span>
+                      {layoutMode === 'outro' && (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                  </button>
+
+                  <div className="my-1 border-t border-zinc-800" />
+
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    音轨区布局设置
+                  </div>
+
+                  {onChangeSpeakerDeckPosition && (
+                    <div className="px-2 py-1.5 rounded-lg bg-zinc-950/60 border border-zinc-800/80 flex items-center justify-between gap-2">
+                      <span className="text-zinc-300 text-[11px]">发言块位置</span>
+                      <div className="inline-flex items-center rounded-md bg-zinc-900 border border-zinc-800 p-0.5 gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onChangeSpeakerDeckPosition('top')}
+                          className={`px-2 py-0.5 rounded text-[10px] inline-flex items-center gap-1 cursor-pointer transition ${
+                            speakerDeckPosition === 'top'
+                              ? 'bg-blue-600 text-white font-medium'
+                              : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          <PanelTop className="w-3 h-3" />
+                          <span>上方</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onChangeSpeakerDeckPosition('bottom')}
+                          className={`px-2 py-0.5 rounded text-[10px] inline-flex items-center gap-1 cursor-pointer transition ${
+                            speakerDeckPosition === 'bottom'
+                              ? 'bg-blue-600 text-white font-medium'
+                              : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          <PanelBottom className="w-3 h-3" />
+                          <span>下方</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {onToggleLeftPane && (
+                    <button
+                      type="button"
+                      disabled={layoutMode === 'transcript'}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onToggleLeftPane();
+                      }}
+                      className={`w-full px-2.5 py-1.5 rounded-lg text-zinc-200 flex items-center justify-between cursor-pointer transition ${
+                        layoutMode === 'transcript'
+                          ? 'opacity-40 cursor-not-allowed text-zinc-500'
+                          : 'hover:bg-zinc-800'
+                      }`}
+                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
+                    >
+                      <span className="flex items-center gap-2">
+                        <PanelLeft className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>左侧音轨栏</span>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-zinc-500">⌘ [</span>
+                        {layoutMode === 'transcript' ? (
+                          <span className="text-[10px] text-zinc-500">文稿全宽</span>
+                        ) : !leftPaneCollapsed ? (
+                          <span className="text-[10px] text-emerald-400 font-medium">显示</span>
+                        ) : (
+                          <span className="text-[10px] text-zinc-500">隐藏</span>
+                        )}
+                      </div>
+                    </button>
+                  )}
+
+                  {onToggleRightPane && (
+                    <button
+                      type="button"
+                      disabled={!hasContent || layoutMode === 'transcript'}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onToggleRightPane();
+                      }}
+                      className={`w-full px-2.5 py-1.5 rounded-lg text-zinc-200 flex items-center justify-between cursor-pointer transition ${
+                        !hasContent || layoutMode === 'transcript'
+                          ? 'opacity-40 cursor-not-allowed text-zinc-500'
+                          : 'hover:bg-zinc-800'
+                      }`}
+                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
+                    >
+                      <span className="flex items-center gap-2">
+                        <PanelRight className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>右侧 AI 工作台</span>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-zinc-500">⌘ ]</span>
+                        {layoutMode === 'transcript' ? (
+                          <span className="text-[10px] text-zinc-500">文稿全宽</span>
+                        ) : hasContent && !rightPaneCollapsed ? (
+                          <span className="text-[10px] text-emerald-400 font-medium">显示</span>
+                        ) : (
+                          <span className="text-[10px] text-zinc-500">隐藏</span>
+                        )}
+                      </div>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 工具菜单：折叠低频片头配置、素材库与引擎环境 */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setToolsSubAuxOpen(false);
+                  setOpenMenu(openMenu === 'tools' ? null : 'tools');
+                }}
+                onMouseEnter={() => {
+                  if (openMenu && openMenu !== 'tools') {
+                    setToolsSubAuxOpen(false);
+                    setOpenMenu('tools');
+                  }
+                }}
+                className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                  openMenu === 'tools'
+                    ? 'bg-zinc-800 text-white'
+                    : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60'
+                }`}
+              >
+                <span>工具</span>
                 {((state.introVoiceover?.enabled ? 1 : 0) +
                   (state.introBgm?.enabled ? 1 : 0) +
                   (state.outroBgm?.enabled ? 1 : 0)) > 0 && (
@@ -899,37 +967,136 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                 )}
               </button>
 
-              {openMenu === 'aux_bgm' && (
-                <div className="absolute left-0 mt-1 z-50">
-                  <AuxBgmConfigMenu
-                    state={state}
-                    onImportBgm={onImportBgm || (() => {})}
-                    onToggleBgmEnabled={onToggleBgmEnabled || (() => {})}
-                    onRemoveBgm={onRemoveBgm || (() => {})}
-                    onSaveSlotToGlobalLibrary={onSaveSlotToGlobalLibrary}
-                    onOpenGlobalAuxLibrary={onOpenGlobalAuxLibrary}
-                    onUpdateState={onUpdateState || (() => {})}
-                    onNotify={onNotify || (() => {})}
-                    onClose={() => setOpenMenu(null)}
-                  />
+              {openMenu === 'tools' && (
+                <div className="absolute left-0 mt-1 w-72 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-1.5 z-50 text-xs backdrop-blur-md space-y-0.5">
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    片头口播与素材管理
+                  </div>
+
+                  {/* 二级面板：片头口播与 BGM */}
+                  <div
+                    className="relative"
+                    onMouseEnter={() => setToolsSubAuxOpen(true)}
+                    onMouseLeave={() => setToolsSubAuxOpen(false)}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setToolsSubAuxOpen((v) => !v)}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Music className="w-3.5 h-3.5 text-blue-400" />
+                        <span>片头口播与 BGM 设置</span>
+                      </span>
+                      <span className="text-[10px] text-zinc-400 flex items-center gap-1">
+                        {((state.introVoiceover?.enabled ? 1 : 0) +
+                          (state.introBgm?.enabled ? 1 : 0) +
+                          (state.outroBgm?.enabled ? 1 : 0)) > 0 && (
+                          <span className="text-blue-400">已启用</span>
+                        )}
+                        <ChevronRight className="w-3 h-3 text-zinc-500" />
+                      </span>
+                    </button>
+
+                    {toolsSubAuxOpen && (
+                      <div className="absolute left-full top-0 ml-1 z-50">
+                        <AuxBgmConfigMenu
+                          state={state}
+                          onImportBgm={onImportBgm || (() => {})}
+                          onToggleBgmEnabled={onToggleBgmEnabled || (() => {})}
+                          onRemoveBgm={onRemoveBgm || (() => {})}
+                          onSaveSlotToGlobalLibrary={onSaveSlotToGlobalLibrary}
+                          onOpenGlobalAuxLibrary={onOpenGlobalAuxLibrary}
+                          onUpdateState={onUpdateState || (() => {})}
+                          onNotify={onNotify || (() => {})}
+                          onClose={() => {
+                            setToolsSubAuxOpen(false);
+                            setOpenMenu(null);
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {onOpenIntroEditor && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onOpenIntroEditor();
+                      }}
+                      title="打开独立片头多轨编辑器（移动/缩放金句、拖动口播位置、音轨段落静音、预览BGM避让）"
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-purple-500/15 text-purple-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                        <span>打开独立片头多轨编辑器</span>
+                      </span>
+                      {(state.coldOpenEnabled || state.introVoiceover?.enabled || state.introBgm?.enabled) && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                      )}
+                    </button>
+                  )}
+
+                  {onOpenGlobalAuxLibrary && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onOpenGlobalAuxLibrary();
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Library className="w-3.5 h-3.5 text-purple-400" />
+                        <span>固定口播 / 片头尾 BGM 库</span>
+                      </span>
+                      <span className="text-[10px] text-zinc-400">管理 →</span>
+                    </button>
+                  )}
+
+                  <div className="my-1 border-t border-zinc-800" />
+
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    内容交付与系统环境
+                  </div>
+
+                  {onOpenShownotes && (
+                    <button
+                      type="button"
+                      disabled={!hasContent}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onOpenShownotes();
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <FileText className="w-3.5 h-3.5 text-amber-400" />
+                        <span>生成 Shownotes</span>
+                      </span>
+                    </button>
+                  )}
+
+                  {onOpenDepGuide && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onOpenDepGuide();
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-cyan-500/15 text-cyan-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>AI 语音引擎与离线模型环境</span>
+                      </span>
+                      <span className="text-[10px] text-cyan-400/80">检测/下载 →</span>
+                    </button>
+                  )}
                 </div>
               )}
             </div>
-
-            {onOpenIntroEditor && (
-              <button
-                type="button"
-                onClick={onOpenIntroEditor}
-                title="打开独立片头多轨编辑器（移动/缩放金句、拖动口播位置、音轨段落静音、预览BGM避让）"
-                className="px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-sm border border-purple-400/40"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-purple-100" />
-                <span>片头编辑器</span>
-                {(state.coldOpenEnabled || state.introVoiceover?.enabled || state.introBgm?.enabled) && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 inline-block" />
-                )}
-              </button>
-            )}
           </nav>
 
           <div className="h-3.5 w-px bg-zinc-800 mx-1 shrink-0" />

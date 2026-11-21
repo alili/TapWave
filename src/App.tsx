@@ -251,6 +251,15 @@ export const App: React.FC = () => {
   const [rightPaneCollapsed, setRightPaneCollapsed] = useState(() =>
     readStoredPaneBool('podcraft.rightPaneCollapsed', false)
   );
+  const [speakerDeckPosition, setSpeakerDeckPosition] = useState<'top' | 'bottom'>(() => {
+    try {
+      return window.localStorage.getItem('podcraft.speakerDeckPosition') === 'bottom'
+        ? 'bottom'
+        : 'top';
+    } catch {
+      return 'top';
+    }
+  });
   const [leftPaneWidth, setLeftPaneWidth] = useState(() =>
     readStoredPaneNumber(
       'podcraft.leftPaneWidth',
@@ -333,10 +342,11 @@ export const App: React.FC = () => {
       window.localStorage.setItem('podcraft.rightPaneWidth', String(rightPaneWidth));
       window.localStorage.setItem('podcraft.autoSaveEnabled', String(autoSaveEnabled));
       window.localStorage.setItem('podcraft.autoSaveIntervalSec', String(autoSaveIntervalSec));
+      window.localStorage.setItem('podcraft.speakerDeckPosition', speakerDeckPosition);
     } catch {
       // ignore storage errors
     }
-  }, [leftPaneCollapsed, rightPaneCollapsed, leftPaneWidth, rightPaneWidth, autoSaveEnabled, autoSaveIntervalSec]);
+  }, [leftPaneCollapsed, rightPaneCollapsed, leftPaneWidth, rightPaneWidth, autoSaveEnabled, autoSaveIntervalSec, speakerDeckPosition]);
 
   // 定时自动保存引擎：当检测到工程有修改且满足时间间隔时，静默原地保存磁盘（已有路径）或缓存到本地存储快照
   useEffect(() => {
@@ -4096,6 +4106,8 @@ export const App: React.FC = () => {
         rightPaneCollapsed={rightPaneCollapsed}
         onToggleLeftPane={stableToggleLeftPane}
         onToggleRightPane={stableToggleRightPane}
+        speakerDeckPosition={speakerDeckPosition}
+        onChangeSpeakerDeckPosition={setSpeakerDeckPosition}
         onOpenShortcuts={() => setShortcutsModalOpen(true)}
         onOpenGlobalAuxLibrary={(slot) => setAuxLibraryModal({ open: true, slot: slot || 'intro' })}
         onOpenDepGuide={() => setDepGuideModalOpen(true)}
@@ -4429,6 +4441,8 @@ export const App: React.FC = () => {
             canUndo={undoDepth > 0}
             rightPaneCollapsed={rightPaneCollapsed}
             onToggleRightPane={stableToggleRightPane}
+            speakerDeckPosition={speakerDeckPosition}
+            onChangeSpeakerDeckPosition={setSpeakerDeckPosition}
             onSwitchToTranscriptView={stableSwitchToTranscriptView}
             onTogglePlay={stableTogglePlay}
             onStepPlayhead={stableStepPlayhead}

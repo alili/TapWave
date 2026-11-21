@@ -24,6 +24,7 @@ import {
   sampleNormalizedVocalActivity,
   TrackAcousticProfile,
 } from './waveformAligner';
+import { timeStretchAudioBufferWsola } from './wsolaTimeStretch';
 
 /**
  * Computes a relative linear gain in (0, 0.94] for previewing multi-track audio via HTMLAudioElement.
@@ -2046,7 +2047,7 @@ class AudioPreviewEngine {
         const playable = selectPlayableTracks(state);
 
         // 1. 起播前 220ms 内若所有音轨仍在初始解码缓冲，短暂保持游标等待首帧就绪（超时或任一主轨就绪后立即推进）
-        if (nowPerf - this.playStartPerfMs < 220) {
+        if (this.activeWebAudioMainTracks.size === 0 && nowPerf - this.playStartPerfMs < 220) {
           let hasAnyValid = false;
           let hasAnyReady = false;
           for (let i = 0; i < playable.length; i++) {
@@ -2107,12 +2108,13 @@ class AudioPreviewEngine {
                 if (sourceOffset >= 0 && actualSourceSec <= span.sourceEndSec) {
                   const hwEditedSec = span.editedStartSec + sourceOffset;
                   const drift = hwEditedSec - nextPlayheadSec;
-                  if (Math.abs(drift) > 0.08 && Math.abs(drift) < 0.5) {
+                  const rateScale = Math.max(1, playbackRate);
+                  if (Math.abs(drift) > 0.08 * rateScale && Math.abs(drift) < 0.5 * rateScale) {
                     nextPlayheadSec = Math.max(
                       currentPlayheadSec + stepSec * 0.8,
                       Math.min(currentPlayheadSec + stepSec * 1.2, nextPlayheadSec + drift * 0.12)
                     );
-                  } else if (Math.abs(drift) >= 0.5 && Math.abs(drift) < 2.0) {
+                  } else if (Math.abs(drift) >= 0.5 * rateScale && Math.abs(drift) < 2.0 * rateScale) {
                     nextPlayheadSec =
                       drift > 0
                         ? Math.min(span.editedEndSec, nextPlayheadSec + drift * 0.25)
@@ -2375,7 +2377,6 @@ class AudioPreviewEngine {
     const useProxy = state.proxyEditingEnabled !== false;
     const canUseWebAudioMain =
       useProxy &&
-      Math.abs(playbackRate - 1.0) <= 0.02 &&
       !mapped.inColdOpen &&
       !mapped.inIntroOrGapSilence &&
       mapped.sourceSec !== null &&
@@ -2385,6 +2386,7 @@ class AudioPreviewEngine {
         playableTracks,
         mapped.sourceSec,
         playheadSec,
+        playbackRate,
         crossedCutOrScrub,
         anySolo,
         dominantSpeakerId,
@@ -2463,7 +2465,14 @@ class AudioPreviewEngine {
           : mapped.sourceSec;
       const targetTrackSec = Math.max(0, baseSourceSec - effectiveOffsetSec);
 
-      if (isPrimarySyncTrack || primaryActualSourceSec === null || audioEl.paused || audioEl.seeking || crossedCutOrScrub) {
+      if (
+        isPrimarySyncTrack ||
+        primaryActualSourceSec === null ||
+        audioEl.paused ||
+        audioEl.seeking ||
+        crossedCutOrScrub ||
+        Math.abs(playbackRate - 1.0) > 0.02
+      ) {
         applyPitchPreservingPlaybackRate(audioEl, playbackRate);
       } else {
         // PLL 相位锁定（节流 + 10ms~25ms 区间）：紧锁主轨相位，消除多轨不同步产生的回声，同时避免每帧重置 WSOLA
@@ -2617,12 +2626,45 @@ class AudioPreviewEngine {
     return mapped;
   }
 
+  private stretchedChunkCache = new Map<string, AudioBuffer>();
+
+  private getOrCreateStretchedChunk(
+    ctx: AudioContext,
+    chunkUrl: string,
+    rawBuf: AudioBuffer,
+    playbackRate: number
+  ): { buf: AudioBuffer; effectiveRate: number } {
+    const safeRate = Math.max(0.5, Math.min(3.5, playbackRate || 1.0));
+    if (Math.abs(safeRate - 1.0) <= 0.015) {
+      return { buf: rawBuf, effectiveRate: 1.0 };
+    }
+    const rateKey = safeRate.toFixed(2);
+    const cacheKey = `${chunkUrl}|${rateKey}`;
+    const cached = this.stretchedChunkCache.get(cacheKey);
+    if (cached) {
+      this.stretchedChunkCache.delete(cacheKey);
+      this.stretchedChunkCache.set(cacheKey, cached);
+      return { buf: cached, effectiveRate: Number(rateKey) };
+    }
+
+    const stretched = timeStretchAudioBufferWsola(ctx, rawBuf, Number(rateKey));
+    this.stretchedChunkCache.set(cacheKey, stretched);
+    const MAX_STRETCHED_CHUNKS = 16;
+    while (this.stretchedChunkCache.size > MAX_STRETCHED_CHUNKS) {
+      const oldestKey = this.stretchedChunkCache.keys().next().value;
+      if (!oldestKey || oldestKey === cacheKey) break;
+      this.stretchedChunkCache.delete(oldestKey);
+    }
+    return { buf: stretched, effectiveRate: Number(rateKey) };
+  }
+
   private activeWebAudioMainTracks: Map<
     string,
     {
       source: AudioBufferSourceNode;
       gainNode: GainNode;
       chunkIdx: number;
+      playbackRate: number;
       startedCtxTime: number;
       startedInChunkSec: number;
     }
@@ -2644,6 +2686,7 @@ class AudioPreviewEngine {
     playableTracks: SpeakerTrack[],
     sourceSec: number,
     playheadSec: number,
+    playbackRate: number,
     crossedCutOrScrub: boolean,
     anySolo: boolean,
     dominantSpeakerId: string | null,
@@ -2655,6 +2698,11 @@ class AudioPreviewEngine {
     if (ctx.state === 'suspended') {
       void ctx.resume();
     }
+
+    const preloadTriggerInChunkSec = Math.max(
+      6,
+      SKIM_CHUNK_DURATION_SEC - 12 * Math.max(1, playbackRate)
+    );
 
     // Verify all non-muted tracks' current 30s chunk is decoded (pre-fetching any missing chunks)
     let allReady = true;
@@ -2668,7 +2716,7 @@ class AudioPreviewEngine {
       if (!chunkUrl || !this.decodedAuxBuffers.has(chunkUrl)) {
         this.preloadDecodedUrl(chunkUrl);
         allReady = false;
-      } else if (trAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > 18) {
+      } else if (trAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > preloadTriggerInChunkSec) {
         this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1));
       }
     }
@@ -2755,16 +2803,29 @@ class AudioPreviewEngine {
         }
       }
 
+      const { buf: activeBuf, effectiveRate } = this.getOrCreateStretchedChunk(
+        ctx,
+        chunkUrl!,
+        buf,
+        playbackRate
+      );
+      const stretchedOffsetSec = Math.max(
+        0,
+        Math.min(activeBuf.duration - 0.01, inChunkSec / effectiveRate)
+      );
+
       const existing = this.activeWebAudioMainTracks.get(tr.id);
       if (existing) {
         const expectedInChunk =
-          existing.startedInChunkSec + Math.max(0, now - existing.startedCtxTime);
+          existing.startedInChunkSec +
+          Math.max(0, now - existing.startedCtxTime) * existing.playbackRate;
         const drift = Math.abs(inChunkSec - expectedInChunk);
         const needsResync =
           crossedCutOrScrub ||
           existing.chunkIdx !== chunkIdx ||
-          drift > 0.045 ||
-          expectedInChunk >= buf.duration - 0.04;
+          Math.abs(existing.playbackRate - effectiveRate) > 0.015 ||
+          drift > 0.045 * effectiveRate ||
+          expectedInChunk >= buf.duration - 0.04 * effectiveRate;
         if (!needsResync) {
           existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
           activeIds.add(tr.id);
@@ -2775,7 +2836,7 @@ class AudioPreviewEngine {
       }
 
       const source = ctx.createBufferSource();
-      source.buffer = buf;
+      source.buffer = activeBuf;
       source.playbackRate.value = 1.0;
 
       const gainNode = ctx.createGain();
@@ -2783,12 +2844,13 @@ class AudioPreviewEngine {
       gainNode.gain.linearRampToValueAtTime(Math.max(0.0001, gain), now + 0.006);
 
       source.connect(gainNode).connect(ctx.destination);
-      source.start(now, inChunkSec);
+      source.start(now, stretchedOffsetSec);
 
       const entry = {
         source,
         gainNode,
         chunkIdx,
+        playbackRate: effectiveRate,
         startedCtxTime: now,
         startedInChunkSec: inChunkSec,
       };

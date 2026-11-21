@@ -11,6 +11,8 @@ import {
   Magnet,
   Minus,
   Music,
+  PanelBottom,
+  PanelTop,
   Pause,
   Pencil,
   Play,
@@ -101,6 +103,8 @@ interface WaveformEditorBarProps {
   canUndo?: boolean;
   rightPaneCollapsed?: boolean;
   onToggleRightPane?: () => void;
+  speakerDeckPosition?: 'top' | 'bottom';
+  onChangeSpeakerDeckPosition?: (pos: 'top' | 'bottom') => void;
   onSwitchToTranscriptView?: () => void;
   onTogglePlay: () => void;
   onStepPlayhead: (deltaSec: number) => void;
@@ -1269,6 +1273,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   canUndo = false,
   rightPaneCollapsed = false,
   onToggleRightPane,
+  speakerDeckPosition,
+  onChangeSpeakerDeckPosition,
   onSwitchToTranscriptView,
   onTogglePlay,
   onStepPlayhead,
@@ -1575,6 +1581,39 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     [playheadDragging, outroTrimDragging, syncCanvasCursor]
   );
   const cutBadgeHitBoxesRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; editedSec: number }>>([]);
+  const renderedWordPillsRef = useRef<
+    Array<{
+      speakerId: string;
+      startSec: number;
+      endSec: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      text: string;
+      trackColor: string;
+    }>
+  >([]);
+  const renderedCaptionPillsRef = useRef<
+    Array<{
+      speakerId: string;
+      r1: number;
+      r2: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      text: string;
+      tokens: Array<{
+        startSec: number;
+        endSec: number;
+        charStart: number;
+        charEnd: number;
+        text: string;
+      }>;
+      trackColor: string;
+    }>
+  >([]);
   const scrubHoverTooltipRef = useRef<HTMLDivElement | null>(null);
   const hoverRatioRef = useRef<number | null>(null);
   const overlayDrawRafRef = useRef<number | null>(null);
@@ -2356,13 +2395,32 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     // 3. Phrase-level clip captions for macro & medium zoom auxiliary text hints
     const clipCaptionsBySpeaker: Record<
       string,
-      Array<{ r1: number; r2: number; text: string }>
+      Array<{
+        r1: number;
+        r2: number;
+        text: string;
+        tokens: Array<{
+          startSec: number;
+          endSec: number;
+          charStart: number;
+          charEnd: number;
+          text: string;
+        }>;
+      }>
     > = {};
     let openPhrase: {
       speakerId: string;
       startSec: number;
       endSec: number;
+      charLen: number;
       parts: string[];
+      tokens: Array<{
+        startSec: number;
+        endSec: number;
+        charStart: number;
+        charEnd: number;
+        text: string;
+      }>;
     } | null = null;
     const flushPhrase = () => {
       if (!openPhrase || openPhrase.parts.length === 0) return;
@@ -2376,6 +2434,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           r1,
           r2,
           text: openPhrase.parts.join(''),
+          tokens: openPhrase.tokens,
         });
       }
       openPhrase = null;
@@ -2392,15 +2451,35 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         m.editedStartSec - openPhrase.endSec <= 0.45 &&
         m.editedEndSec - openPhrase.startSec <= 8.0
       ) {
+        const charStart = openPhrase.charLen;
+        const charEnd = charStart + cleanTxt.length;
         openPhrase.endSec = m.editedEndSec;
+        openPhrase.charLen = charEnd;
         openPhrase.parts.push(cleanTxt);
+        openPhrase.tokens.push({
+          startSec: m.editedStartSec,
+          endSec: m.editedEndSec,
+          charStart,
+          charEnd,
+          text: cleanTxt,
+        });
       } else {
         flushPhrase();
         openPhrase = {
           speakerId: m.speakerId,
           startSec: m.editedStartSec,
           endSec: m.editedEndSec,
+          charLen: cleanTxt.length,
           parts: [cleanTxt],
+          tokens: [
+            {
+              startSec: m.editedStartSec,
+              endSec: m.editedEndSec,
+              charStart: 0,
+              charEnd: cleanTxt.length,
+              text: cleanTxt,
+            },
+          ],
         };
       }
     });
@@ -2493,6 +2572,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderedWordPillsRef.current = [];
+    renderedCaptionPillsRef.current = [];
 
     const RULER_H = rulerHeightPx;
     const topRulerBandH = wordTimelineMode ? 14 : RULER_H;
@@ -3854,6 +3935,17 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               ctx.fillText(rawTxt, clippedLeft + 4, yLaneTop + 11.5);
               ctx.restore();
               lastWordPillRightByLane[spLaneIdx] = clippedLeft + pillW;
+              renderedWordPillsRef.current.push({
+                speakerId: ann.speakerId,
+                startSec: ann.editedStartSec,
+                endSec: ann.editedEndSec,
+                x: clippedLeft,
+                y: yLaneTop + 3,
+                w: pillW,
+                h: 16.5,
+                text: rawTxt,
+                trackColor: speakerTracks[spLaneIdx]?.color ?? '#fbbf24',
+              });
             }
           }
         }
@@ -3888,6 +3980,18 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             ctx.fillText(cap.text, x0 + 6, yLaneTop + 11.5);
             ctx.restore();
             lastCapRightX = x0 + 1 + pillW;
+            renderedCaptionPillsRef.current.push({
+              speakerId: tr.id,
+              r1: cap.r1,
+              r2: cap.r2,
+              x: x0 + 1,
+              y: yLaneTop + 3,
+              w: pillW,
+              h: 16.5,
+              text: cap.text,
+              tokens: cap.tokens,
+              trackColor: tr.color,
+            });
           });
         });
       }
@@ -4645,6 +4749,112 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.fillText(hLabel, pillX + 4, topBadgeCenterY);
     }
 
+    // 7b. Real-time Active Spoken Word Highlight Inside Speech Clips (60fps Overlay)
+    const playRatioForText = totalSec > 0 ? playheadSec / totalSec : 0;
+    if (wordTimelineMode && renderedWordPillsRef.current.length > 0) {
+      for (let i = 0; i < renderedWordPillsRef.current.length; i++) {
+        const p = renderedWordPillsRef.current[i];
+        if (playheadSec < p.startSec - 0.01 || playheadSec > p.endSec + 0.015) continue;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
+        ctx.clip();
+
+        ctx.shadowColor = 'rgba(250, 204, 21, 0.75)';
+        ctx.shadowBlur = 6;
+        ctx.fillStyle = '#facc15';
+        ctx.beginPath();
+        ctx.roundRect(p.x, p.y, p.w, p.h, 3.5);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        ctx.font = '700 11.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#09090b';
+        ctx.fillText(p.text, p.x + 4, p.y + p.h / 2);
+        ctx.restore();
+      }
+    } else if (!wordTimelineMode && renderedCaptionPillsRef.current.length > 0) {
+      const baseFont = '500 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+      const boldFont = '700 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+      for (let i = 0; i < renderedCaptionPillsRef.current.length; i++) {
+        const cap = renderedCaptionPillsRef.current[i];
+        if (playRatioForText < cap.r1 - 0.0005 || playRatioForText > cap.r2 + 0.0005) continue;
+        if (cap.tokens.length === 0) continue;
+
+        let activeTok = cap.tokens.find(
+          (t) => playheadSec >= t.startSec - 0.015 && playheadSec <= t.endSec + 0.02
+        );
+        if (!activeTok) {
+          for (let j = cap.tokens.length - 1; j >= 0; j--) {
+            if (playheadSec >= cap.tokens[j].startSec - 0.02) {
+              activeTok = cap.tokens[j];
+              break;
+            }
+          }
+        }
+        if (!activeTok) continue;
+
+        ctx.save();
+        ctx.font = baseFont;
+        ctx.textBaseline = 'middle';
+
+        const prefixStr = cap.text.slice(0, activeTok.charStart);
+        const activeStr = cap.text.slice(activeTok.charStart, activeTok.charEnd);
+        const suffixStr = cap.text.slice(activeTok.charEnd);
+
+        const prefixW = prefixStr ? ctx.measureText(prefixStr).width : 0;
+        ctx.font = boldFont;
+        const activeW = ctx.measureText(activeStr).width;
+        ctx.font = baseFont;
+
+        // Auto-pan caption text horizontally inside narrow clip pills so active word stays visible
+        const shiftX = Math.max(0, prefixW + activeW + 14 - cap.w);
+        const textStartX = cap.x + 5 - shiftX;
+        const textMidY = cap.y + cap.h / 2;
+
+        ctx.beginPath();
+        ctx.roundRect(cap.x - 1, cap.y - 1, cap.w + 2, cap.h + 2, 4);
+        ctx.clip();
+
+        ctx.fillStyle = 'rgba(9, 9, 11, 0.95)';
+        ctx.beginPath();
+        ctx.roundRect(cap.x, cap.y, cap.w, cap.h, 3.5);
+        ctx.fill();
+
+        ctx.strokeStyle = hexToRgba(cap.trackColor, 0.95);
+        ctx.lineWidth = 1.15;
+        ctx.stroke();
+
+        // Active word high-contrast pill background
+        ctx.fillStyle = '#facc15';
+        ctx.beginPath();
+        ctx.roundRect(textStartX + prefixW - 2, cap.y + 1.5, activeW + 4, cap.h - 3, 2.5);
+        ctx.fill();
+
+        if (prefixStr) {
+          ctx.fillStyle = 'rgba(228, 228, 231, 0.92)';
+          ctx.fillText(prefixStr, textStartX, textMidY);
+        }
+
+        ctx.font = boldFont;
+        ctx.fillStyle = '#09090b';
+        ctx.fillText(activeStr, textStartX + prefixW, textMidY);
+
+        if (suffixStr) {
+          ctx.font = baseFont;
+          ctx.fillStyle = '#a1a1aa';
+          ctx.fillText(suffixStr, textStartX + prefixW + activeW, textMidY);
+        }
+
+        ctx.restore();
+      }
+    }
+
     // 8. DAW Playhead Cursor (Draggable Pentagon Cap + Crisp Vertical Line)
     const playRatio = playheadSec / totalSec;
     if (playRatio >= viewStartRatio - 0.002 && playRatio <= viewEndRatio + 0.002) {
@@ -5270,10 +5480,22 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     []
   );
 
+  const [localDeckPosition, setLocalDeckPosition] = useState<'top' | 'bottom'>('top');
+  const effectiveDeckPosition = speakerDeckPosition ?? localDeckPosition;
+  const toggleDeckPosition = () => {
+    const nextPos: 'top' | 'bottom' = effectiveDeckPosition === 'top' ? 'bottom' : 'top';
+    if (onChangeSpeakerDeckPosition) {
+      onChangeSpeakerDeckPosition(nextPos);
+    } else {
+      setLocalDeckPosition(nextPos);
+    }
+  };
+
   const handleStartResizeDeckHeight = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const startY = e.clientY;
     const startHeight = deckHeight;
+    const dir = effectiveDeckPosition === 'bottom' ? -1 : 1;
     setResizingDeck(true);
 
     const prevCursor = document.body.style.cursor;
@@ -5285,7 +5507,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     let pendingHeight: number | null = null;
 
     const onPointerMove = (ev: PointerEvent) => {
-      const deltaY = ev.clientY - startY;
+      const deltaY = (ev.clientY - startY) * dir;
       const maxDeckH =
         typeof window === 'undefined' ? 340 : Math.max(188, Math.floor(window.innerHeight * 0.44));
       pendingHeight = Math.round(Math.max(96, Math.min(maxDeckH, startHeight + deltaY)));
@@ -5412,9 +5634,29 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         </div>
       )}
 
-      {/* Audition Main Stage Top Scrollable Speaker-Block Focus & Quick-Edit Deck */}
+      {/* Audition Main Stage Scrollable Speaker-Block Focus & Quick-Edit Deck */}
       {isMainStage && (
-        <section className="mb-2 shrink-0 rounded-xl border border-zinc-800/90 bg-zinc-900/85 overflow-hidden flex flex-col">
+        <section
+          className={`shrink-0 rounded-xl border border-zinc-800/90 bg-zinc-900/85 overflow-hidden flex flex-col ${
+            effectiveDeckPosition === 'bottom' ? 'order-3 mt-2' : 'mb-2'
+          }`}
+        >
+          {!deckCollapsed && effectiveDeckPosition === 'bottom' && (
+            <div
+              onPointerDown={handleStartResizeDeckHeight}
+              onDoubleClick={() => setDeckHeight(DEFAULT_DECK_HEIGHT)}
+              title="上下拖拽调整发言块提示区高度（双击恢复默认高度）"
+              className={`h-1.5 border-b border-zinc-800/80 cursor-ns-resize flex items-center justify-center transition-colors ${
+                resizingDeck ? 'bg-blue-500/30' : 'bg-zinc-900/90 hover:bg-zinc-800'
+              }`}
+            >
+              <span
+                className={`w-8 h-0.5 rounded-full ${
+                  resizingDeck ? 'bg-blue-400' : 'bg-zinc-600'
+                }`}
+              />
+            </div>
+          )}
           <div className="px-3 py-1.5 border-b border-zinc-800/80 bg-zinc-900 flex items-center justify-between gap-2 text-xs flex-wrap shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 text-[10px] font-semibold shrink-0">
@@ -5590,6 +5832,28 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               </button>
               <button
                 type="button"
+                onClick={toggleDeckPosition}
+                title={
+                  effectiveDeckPosition === 'top'
+                    ? '将发言块移动到音轨下方'
+                    : '将发言块移动到音轨上方'
+                }
+                className="px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-950 hover:bg-zinc-800 text-zinc-300 text-[11px] inline-flex items-center gap-1 cursor-pointer"
+              >
+                {effectiveDeckPosition === 'top' ? (
+                  <>
+                    <PanelBottom className="w-3 h-3 text-blue-400" />
+                    <span>置于下方</span>
+                  </>
+                ) : (
+                  <>
+                    <PanelTop className="w-3 h-3 text-blue-400" />
+                    <span>置于上方</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
                 onClick={() => setDeckCollapsed((v) => !v)}
                 className="px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-950 hover:bg-zinc-800 text-zinc-300 text-[11px] inline-flex items-center gap-0.5 cursor-pointer"
               >
@@ -5730,20 +5994,22 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                   })
                 )}
               </div>
-              <div
-                onPointerDown={handleStartResizeDeckHeight}
-                onDoubleClick={() => setDeckHeight(DEFAULT_DECK_HEIGHT)}
-                title="上下拖拽调整发言块提示区高度（双击恢复默认高度）"
-                className={`h-1.5 border-t border-zinc-800/80 cursor-ns-resize flex items-center justify-center transition-colors ${
-                  resizingDeck ? 'bg-blue-500/30' : 'bg-zinc-900/90 hover:bg-zinc-800'
-                }`}
-              >
-                <span
-                  className={`w-8 h-0.5 rounded-full ${
-                    resizingDeck ? 'bg-blue-400' : 'bg-zinc-600'
+              {effectiveDeckPosition === 'top' && (
+                <div
+                  onPointerDown={handleStartResizeDeckHeight}
+                  onDoubleClick={() => setDeckHeight(DEFAULT_DECK_HEIGHT)}
+                  title="上下拖拽调整发言块提示区高度（双击恢复默认高度）"
+                  className={`h-1.5 border-t border-zinc-800/80 cursor-ns-resize flex items-center justify-center transition-colors ${
+                    resizingDeck ? 'bg-blue-500/30' : 'bg-zinc-900/90 hover:bg-zinc-800'
                   }`}
-                />
-              </div>
+                >
+                  <span
+                    className={`w-8 h-0.5 rounded-full ${
+                      resizingDeck ? 'bg-blue-400' : 'bg-zinc-600'
+                    }`}
+                  />
+                </div>
+              )}
             </>
           )}
         </section>
