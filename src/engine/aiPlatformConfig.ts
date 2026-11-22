@@ -650,3 +650,54 @@ export function countConfiguredProviders(config: AiPlatformConfig): number {
   const cloudIds: AiProviderId[] = ['deepseek', 'gemini', 'openai', 'volcengine_doubao'];
   return cloudIds.filter((id) => hasProviderCredentials(config, id)).length;
 }
+
+/** 移除指定云端平台的凭据，并将指向该平台的功能路由重置为本地默认 */
+export function removeProviderCredentials(
+  config: AiPlatformConfig,
+  providerId: AiProviderId
+): AiPlatformConfig {
+  if (providerId === 'local_sensevoice') return config;
+
+  const nextProviders = { ...config.providers };
+  if (providerId === 'deepseek') {
+    nextProviders.deepseek = { ...nextProviders.deepseek, apiKey: '' };
+  } else if (providerId === 'gemini') {
+    nextProviders.gemini = { ...nextProviders.gemini, apiKey: '' };
+  } else if (providerId === 'openai') {
+    nextProviders.openai = { ...nextProviders.openai, apiKey: '' };
+  } else if (providerId === 'volcengine_doubao') {
+    nextProviders.volcengine_doubao = {
+      ...nextProviders.volcengine_doubao,
+      volcApiKey: '',
+      volcAccessKeyId: '',
+      volcSecretAccessKey: '',
+      volcAppId: '',
+      volcAccessToken: '',
+      volcUsername: '',
+      volcAccountId: '',
+    };
+  }
+
+  const nextRouting = { ...config.routing };
+  if (nextRouting.asrProvider === providerId) {
+    nextRouting.asrProvider = 'local_sensevoice';
+  }
+  if (providerId === 'volcengine_doubao') {
+    nextRouting.enableSingleFileSpeakerSep = false;
+  }
+  if (nextRouting.analysisProvider === providerId) {
+    nextRouting.analysisProvider = 'local_only';
+  }
+  if (nextRouting.shownotesProvider === providerId) {
+    nextRouting.shownotesProvider = 'local_only';
+  }
+  if (nextRouting.liveCorrectionProvider === providerId) {
+    nextRouting.liveCorrectionProvider = 'local_only';
+  }
+
+  return {
+    ...config,
+    providers: nextProviders,
+    routing: nextRouting,
+  };
+}

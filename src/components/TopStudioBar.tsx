@@ -40,6 +40,15 @@ import {
 import { AuxAudioSlot, PodcastProjectState, WorkspaceLayoutMode } from '../types/podcast';
 import { AuxBgmConfigMenu } from './AuxBgmConfigMenu';
 import { RecentProjectItem, formatRecentTime } from '../engine/recentProjects';
+import {
+  AI_FEATURES_CATALOG,
+  AI_PROVIDERS_CATALOG,
+  AiPlatformConfig,
+  AiProviderId,
+  hasProviderCredentials,
+  isFeatureUsingProvider,
+  toggleFeatureForProvider,
+} from '../engine/aiPlatformConfig';
 
 export const PLAYBACK_RATES = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] as const;
 
@@ -92,6 +101,8 @@ interface TopStudioBarProps {
   onOpenIntroEditor?: () => void;
   onOpenDepGuide?: () => void;
   onOpenAiPlatform?: () => void;
+  aiPlatformConfig?: AiPlatformConfig;
+  onSaveAiPlatformConfig?: (nextConfig: AiPlatformConfig) => void | Promise<void>;
   aiConfiguredCount?: number;
   onImportBgm?: (slot: AuxAudioSlot) => void;
   onToggleBgmEnabled?: (slot: AuxAudioSlot) => void;
@@ -144,6 +155,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
   onOpenIntroEditor,
   onOpenDepGuide,
   onOpenAiPlatform,
+  aiPlatformConfig,
+  onSaveAiPlatformConfig,
   aiConfiguredCount = 0,
   onImportBgm,
   onToggleBgmEnabled,
@@ -156,6 +169,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
   const [titleDraft, setTitleDraft] = useState(state.projectTitle);
   const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'view' | 'tools' | null>(null);
   const [toolsSubAuxOpen, setToolsSubAuxOpen] = useState(false);
+  const [toolsSubAiOpen, setToolsSubAiOpen] = useState(false);
   const menuBarRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -785,7 +799,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                   >
                     <span className="flex items-center gap-2">
                       <span>📝</span>
-                      <span>文稿视图</span>
+                      <span>文稿</span>
                     </span>
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] font-mono text-zinc-500">⌥ 2</span>
@@ -894,7 +908,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                           ? 'opacity-40 cursor-not-allowed text-zinc-500'
                           : 'hover:bg-zinc-800'
                       }`}
-                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
+                      title={layoutMode === 'transcript' ? '文稿模式下已全宽替换左右侧边栏' : undefined}
                     >
                       <span className="flex items-center gap-2">
                         <PanelLeft className="w-3.5 h-3.5 text-zinc-400" />
@@ -926,7 +940,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                           ? 'opacity-40 cursor-not-allowed text-zinc-500'
                           : 'hover:bg-zinc-800'
                       }`}
-                      title={layoutMode === 'transcript' ? '文稿视图下已全宽替换左右侧边栏' : undefined}
+                      title={layoutMode === 'transcript' ? '文稿模式下已全宽替换左右侧边栏' : undefined}
                     >
                       <span className="flex items-center gap-2">
                         <PanelRight className="w-3.5 h-3.5 text-zinc-400" />
@@ -954,11 +968,13 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                 type="button"
                 onClick={() => {
                   setToolsSubAuxOpen(false);
+                  setToolsSubAiOpen(false);
                   setOpenMenu(openMenu === 'tools' ? null : 'tools');
                 }}
                 onMouseEnter={() => {
                   if (openMenu && openMenu !== 'tools') {
                     setToolsSubAuxOpen(false);
+                    setToolsSubAiOpen(false);
                     setOpenMenu('tools');
                   }
                 }}
@@ -985,7 +1001,10 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                   {/* 二级面板：片头口播与 BGM */}
                   <div
                     className="relative"
-                    onMouseEnter={() => setToolsSubAuxOpen(true)}
+                    onMouseEnter={() => {
+                      setToolsSubAiOpen(false);
+                      setToolsSubAuxOpen(true);
+                    }}
                     onMouseLeave={() => setToolsSubAuxOpen(false)}
                   >
                     <button
@@ -1070,23 +1089,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                     内容交付与系统环境
                   </div>
 
-                  {onOpenAiPlatform && (
-          <button
-            onClick={onOpenAiPlatform}
-            title="打开 AI 配置平台：设置各平台 API Key、切换功能项引擎（仅存本地文件）"
-            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
-          >
-            <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
-            <span>AI 配置</span>
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                aiConfiguredCount > 0 ? 'bg-emerald-400' : 'bg-zinc-500'
-              }`}
-            />
-          </button>
-        )}
-
-        {onOpenShownotes && (
+                  {onOpenShownotes && (
                     <button
                       type="button"
                       disabled={!hasContent}
@@ -1094,6 +1097,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                         setOpenMenu(null);
                         onOpenShownotes();
                       }}
+                      title="剪辑完成后一键生成 Shownotes（含500字简介、嘉宾名片、时间轴、抽奖海报与听友福利）"
                       className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-200 flex items-center justify-between cursor-pointer transition"
                     >
                       <span className="flex items-center gap-2">
@@ -1103,23 +1107,142 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                     </button>
                   )}
 
-                  {onOpenAiPlatform && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenMenu(null);
-                        onOpenAiPlatform();
+                  {(onOpenAiPlatform || aiPlatformConfig) && (
+                    <div
+                      className="relative"
+                      onMouseEnter={() => {
+                        setToolsSubAuxOpen(false);
+                        setToolsSubAiOpen(true);
                       }}
-                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-emerald-500/15 text-emerald-200 flex items-center justify-between cursor-pointer transition"
+                      onMouseLeave={() => setToolsSubAiOpen(false)}
                     >
-                      <span className="flex items-center gap-2">
-                        <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>AI 配置平台 (Key 与功能切换)</span>
-                      </span>
-                      <span className="text-[10px] text-emerald-400/80">
-                        {aiConfiguredCount > 0 ? `${aiConfiguredCount} 个已配` : '设置 →'}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (aiPlatformConfig) {
+                            setToolsSubAiOpen((v) => !v);
+                          } else if (onOpenAiPlatform) {
+                            setOpenMenu(null);
+                            onOpenAiPlatform();
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-lg hover:bg-emerald-500/15 text-emerald-200 flex items-center justify-between cursor-pointer transition"
+                      >
+                        <span className="flex items-center gap-2">
+                          <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>AI 配置与快捷切换</span>
+                        </span>
+                        <span className="text-[10px] text-emerald-400/80 flex items-center gap-1">
+                          <span>{aiConfiguredCount > 0 ? `${aiConfiguredCount} 个已配` : '本地离线'}</span>
+                          <ChevronRight className="w-3 h-3 text-zinc-500" />
+                        </span>
+                      </button>
+
+                      {toolsSubAiOpen && aiPlatformConfig && (
+                        <div className="absolute left-full top-0 ml-1 w-80 rounded-xl border border-zinc-700/90 bg-zinc-900/98 shadow-2xl p-2.5 z-50 text-xs backdrop-blur-md space-y-2.5">
+                          <div className="flex items-center justify-between border-b border-zinc-800 pb-1.5">
+                            <span className="text-[11px] font-bold text-zinc-200">
+                              AI 引擎快捷切换
+                            </span>
+                            <span className="text-[10px] text-zinc-500">点击即刻生效</span>
+                          </div>
+
+                          <div className="space-y-2">
+                            {AI_FEATURES_CATALOG.map((feature) => {
+                              const supportedProviders = AI_PROVIDERS_CATALOG.filter(
+                                (p) =>
+                                  p.supportedFeatures.includes(feature.id) &&
+                                  (!p.requiresKey || hasProviderCredentials(aiPlatformConfig, p.id))
+                              );
+                              return (
+                                <div key={feature.id} className="space-y-1">
+                                  <div className="text-[10px] font-medium text-zinc-400">
+                                    {feature.shortLabel}
+                                  </div>
+                                  <div className="flex flex-wrap gap-1">
+                                    {supportedProviders.map((prov) => {
+                                      const active = isFeatureUsingProvider(
+                                        aiPlatformConfig,
+                                        feature.id,
+                                        prov.id as AiProviderId
+                                      );
+                                      const hasCred =
+                                        !prov.requiresKey ||
+                                        hasProviderCredentials(aiPlatformConfig, prov.id);
+                                      const shortName =
+                                        prov.id === 'local_sensevoice'
+                                          ? '本地离线'
+                                          : prov.id === 'volcengine_doubao'
+                                            ? '火山豆包'
+                                            : prov.id === 'deepseek'
+                                              ? 'DeepSeek'
+                                              : prov.id === 'gemini'
+                                                ? 'Gemini'
+                                                : 'OpenAI';
+
+                                      return (
+                                        <button
+                                          key={prov.id}
+                                          type="button"
+                                          onClick={() => {
+                                            if (!hasCred) {
+                                              setToolsSubAiOpen(false);
+                                              setOpenMenu(null);
+                                              onNotify?.(`请先配置「${prov.name}」的 API Key`);
+                                              onOpenAiPlatform?.();
+                                              return;
+                                            }
+                                            if (!onSaveAiPlatformConfig) return;
+                                            const nextCfg = toggleFeatureForProvider(
+                                              aiPlatformConfig,
+                                              feature.id,
+                                              prov.id
+                                            );
+                                            void onSaveAiPlatformConfig(nextCfg);
+                                          }}
+                                          title={
+                                            hasCred
+                                              ? `切换「${feature.shortLabel}」使用 ${prov.name}`
+                                              : `未配置 ${prov.name} Key，点击前往设置`
+                                          }
+                                          className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer transition ${
+                                            active
+                                              ? 'bg-emerald-500/20 text-emerald-200 border-emerald-500/60 font-semibold'
+                                              : hasCred
+                                                ? 'bg-zinc-800/80 text-zinc-300 border-zinc-700 hover:border-zinc-500'
+                                                : 'bg-zinc-900/60 text-zinc-500 border-dashed border-zinc-800 hover:text-zinc-300'
+                                          }`}
+                                        >
+                                          {shortName}
+                                          {!hasCred && ' (未配)'}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {onOpenAiPlatform && (
+                            <div className="pt-1.5 border-t border-zinc-800">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setToolsSubAiOpen(false);
+                                  setOpenMenu(null);
+                                  onOpenAiPlatform();
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-cyan-300 text-[11px] font-medium flex items-center justify-between cursor-pointer transition"
+                              >
+                                <span>打开完整 AI 配置平台 (管理 API Key)</span>
+                                <span>→</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {onOpenDepGuide && (
@@ -1234,7 +1357,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                 title="音轨主视图 (快捷键: ⌥1)"
               >
                 <span>🎛️</span>
-                <span>音轨视图</span>
+                <span>音轨</span>
               </button>
               <button
                 type="button"
@@ -1260,10 +1383,10 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
               }`}
-              title="文稿视图 (快捷键: ⌥2)"
+              title="文稿 (快捷键: ⌥2)"
             >
               <span>📝</span>
-              <span>文稿视图</span>
+              <span>文稿</span>
             </button>
             <button
               type="button"
@@ -1374,28 +1497,6 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
             />
           </button>
         )}
-
-        {onOpenShownotes && (
-          <button
-            onClick={onOpenShownotes}
-            disabled={!hasContent}
-            title="剪辑完成后一键生成 Shownotes（含500字简介、嘉宾名片、时间轴、抽奖海报与听友福利）"
-            className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1 shadow-sm transition cursor-pointer"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>生成 Shownotes</span>
-          </button>
-        )}
-
-        <button
-          onClick={onQuickExportAudio}
-          disabled={!hasContent}
-          title="导出 -16 LUFS 播客标准响度 MP3 成片"
-          className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1 shadow-sm transition cursor-pointer"
-        >
-          <Download className="w-3.5 h-3.5" />
-          <span>导出 MP3</span>
-        </button>
       </div>
     </header>
   );

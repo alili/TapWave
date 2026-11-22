@@ -16,7 +16,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: '视图切换与侧边栏',
     items: [
       { keys: ['⌥ 1'], desc: '切换为 音轨主视图（多轨波形舞台）' },
-      { keys: ['⌥ 2'], desc: '切换为 文稿视图（自然成稿长文阅读）' },
+      { keys: ['⌥ 2'], desc: '切换为 文稿（自然成稿长文阅读）' },
       { keys: ['⌥ 5'], desc: '切换为 录制视图（实时转写与 AI 对话助手）' },
       { keys: ['⌘ ['], desc: '折叠 / 展开左侧音轨与素材栏' },
       { keys: ['⌘ ]'], desc: '折叠 / 展开右侧 AI 工作台' },

@@ -4,6 +4,7 @@ import {
   ArrowDown,
   Check,
   CheckCircle2,
+  ChevronDown,
   ClipboardCopy,
   Download,
   Loader2,
@@ -43,7 +44,9 @@ import {
 } from '../engine/liveAudioCapture';
 import { buildLiveSessionMarkdown, formatLiveMmSs } from '../engine/liveMinutesExporter';
 import {
+  addAndAssignLivePartialSpeaker,
   addAndAssignLiveSpeaker,
+  assignLivePartialSpeaker,
   assignLiveSpeaker,
   batchAssignLiveSpeaker,
   computeUtteranceUploadStates,
@@ -89,7 +92,6 @@ interface StoredPrepForm {
   counterpartBackground: string;
   selfName: string;
   speakerCount: number;
-  firstSpeakerRole: 'self' | 'counterpart';
   hasHost: boolean;
   captureAudience: boolean;
   asrEngine: LiveAsrEngineMode;
@@ -100,7 +102,7 @@ interface StoredPrepForm {
 }
 
 const DEFAULT_PREP_FORM: StoredPrepForm = {
-  scenario: 'interview',
+  scenario: 'chat',
   title: '',
   topic: '',
   goals: '',
@@ -108,7 +110,6 @@ const DEFAULT_PREP_FORM: StoredPrepForm = {
   counterpartBackground: '',
   selfName: '我',
   speakerCount: 2,
-  firstSpeakerRole: 'self',
   hasHost: true,
   captureAudience: true,
   asrEngine: 'auto',
@@ -124,9 +125,7 @@ function loadStoredPrep(): StoredPrepForm {
     if (!raw) return DEFAULT_PREP_FORM;
     const obj = JSON.parse(raw) as Partial<StoredPrepForm>;
     const scenario: LiveScenario =
-      obj.scenario === 'dialogue' || obj.scenario === 'sales' || obj.scenario === 'listen'
-        ? obj.scenario
-        : 'interview';
+      obj.scenario === 'dialogue' || obj.scenario === 'listen' ? obj.scenario : 'chat';
     const rawCount = Math.max(1, Math.min(6, Number(obj.speakerCount) || 2));
     return {
       ...DEFAULT_PREP_FORM,
@@ -142,6 +141,11 @@ function loadStoredPrep(): StoredPrepForm {
     return DEFAULT_PREP_FORM;
   }
 }
+
+const FORM_INPUT_CLS =
+  'w-full h-9 px-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500';
+const FORM_SELECT_CLS =
+  'w-full h-9 pl-2.5 pr-7 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500 appearance-none cursor-pointer disabled:opacity-45';
 
 const SPEAKER_COLORS = [
   { badge: 'bg-blue-500/20 text-blue-300 border-blue-500/40', border: 'border-blue-500/30' },
@@ -239,15 +243,31 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
     }
   };
   const [showAdoptedDrawer, setShowAdoptedDrawer] = useState(false);
-  const [speakerCtxMenu, setSpeakerCtxMenu] = useState<{
-    utteranceId: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [speakerCtxMenu, setSpeakerCtxMenu] = useState<
+    | { kind: 'utterance'; utteranceId: string; x: number; y: number }
+    | { kind: 'partial'; startMs: number; x: number; y: number }
+    | null
+  >(null);
   const [creatingNewSpeaker, setCreatingNewSpeaker] = useState(false);
   const [newSpeakerName, setNewSpeakerName] = useState('');
   const [newSpeakerRole, setNewSpeakerRole] = useState<LiveSpeakerRole>('counterpart');
   const speakerCtxMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const openSpeakerCtxMenu = (
+    e: React.MouseEvent,
+    target: { kind: 'utterance'; utteranceId: string } | { kind: 'partial'; startMs: number }
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const maxW = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    const maxH = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const x = Math.min(e.clientX, Math.max(12, maxW - 260));
+    const y = Math.min(e.clientY, Math.max(12, maxH - 320));
+    setSpeakerCtxMenu({ ...target, x, y });
+    setCreatingNewSpeaker(false);
+    setNewSpeakerName('');
+    setNewSpeakerRole('counterpart');
+  };
 
   useEffect(() => {
     if (!speakerCtxMenu) return;
@@ -390,9 +410,8 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
     }
 
     const counterpartDefault =
-      form.scenario === 'sales' ? '客户' : form.scenario === 'listen' ? '主讲人' : '嘉宾';
-    const selfDefault =
-      form.scenario === 'dialogue' ? '主持人' : form.scenario === 'sales' ? '销售' : '我';
+      form.scenario === 'listen' ? '主讲人' : form.scenario === 'chat' ? '参与者' : '嘉宾';
+    const selfDefault = form.scenario === 'dialogue' ? '主持人' : '我';
     const selfName = form.selfName.trim() || selfDefault;
     const parsedCounterparts = form.counterpartName
       .split(/[,，、/]+/)
@@ -446,7 +465,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
             speakerKind: 'guest',
           });
         }
-        firstSpeakerId = form.firstSpeakerRole === 'counterpart' ? 'spk_other_1' : 'spk_self';
+        firstSpeakerId = 'spk_self';
       } else {
         for (let i = 1; i <= fixedCount; i++) {
           const guestName = parsedCounterparts[i - 1] || `${counterpartDefault}${i}`;
@@ -460,28 +479,28 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
         firstSpeakerId = 'spk_other_1';
       }
     } else {
-      // 访谈 / 销售模式：1 位主提问人 + 1~多位回答人/讲述人
+      // 聊天模式：多人自由发言讨论，重点追踪议题流转与相关性
       const totalCount = Math.max(2, Math.min(6, form.speakerCount));
       effectiveSpeakerCount = totalCount;
       speakers.push({
         id: 'spk_self',
         name: selfName,
         role: 'self',
-        speakerKind: 'interviewer',
+        speakerKind: 'guest',
       });
-      const respondentCount = totalCount - 1;
-      for (let i = 1; i <= respondentCount; i++) {
+      const otherCount = totalCount - 1;
+      for (let i = 1; i <= otherCount; i++) {
         const respName =
           parsedCounterparts[i - 1] ||
-          (respondentCount === 1 ? primaryCounterpartName : `${counterpartDefault}${i}`);
+          (otherCount === 1 ? primaryCounterpartName : `${counterpartDefault}${i}`);
         speakers.push({
           id: `spk_other_${i}`,
           name: respName,
           role: 'counterpart',
-          speakerKind: 'respondent',
+          speakerKind: 'guest',
         });
       }
-      firstSpeakerId = form.firstSpeakerRole === 'counterpart' ? 'spk_other_1' : 'spk_self';
+      firstSpeakerId = 'spk_self';
     }
 
     const outline = form.outlineText
@@ -491,7 +510,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       .map((text, idx) => ({ id: `ol_${idx + 1}`, text }));
 
     const targetFields =
-      form.scenario === 'interview' || form.scenario === 'sales'
+      form.scenario === 'chat' || form.scenario === 'interview'
         ? form.targetFieldsText
             .split(/\r?\n|[,，、]+/)
             .map((s) => s.trim())
@@ -619,23 +638,19 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
   if (snap.phase === 'idle') {
     const isListenForm = form.scenario === 'listen';
     const isDialogueForm = form.scenario === 'dialogue';
-    const isQaForm = form.scenario === 'interview' || form.scenario === 'sales';
-    const counterpartLabel =
-      form.scenario === 'sales'
-        ? '客户 / 讲述人称呼（多位用逗号分隔）'
-        : isListenForm
-          ? '主讲人 / 分享嘉宾'
-          : isDialogueForm
-            ? form.hasHost
-              ? '对谈嘉宾称呼（多位用逗号分隔）'
-              : '对谈参与者称呼（多位用逗号分隔）'
-            : '回答人 / 嘉宾称呼（多位用逗号分隔）';
-    const bgPlaceholder =
-      form.scenario === 'sales'
-        ? '例如：某制造企业生产总监，关注产线数字化改造与交付周期'
-        : isListenForm
-          ? '例如：某公司技术负责人，我想重点关注成本控制与工程落地难点'
-          : '例如：前某大厂架构师，目前创业做开源音视频工具';
+    const isChatForm = form.scenario === 'chat';
+    const counterpartLabel = isListenForm
+      ? '主讲人 / 分享嘉宾'
+      : isDialogueForm
+        ? form.hasHost
+          ? '对谈嘉宾称呼（多位用逗号分隔）'
+          : '对谈参与者称呼（多位用逗号分隔）'
+        : '参与人称呼（多位用逗号分隔）';
+    const bgPlaceholder = isListenForm
+      ? '例如：某公司技术负责人，我想重点关注成本控制与工程落地难点'
+      : isChatForm
+        ? '例如：产品、研发与设计同事一起脑暴 Q4 AI 功能优先级'
+        : '例如：前某大厂架构师，目前创业做开源音视频工具';
 
     return (
       <div className="flex-1 min-w-0 h-full overflow-y-auto bg-zinc-950 p-6 flex items-start justify-center">
@@ -649,10 +664,10 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 <h2 className="text-base font-bold text-zinc-100">实时录制与 AI 对话助手</h2>
                 <p className="text-xs text-zinc-400">
                   {isListenForm
-                    ? '演讲模式：主讲人核心信息提炼，自动分离并过滤旁听私下讨论与现场提问'
+                    ? '演讲模式：主讲人核心信息提炼（议题相对固定），自动分离并过滤旁听私下讨论与现场提问'
                     : isDialogueForm
-                      ? '对谈模式：固定人数多方对话（可选有/无主持人），持续提炼观点碰撞'
-                      : '访谈/销售模式：1 位主提问人 + 多位回答人/讲述人，提炼对方画像并推荐追问'}
+                      ? '对谈模式：固定人数多方对话（可选有/无主持人），议题相对固定，持续提炼观点碰撞'
+                      : '聊天模式：多人自由发言讨论，重点追踪当前议题、议题流转轨迹与主题相关性'}
                 </p>
               </div>
             </div>
@@ -660,8 +675,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
             <div className="flex items-center bg-zinc-950 p-1 rounded-lg border border-zinc-800">
               {(
                 [
-                  { id: 'interview', label: '采访' },
-                  { id: 'sales', label: '销售' },
+                  { id: 'chat', label: '聊天' },
                   { id: 'dialogue', label: '对谈' },
                   { id: 'listen', label: '演讲' },
                 ] as const
@@ -800,14 +814,16 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 placeholder={
                   isListenForm
                     ? '例如：AI Agent 工程化实践分享'
-                    : '例如：EP24 深度对谈 / 客户初访'
+                    : isChatForm
+                      ? '例如：产品周会 / 多人头脑风暴'
+                      : '例如：EP24 深度对谈'
                 }
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                className={FORM_INPUT_CLS}
               />
             </div>
             <div className="space-y-1">
               <label className="text-xs text-zinc-400">
-                {isListenForm ? '讲座主题 / 关注目标' : '本次话题 / 目标'}
+                {isListenForm ? '讲座主题 / 关注目标' : isChatForm ? '核心主题 / 讨论主线' : '本次话题 / 目标'}
               </label>
               <input
                 type="text"
@@ -816,9 +832,11 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 placeholder={
                   isListenForm
                     ? '例如：2026 年度架构演进、了解成本控制与落地难点'
-                    : '例如：复盘创业转折点、了解采购预算与痛点'
+                    : isChatForm
+                      ? '例如：Q4 产品规划与 AI 功能落地（用于评估议题相关性）'
+                      : '例如：复盘创业转折点、技术选型与经验总结'
                 }
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                className={FORM_INPUT_CLS}
               />
             </div>
 
@@ -829,52 +847,51 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 value={form.counterpartName}
                 onChange={(e) => setForm((f) => ({ ...f, counterpartName: e.target.value }))}
                 placeholder={
-                  form.scenario === 'sales'
-                    ? '例如：张总, 李经理'
-                    : isListenForm
-                      ? '主讲人姓名'
+                  isListenForm
+                    ? '主讲人姓名'
+                    : isChatForm
+                      ? '例如：张三, 李四, 王五'
                       : '例如：嘉宾A, 嘉宾B'
                 }
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                className={FORM_INPUT_CLS}
               />
             </div>
 
             {isListenForm ? (
-              <div className="flex items-end">
-                <label className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 cursor-pointer">
+              <div className="space-y-1">
+                <label className="text-xs text-zinc-400">现场声道分离</label>
+                <label
+                  className="w-full h-9 flex items-center gap-2.5 px-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 cursor-pointer"
+                  title="仅重点提炼主讲人信息，自动过滤旁听私下闲聊"
+                >
                   <input
                     type="checkbox"
                     checked={form.captureAudience}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, captureAudience: e.target.checked }))
                     }
-                    className="rounded border-zinc-600 bg-zinc-900 text-rose-500"
+                    className="rounded border-zinc-600 bg-zinc-900 text-rose-500 shrink-0"
                   />
-                  <div className="min-w-0">
-                    <div className="font-medium text-zinc-100">分离现场提问 / 私下讨论</div>
-                    <div className="text-[10px] text-zinc-400 truncate">
-                      仅重点提炼主讲人信息，自动过滤旁听私下闲聊
-                    </div>
-                  </div>
+                  <span className="font-medium text-zinc-100 truncate">
+                    分离现场提问 / 私下讨论
+                  </span>
                 </label>
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div className="space-y-1">
                   <label className="text-xs text-zinc-400">
                     {isDialogueForm
                       ? form.hasHost
                         ? '主持人称呼'
                         : '对谈结构'
-                      : form.scenario === 'sales'
-                        ? '主提问人(销售)'
-                        : '主提问人(我)'}
+                      : '我的称呼'}
                   </label>
                   {isDialogueForm && !form.hasHost ? (
                     <button
                       type="button"
                       onClick={() => setForm((f) => ({ ...f, hasHost: true }))}
-                      className="w-full px-2 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-amber-300 hover:border-amber-500/50 transition cursor-pointer text-left truncate"
+                      className="w-full h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-amber-300 hover:border-amber-500/50 transition cursor-pointer text-left truncate"
                       title="点击切换为有主持人模式"
                     >
                       无主持人 (点击切换)
@@ -885,13 +902,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                         type="text"
                         value={form.selfName}
                         onChange={(e) => setForm((f) => ({ ...f, selfName: e.target.value }))}
-                        className="w-full min-w-0 px-2.5 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                        className="w-full min-w-0 h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
                       />
                       {isDialogueForm && (
                         <button
                           type="button"
                           onClick={() => setForm((f) => ({ ...f, hasHost: false }))}
-                          className="shrink-0 px-1.5 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                          className="shrink-0 h-9 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
                           title="切换为无主持人平等对谈"
                         >
                           去主持
@@ -902,54 +919,36 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs text-zinc-400">
-                    {isDialogueForm ? '固定人数' : '发言人数'}
+                    {isDialogueForm ? '固定人数' : '讨论人数'}
                   </label>
-                  <select
-                    value={Math.max(2, form.speakerCount)}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, speakerCount: Number(e.target.value) }))
-                    }
-                    className="w-full px-2 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100"
-                  >
-                    {isQaForm ? (
-                      <>
-                        <option value={2}>2 人（1问1答）</option>
-                        <option value={3}>3 人（1问2答）</option>
-                        <option value={4}>4 人（1问3答）</option>
-                        <option value={5}>5 人（1问4答）</option>
-                        <option value={6}>6 人（1问5答）</option>
-                      </>
-                    ) : (
-                      <>
-                        <option value={2}>2 人对谈</option>
-                        <option value={3}>3 人对谈</option>
-                        <option value={4}>4 人对谈</option>
-                        <option value={5}>5 人对谈</option>
-                        <option value={6}>6 人对谈</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-zinc-400">谁先开口</label>
-                  <select
-                    disabled={isDialogueForm && !form.hasHost}
-                    value={isDialogueForm && !form.hasHost ? 'counterpart' : form.firstSpeakerRole}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        firstSpeakerRole: e.target.value === 'counterpart' ? 'counterpart' : 'self',
-                      }))
-                    }
-                    className="w-full px-2 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 disabled:opacity-45"
-                  >
-                    <option value="self">
-                      {isDialogueForm ? '主持人先说' : '主提问人先说'}
-                    </option>
-                    <option value="counterpart">
-                      {isDialogueForm ? '嘉宾先说' : '回答人先说'}
-                    </option>
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={Math.max(2, form.speakerCount)}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, speakerCount: Number(e.target.value) }))
+                      }
+                      className={FORM_SELECT_CLS}
+                    >
+                      {isChatForm ? (
+                        <>
+                          <option value={2}>2 人聊天</option>
+                          <option value={3}>3 人聊天</option>
+                          <option value={4}>4 人聊天</option>
+                          <option value={5}>5 人聊天</option>
+                          <option value={6}>6 人聊天</option>
+                        </>
+                      ) : (
+                        <>
+                          <option value={2}>2 人对谈</option>
+                          <option value={3}>3 人对谈</option>
+                          <option value={4}>4 人对谈</option>
+                          <option value={5}>5 人对谈</option>
+                          <option value={6}>6 人对谈</option>
+                        </>
+                      )}
+                    </select>
+                    <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+                  </div>
                 </div>
               </div>
             )}
@@ -960,7 +959,9 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               <label className="text-xs text-zinc-400">
                 {isListenForm
                   ? '主讲人背景 / 关注重点（帮助 AI 总结与推荐提问）'
-                  : '对方背景资料（帮助 AI 更好追问）'}
+                  : isChatForm
+                    ? '参与方背景 / 讨论上下文（帮助 AI 评估议题相关性）'
+                    : '对方背景资料（帮助 AI 更好追问）'}
               </label>
               <textarea
                 rows={3}
@@ -976,7 +977,9 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               <label className="text-xs text-zinc-400">
                 {isListenForm
                   ? '关注议程 / 想弄懂的问题（可选，每行一条）'
-                  : '沟通提纲（每行一个问题，实时跟踪覆盖）'}
+                  : isChatForm
+                    ? '参考议题 / 关注方向（可选，每行一条，用于对照流转）'
+                    : '沟通提纲（每行一个问题，实时跟踪覆盖）'}
               </label>
               <textarea
                 rows={3}
@@ -985,18 +988,20 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 placeholder={
                   isListenForm
                     ? '核心架构是如何演进的？\n相比传统方案成本下降了多少？\n落地时最大的坑是什么？'
-                    : '为什么决定做这件事？\n当时遇到的最大阻力是什么？\n接下来的规划？'
+                    : isChatForm
+                      ? '目前最大的卡点在哪里？\n各自对方案优先级的看法？\n下一步分工与时间节点？'
+                      : '为什么决定做这件事？\n当时遇到的最大阻力是什么？\n接下来的规划？'
                 }
                 className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500 resize-none"
               />
             </div>
           </div>
 
-          {isQaForm && (
+          {isChatForm && (
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <label className="text-xs text-zinc-400">
-                  希望获取的字段 / 关键信息（可选，每行一项或逗号分隔）
+                  希望聊透的关键信息 / 待确认事项（可选，每行一项或逗号分隔）
                 </label>
                 <span className="text-[11px] text-cyan-400/90">
                   录制中将实时追踪获取状态并适时提醒推荐提问
@@ -1006,11 +1011,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 rows={2}
                 value={form.targetFieldsText}
                 onChange={(e) => setForm((f) => ({ ...f, targetFieldsText: e.target.value }))}
-                placeholder={
-                  form.scenario === 'sales'
-                    ? '例如：当前核心痛点、预算范围、决策人与审批流程、期望上线时间'
-                    : '例如：创业契机、最大挫折与转折、团队规模与分工、商业化路径'
-                }
+                placeholder="例如：核心结论、责任人分工、预算范围、排期节点"
                 className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-cyan-500 resize-none"
               />
             </div>
@@ -1019,25 +1020,28 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
           {/* 麦克风选择与电平测试 */}
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3">
             <Volume2 className="w-4 h-4 text-zinc-400 shrink-0" />
-            <select
-              value={selectedDeviceId}
-              onChange={(e) => setSelectedDeviceId(e.target.value)}
-              className="flex-1 min-w-48 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200"
-            >
-              {devices.length === 0 ? (
-                <option value="">默认系统麦克风</option>
-              ) : (
-                devices.map((d) => (
-                  <option key={d.deviceId} value={d.deviceId}>
-                    {d.label}
-                  </option>
-                ))
-              )}
-            </select>
+            <div className="relative flex-1 min-w-48">
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => setSelectedDeviceId(e.target.value)}
+                className="w-full h-9 pl-3 pr-7 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 focus:outline-none focus:border-blue-500 appearance-none cursor-pointer"
+              >
+                {devices.length === 0 ? (
+                  <option value="">默认系统麦克风</option>
+                ) : (
+                  devices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))
+                )}
+              </select>
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+            </div>
             <button
               type="button"
               onClick={() => void handleToggleTestMic()}
-              className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 cursor-pointer"
+              className="h-9 px-3 rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 cursor-pointer inline-flex items-center"
             >
               {testingMic ? '停止测试' : '测试电平'}
             </button>
@@ -1072,7 +1076,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                       setForm((f) => ({ ...f, volcStreamResourceId: e.target.value }))
                     }
                     placeholder="volc.bigasr.sauc.duration"
-                    className="w-full px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 font-mono"
+                    className="w-full h-9 px-3 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 font-mono focus:outline-none focus:border-blue-500"
                   />
                 </div>
               </div>
@@ -1239,7 +1243,9 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
         : '演讲 · 单主讲人'
       : snap.scenario === 'dialogue'
         ? `${snap.prep?.hasHost === false ? '对谈 · 无主持' : '对谈 · 有主持'} · ${snap.speakers.length}人`
-        : `${snap.scenario === 'sales' ? '销售' : '采访'} · 1问${Math.max(1, snap.speakers.length - 1)}答`;
+        : snap.scenario === 'chat'
+          ? `聊天 · ${snap.speakers.length}人自由讨论`
+          : `采访 · 1问${Math.max(1, snap.speakers.length - 1)}答`;
 
   return (
     <div className="relative flex-1 min-w-0 h-full flex flex-col bg-zinc-950 overflow-hidden">
@@ -1556,7 +1562,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               );
             })()}
 
-            {/* 目标信息 / 字段采集清单（访谈/销售模式） */}
+            {/* 目标信息 / 字段采集清单（采访模式） */}
             {(snap.targetFields?.length ?? 0) > 0 && (
               <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-2.5 space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -1612,92 +1618,6 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               </div>
             )}
 
-            {/* 销售场景专属静态字段标签 */}
-            {snap.scenario === 'sales' && (
-              <div className="space-y-2 pt-1.5 border-t border-zinc-800">
-                <div className="text-[11px] font-semibold text-rose-300">销售信号与异议</div>
-                <div className="rounded-lg border border-zinc-800/90 bg-zinc-900/50 p-2 text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700/80 text-[10px] font-semibold text-zinc-300">
-                      客户痛点
-                    </span>
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      {snap.profile.sales?.painPoints.length ?? 0}
-                    </span>
-                  </div>
-                  {!snap.profile.sales || snap.profile.sales.painPoints.length === 0 ? (
-                    <div className="text-[11px] text-zinc-500">暂无痛点提取…</div>
-                  ) : (
-                    snap.profile.sales.painPoints.map((p, i) => (
-                      <div key={i} className="text-zinc-200">
-                        • {p}
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="rounded-lg border border-zinc-800/90 bg-zinc-900/50 p-2 text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700/80 text-[10px] font-semibold text-zinc-300">
-                      核心需求
-                    </span>
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      {snap.profile.sales?.needs.length ?? 0}
-                    </span>
-                  </div>
-                  {!snap.profile.sales || snap.profile.sales.needs.length === 0 ? (
-                    <div className="text-[11px] text-zinc-500">暂无需求提取…</div>
-                  ) : (
-                    snap.profile.sales.needs.map((n, i) => (
-                      <div key={i} className="text-zinc-200">
-                        • {n}
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="rounded-lg border border-zinc-800/90 bg-zinc-900/50 p-2 text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700/80 text-[10px] font-semibold text-zinc-300">
-                      异议与决策信号
-                    </span>
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      {(snap.profile.sales?.objections.length ?? 0) +
-                        (snap.profile.sales?.decisionSignals.length ?? 0)}
-                    </span>
-                  </div>
-                  {(!snap.profile.sales ||
-                    (snap.profile.sales.objections.length === 0 &&
-                      snap.profile.sales.decisionSignals.length === 0)) ? (
-                    <div className="text-[11px] text-zinc-500">暂无异议或决策信号…</div>
-                  ) : (
-                    <div className="space-y-1">
-                      {snap.profile.sales.objections.map((obj, i) => (
-                        <div
-                          key={`obj-${i}`}
-                          className="rounded border border-rose-500/30 bg-rose-500/10 p-1.5 text-xs text-rose-200"
-                        >
-                          <div>异议：{obj.text}</div>
-                          <div className="text-[10px] text-rose-300/80">
-                            {obj.handled ? '已化解' : '待处理'} · [{formatLiveMmSs(obj.evidenceMs)}]
-                          </div>
-                        </div>
-                      ))}
-                      {snap.profile.sales.decisionSignals.map((sig, i) => (
-                        <div
-                          key={`sig-${i}`}
-                          className={`rounded border p-1.5 text-xs ${
-                            sig.polarity === 'positive'
-                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                              : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
-                          }`}
-                        >
-                          {sig.polarity === 'positive' ? '▲ 正向信号' : '▼ 风险信号'}：{sig.text}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
 
           {/* 右下：原提问区 */}
@@ -2010,18 +1930,9 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 <React.Fragment key={u.id}>
                   <div
                     id={`live-utt-${u.id}`}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      const maxW = typeof window !== 'undefined' ? window.innerWidth : 1200;
-                      const maxH = typeof window !== 'undefined' ? window.innerHeight : 800;
-                      const x = Math.min(e.clientX, Math.max(12, maxW - 260));
-                      const y = Math.min(e.clientY, Math.max(12, maxH - 320));
-                      setSpeakerCtxMenu({ utteranceId: u.id, x, y });
-                      setCreatingNewSpeaker(false);
-                      setNewSpeakerName('');
-                      setNewSpeakerRole('counterpart');
-                    }}
+                    onContextMenu={(e) =>
+                      openSpeakerCtxMenu(e, { kind: 'utterance', utteranceId: u.id })
+                    }
                     title="右键可切换或新建发言人"
                     className={`relative rounded-xl ${cardStyle} ${
                       isHighlighted ? 'ring-2 ring-cyan-400/80 transition-shadow' : ''
@@ -2215,7 +2126,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
             })}
 
             {snap.partial && (
-              <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/20 p-2.5 space-y-1.5 shadow-sm">
+              <div
+                onContextMenu={(e) =>
+                  openSpeakerCtxMenu(e, { kind: 'partial', startMs: snap.partial!.startMs })
+                }
+                title="右键可切换或新建发言人"
+                className="rounded-xl border border-cyan-500/40 bg-cyan-950/20 p-2.5 space-y-1.5 shadow-sm"
+              >
                 <div className="flex items-center gap-2 text-xs">
                   {snap.partial.speakerId && speakerMap.get(snap.partial.speakerId) && (
                     <span
@@ -2257,19 +2174,46 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
           )}
 
           {speakerCtxMenu && (() => {
-            const targetUtt = snap.utterances.find((x) => x.id === speakerCtxMenu.utteranceId);
-            if (!targetUtt) return null;
+            const targetUtt =
+              speakerCtxMenu.kind === 'utterance'
+                ? snap.utterances.find((x) => x.id === speakerCtxMenu.utteranceId)
+                : undefined;
+            if (speakerCtxMenu.kind === 'utterance' && !targetUtt) return null;
+
+            const currentSpeakerId =
+              speakerCtxMenu.kind === 'utterance'
+                ? targetUtt!.speakerId
+                : (snap.partial?.speakerId ?? '');
+            const displayStartMs =
+              speakerCtxMenu.kind === 'utterance'
+                ? targetUtt!.startMs
+                : (snap.partial?.startMs ?? speakerCtxMenu.startMs);
+
             const handleCreateAndAssign = () => {
               const trimmed = newSpeakerName.trim();
               if (!trimmed) return;
-              const added = addAndAssignLiveSpeaker(
-                targetUtt.id,
-                trimmed,
-                newSpeakerRole,
-                applyToLabel
-              );
-              triggerSpeakerSuggestion(targetUtt.id, added.id, added.name);
-              onNotify(`已新建发言人「${added.name}」并切换当前语句`);
+              if (speakerCtxMenu.kind === 'utterance') {
+                const added = addAndAssignLiveSpeaker(
+                  targetUtt!.id,
+                  trimmed,
+                  newSpeakerRole,
+                  applyToLabel
+                );
+                triggerSpeakerSuggestion(targetUtt!.id, added.id, added.name);
+                onNotify(`已新建发言人「${added.name}」并切换当前语句`);
+              } else {
+                const { speaker: added, assignedUtteranceId } =
+                  addAndAssignLivePartialSpeaker(
+                    trimmed,
+                    newSpeakerRole,
+                    applyToLabel,
+                    speakerCtxMenu.startMs
+                  );
+                if (assignedUtteranceId) {
+                  triggerSpeakerSuggestion(assignedUtteranceId, added.id, added.name);
+                }
+                onNotify(`已新建发言人「${added.name}」并切换当前听写`);
+              }
               setSpeakerCtxMenu(null);
               setCreatingNewSpeaker(false);
               setNewSpeakerName('');
@@ -2283,20 +2227,31 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               >
                 <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center justify-between">
                   <span>切换发言人</span>
-                  <span className="font-mono text-zinc-500">{formatLiveMmSs(targetUtt.startMs)}</span>
+                  <span className="font-mono text-zinc-500">{formatLiveMmSs(displayStartMs)}</span>
                 </div>
 
                 <div className="max-h-44 overflow-y-auto space-y-0.5 my-1">
                   {snap.speakers.map((sp, sIdx) => {
                     const c = SPEAKER_COLORS[sIdx % SPEAKER_COLORS.length];
-                    const isCurrent = sp.id === targetUtt.speakerId;
+                    const isCurrent = sp.id === currentSpeakerId;
                     return (
                       <button
                         key={sp.id}
                         type="button"
                         onClick={() => {
-                          assignLiveSpeaker(targetUtt.id, sp.id, applyToLabel);
-                          triggerSpeakerSuggestion(targetUtt.id, sp.id, sp.name);
+                          if (speakerCtxMenu.kind === 'utterance') {
+                            assignLiveSpeaker(targetUtt!.id, sp.id, applyToLabel);
+                            triggerSpeakerSuggestion(targetUtt!.id, sp.id, sp.name);
+                          } else {
+                            const assignedUttId = assignLivePartialSpeaker(
+                              sp.id,
+                              applyToLabel,
+                              speakerCtxMenu.startMs
+                            );
+                            if (assignedUttId) {
+                              triggerSpeakerSuggestion(assignedUttId, sp.id, sp.name);
+                            }
+                          }
                           setSpeakerCtxMenu(null);
                         }}
                         className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between gap-2 cursor-pointer transition ${
@@ -2354,22 +2309,25 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                         }
                       }}
                       placeholder="输入新发言人姓名..."
-                      className="w-full px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500"
+                      className="w-full h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500"
                     />
                     <div className="flex items-center justify-between gap-1.5">
-                      <select
-                        value={newSpeakerRole}
-                        onChange={(e) => setNewSpeakerRole(e.target.value as LiveSpeakerRole)}
-                        className="px-1.5 py-1 rounded border border-zinc-700 bg-zinc-900 text-[11px] text-zinc-200"
-                      >
-                        <option value="counterpart">嘉宾 / 对方</option>
-                        <option value="self">主持人 / 我方</option>
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={newSpeakerRole}
+                          onChange={(e) => setNewSpeakerRole(e.target.value as LiveSpeakerRole)}
+                          className="h-7 pl-2 pr-6 rounded border border-zinc-700 bg-zinc-900 text-[11px] text-zinc-200 appearance-none cursor-pointer focus:outline-none focus:border-emerald-500"
+                        >
+                          <option value="counterpart">嘉宾 / 对方</option>
+                          <option value="self">主持人 / 我方</option>
+                        </select>
+                        <ChevronDown className="w-3 h-3 text-zinc-400 pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2" />
+                      </div>
                       <button
                         type="button"
                         disabled={!newSpeakerName.trim()}
                         onClick={handleCreateAndAssign}
-                        className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-semibold cursor-pointer"
+                        className="h-7 px-2.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-semibold cursor-pointer inline-flex items-center"
                       >
                         创建并切换
                       </button>

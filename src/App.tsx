@@ -4202,6 +4202,8 @@ export const App: React.FC = () => {
         onOpenGlobalAuxLibrary={(slot) => setAuxLibraryModal({ open: true, slot: slot || 'intro' })}
         onOpenDepGuide={() => setDepGuideModalOpen(true)}
         onOpenAiPlatform={() => setAiPlatformModalOpen(true)}
+        aiPlatformConfig={aiPlatformConfig}
+        onSaveAiPlatformConfig={handleSaveAiPlatformConfig}
         aiConfiguredCount={countConfiguredProviders(aiPlatformConfig)}
         onImportBgm={stableImportBgm}
         onToggleBgmEnabled={stableToggleBgmEnabled}
@@ -4387,7 +4389,7 @@ export const App: React.FC = () => {
               >
                 <div className="flex items-center gap-2 font-semibold text-sm text-rose-200">
                   <span>🎙️</span>
-                  <span>实时录制：采访 / 对谈 / 销售助手</span>
+                  <span>实时录制：聊天 / 对谈 / 演讲助手</span>
                 </div>
                 <p className="text-xs text-zinc-300/90 leading-snug">
                   实时转写、自动区分发言人，AI 持续提炼对方画像并推荐推动提问，结束后生成纪要

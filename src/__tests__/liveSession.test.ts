@@ -497,4 +497,59 @@ describe('liveMinutesExporter buildLiveSessionMarkdown', () => {
     expect(md).toContain('**预算范围**（已获取）：50万以内 [00:12]');
     expect(md).toContain('**决策流程**（部分提及）：需技术总监评估 [00:18]');
   });
+
+  it('tracks currentTopic and topicFlow in chat scenario and exports markdown', () => {
+    let snap: LiveSessionSnapshot = {
+      ...createInitialLiveSnapshot(),
+      scenario: 'chat',
+      title: '产品周会讨论',
+      speakers: [
+        { id: 'spk_self', name: '我', role: 'self' },
+        { id: 'spk_other_1', name: '张三', role: 'counterpart' },
+        { id: 'spk_other_2', name: '李四', role: 'counterpart' },
+      ],
+    };
+
+    snap = applyLiveEvent(snap, {
+      type: 'insight',
+      seq: 1,
+      profile: { background: [], stories: [], viewpoints: [] },
+      questions: [],
+      turnSummaries: [],
+      keyPoints: ['确定先落地议题流转功能'],
+      outlineCoverage: [],
+      currentTopic: '议题流转 UI 设计',
+      topicFlow: [
+        {
+          id: 't1',
+          topic: 'Q4 核心目标对齐',
+          status: 'ended',
+          relevance: 'high',
+          relevanceNote: '紧扣周会主线',
+          startMs: 5000,
+          speakers: ['我', '张三'],
+        },
+        {
+          id: 't2',
+          topic: '议题流转 UI 设计',
+          status: 'active',
+          relevance: 'high',
+          relevanceNote: '从目标自然过渡到设计方案',
+          transitionFrom: 'Q4 核心目标对齐',
+          startMs: 42000,
+          speakers: ['张三', '李四'],
+        },
+      ],
+    });
+
+    expect(snap.currentTopic).toBe('议题流转 UI 设计');
+    expect(snap.topicFlow).toHaveLength(2);
+    expect(snap.topicFlow?.[1].status).toBe('active');
+    expect(snap.topicFlow?.[1].transitionFrom).toBe('Q4 核心目标对齐');
+
+    const md = buildLiveSessionMarkdown(snap);
+    expect(md).toContain('# 聊天讨论纪要：产品周会讨论');
+    expect(md).toContain('## 议题流转与相关性');
+    expect(md).toContain('**议题流转 UI 设计** [当前议题 · 高度相关]（接续自：Q4 核心目标对齐）');
+  });
 });

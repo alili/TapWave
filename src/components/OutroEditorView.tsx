@@ -765,7 +765,7 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
             }}
             className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[11px] text-zinc-200 cursor-pointer"
           >
-            返回音轨视图
+            返回音轨
           </button>
         </div>
 

@@ -6,6 +6,7 @@ import {
   EyeOff,
   HardDrive,
   KeyRound,
+  Plus,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -26,6 +27,7 @@ import {
   hasProviderCredentials,
   isFeatureUsingProvider,
   maskSecretKey,
+  removeProviderCredentials,
   toggleFeatureForProvider,
 } from '../engine/aiPlatformConfig';
 
@@ -104,7 +106,14 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
   onOpenDepGuide,
 }) => {
   const [draft, setDraft] = useState<AiPlatformConfig>(config);
-  const [selectedProvider, setSelectedProvider] = useState<AiProviderId>('deepseek');
+  const [addedProviders, setAddedProviders] = useState<AiProviderId[]>([]);
+  const [addPickerOpen, setAddPickerOpen] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<AiProviderId>(() => {
+    const firstConfigured = AI_PROVIDERS_CATALOG.find((p) =>
+      hasProviderCredentials(config, p.id)
+    );
+    return firstConfigured?.id ?? 'local_sensevoice';
+  });
   const [revealedKeys, setRevealedKeys] = useState<Record<string, boolean>>({});
   const [revealAll, setRevealAll] = useState(false);
   const [storagePath, setStoragePath] = useState<string>('~/.tapwave/ai_config.json');
@@ -114,6 +123,12 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
   useEffect(() => {
     if (!open) return;
     setDraft(config);
+    setAddedProviders([]);
+    setAddPickerOpen(false);
+    const firstConfigured = AI_PROVIDERS_CATALOG.find((p) =>
+      hasProviderCredentials(config, p.id)
+    );
+    setSelectedProvider(firstConfigured?.id ?? 'local_sensevoice');
     setRevealedKeys({});
     setRevealAll(false);
     setConfirmClear(false);
@@ -144,8 +159,38 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
     setRevealedKeys((prev) => ({ ...prev, [fieldId]: !prev[fieldId] }));
   };
 
+  const visibleProviders = AI_PROVIDERS_CATALOG.filter(
+    (p) => hasProviderCredentials(draft, p.id) || addedProviders.includes(p.id)
+  );
+  const addableProviders = AI_PROVIDERS_CATALOG.filter(
+    (p) => !visibleProviders.some((v) => v.id === p.id)
+  );
+
   const activeProviderMeta =
-    AI_PROVIDERS_CATALOG.find((p) => p.id === selectedProvider) ?? AI_PROVIDERS_CATALOG[0];
+    visibleProviders.find((p) => p.id === selectedProvider) ??
+    visibleProviders[0] ??
+    AI_PROVIDERS_CATALOG.find((p) => p.id === selectedProvider) ??
+    AI_PROVIDERS_CATALOG[0];
+
+  const handleAddProvider = (providerId: AiProviderId) => {
+    setAddedProviders((prev) => (prev.includes(providerId) ? prev : [...prev, providerId]));
+    setSelectedProvider(providerId);
+    setAddPickerOpen(false);
+  };
+
+  const handleRemoveProvider = (providerId: AiProviderId) => {
+    if (providerId === 'local_sensevoice') return;
+    const nextDraft = removeProviderCredentials(draft, providerId);
+    const nextAdded = addedProviders.filter((id) => id !== providerId);
+    setDraft(nextDraft);
+    setAddedProviders(nextAdded);
+    if (selectedProvider === providerId) {
+      const remaining = AI_PROVIDERS_CATALOG.filter(
+        (p) => hasProviderCredentials(nextDraft, p.id) || nextAdded.includes(p.id)
+      );
+      setSelectedProvider(remaining[0]?.id ?? 'local_sensevoice');
+    }
+  };
 
   const handleToggleAllReveal = () => {
     const next = !revealAll;
@@ -420,49 +465,121 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
 
         {/* 主体区域：左侧 AI 列表 + 右侧凭据与功能项切换 */}
         <div className="flex-1 min-h-0 flex flex-col sm:flex-row overflow-hidden">
-          {/* 左侧 AI 列表 */}
-          <div className="w-full sm:w-60 border-b sm:border-b-0 sm:border-r border-zinc-800 bg-zinc-950/50 p-2.5 space-y-1.5 overflow-y-auto shrink-0">
-            <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-              AI 服务平台 ({AI_PROVIDERS_CATALOG.length})
+          {/* 左侧 AI 列表（仅显示已配置与待配置平台，支持增减） */}
+          <div className="w-full sm:w-64 border-b sm:border-b-0 sm:border-r border-zinc-800 bg-zinc-950/50 p-2.5 space-y-1.5 overflow-y-auto shrink-0">
+            <div className="px-1.5 py-1 flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                已配置平台 ({visibleProviders.length})
+              </span>
+              {addableProviders.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAddPickerOpen((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 text-[10px] font-medium cursor-pointer transition"
+                  title="添加新的 AI 服务平台"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>添加</span>
+                </button>
+              )}
             </div>
-            {AI_PROVIDERS_CATALOG.map((p) => {
-              const isSelected = selectedProvider === p.id;
+
+            {addPickerOpen && addableProviders.length > 0 && (
+              <div className="p-2 rounded-xl border border-cyan-500/35 bg-zinc-900/95 space-y-1.5">
+                <div className="flex items-center justify-between text-[10px] text-zinc-400 px-1">
+                  <span>选择要添加的平台</span>
+                  <button
+                    type="button"
+                    onClick={() => setAddPickerOpen(false)}
+                    className="text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                  >
+                    收起
+                  </button>
+                </div>
+                {addableProviders.map((ap) => (
+                  <button
+                    key={ap.id}
+                    type="button"
+                    onClick={() => handleAddProvider(ap.id)}
+                    className="w-full text-left px-2 py-1.5 rounded-lg bg-zinc-950/80 hover:bg-cyan-500/15 border border-zinc-800 hover:border-cyan-500/40 transition cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[11px] font-semibold text-zinc-100 truncate">
+                        {ap.name}
+                      </span>
+                      <span className="text-[9px] text-cyan-300 shrink-0">+ 添加</span>
+                    </div>
+                    <div className="text-[10px] text-zinc-500 truncate mt-0.5">{ap.badge}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {visibleProviders.map((p) => {
+              const isSelected = activeProviderMeta.id === p.id;
               const configured = hasProviderCredentials(draft, p.id);
               const activeCount = p.supportedFeatures.filter((fid) =>
                 isFeatureUsingProvider(draft, fid, p.id)
               ).length;
 
               return (
-                <button
+                <div
                   key={p.id}
-                  type="button"
-                  onClick={() => setSelectedProvider(p.id)}
-                  className={`w-full text-left p-2.5 rounded-xl border transition cursor-pointer ${
+                  className={`group relative rounded-xl border transition ${
                     isSelected
                       ? 'border-cyan-500/70 bg-cyan-500/10'
                       : 'border-transparent hover:border-zinc-800 hover:bg-zinc-900/70'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-zinc-100 truncate">
-                      {p.name}
-                    </span>
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                        configured ? 'bg-emerald-400' : 'bg-zinc-600'
-                      }`}
-                      title={configured ? '已配置凭据' : '未配置 API Key'}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between gap-1.5 mt-1">
-                    <span className="text-[10px] text-zinc-400 truncate">{p.badge}</span>
-                    {activeCount > 0 && (
-                      <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-medium shrink-0">
-                        {activeCount} 项启用
+                  <button
+                    type="button"
+                    onClick={() => setSelectedProvider(p.id)}
+                    className="w-full text-left p-2.5 cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-zinc-100 truncate">
+                        {p.name}
                       </span>
-                    )}
-                  </div>
-                </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {p.requiresKey && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            title={`移除 ${p.name} 配置`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveProvider(p.id);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleRemoveProvider(p.id);
+                              }
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-rose-500/20 text-zinc-500 hover:text-rose-300 transition"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </span>
+                        )}
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            configured ? 'bg-emerald-400' : 'bg-amber-400'
+                          }`}
+                          title={configured ? '已配置凭据' : '待填写 API Key'}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-1.5 mt-1">
+                      <span className="text-[10px] text-zinc-400 truncate">{p.badge}</span>
+                      {activeCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-medium shrink-0">
+                          {activeCount} 项启用
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -479,6 +596,17 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
                 </div>
                 <p className="text-xs text-zinc-400 mt-1">{activeProviderMeta.description}</p>
               </div>
+              {activeProviderMeta.requiresKey && (
+                <button
+                  type="button"
+                  onClick={() => handleRemoveProvider(activeProviderMeta.id)}
+                  title="清空该平台凭据并从已配置列表中移除"
+                  className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-rose-500/15 border border-zinc-800 hover:border-rose-500/40 text-zinc-400 hover:text-rose-300 text-[11px] transition cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>移除平台</span>
+                </button>
+              )}
             </div>
 
             {/* 凭据配置区 */}

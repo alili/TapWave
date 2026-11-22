@@ -508,9 +508,15 @@ def should_trigger_insight(
 
 
 SCENARIO_SYSTEM_PROMPTS: Dict[str, str] = {
+    "chat": (
+        "你是一位资深多人讨论与议题流转观察助手（Live Copilot），正在实时辅助多人自由聊天与研讨。"
+        "聊天讨论中议题会动态演变，你需要重点识别当前正在讨论的议题、追踪议题的流转脉络与转向关系，"
+        "判断各议题与核心主题/参考提纲的相关性（高度相关/延伸相关/偏离主线），并提炼各方观点与促进讨论或拉回主线的提问建议。"
+        "必须严格输出合法 JSON。"
+    ),
     "interview": (
-        "你是一位资深深度播客采访副驾（Live Copilot），正在实时辅助主持人采访嘉宾。"
-        "你需要从最新对话中持续提炼嘉宾的背景履历、经历故事与核心观点，并给出能引出好故事或金句的下一步提问。"
+        "你是一位资深深度采访与沟通副驾（Live Copilot），正在实时辅助主提问人与受访嘉宾或沟通对象交流。"
+        "你需要从最新对话中持续提炼对方的背景履历、经历故事、核心观点与真实诉求，并结合提纲和待采集信息给出能引出好故事、关键事实或推进沟通的下一步提问。"
         "必须严格输出合法 JSON。"
     ),
     "dialogue": (
@@ -557,6 +563,8 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
             if not has_host:
                 return "对谈嘉宾"
             return "主持人/我" if spk.get("role") == "self" else "对谈嘉宾"
+        if scenario == "chat":
+            return "参与者/我" if spk.get("role") == "self" else "参与者"
         return "主提问人/我" if spk.get("role") == "self" else "回答人/对方"
 
     # Build recent transcript window up to 3500 chars from the end
@@ -609,9 +617,10 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
 
     is_listen = scenario == "listen"
     is_dialogue = scenario == "dialogue"
-    counterpart_title = "主讲人/嘉宾" if is_listen else "回答人/对谈方"
-    background_title = "主讲人背景/我的关注点" if is_listen else "对方背景资料"
-    outline_title = "讲座议程 / 关注问题" if is_listen else "采访/沟通提纲"
+    is_chat = scenario == "chat"
+    counterpart_title = "主讲人/嘉宾" if is_listen else "参与人" if is_chat else "回答人/对谈方"
+    background_title = "主讲人背景/我的关注点" if is_listen else "参与方背景/讨论上下文" if is_chat else "对方背景资料"
+    outline_title = "讲座议程 / 关注问题" if is_listen else "参考提纲 / 关注议题" if is_chat else "采访/沟通提纲"
     profile_heading = (
         "已有内容提炼（请在此基础上保留有效条目、去重合并并补充新发现，不要丢弃旧信息）"
         if is_listen
@@ -619,7 +628,7 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
     )
     if is_listen:
         mode_rule = (
-            "- 模式适配（演讲模式）：仅有 1 位主讲人，其余声道可能包含听众的【现场提问】或旁听人员的【私下讨论】。\n"
+            "- 模式适配（演讲模式·议题相对固定）：仅有 1 位主讲人，其余声道可能包含听众的【现场提问】或旁听人员的【私下讨论】。\n"
             "  * 主要提取主讲人的背景、案例、观点与核心结论；\n"
             "  * 若出现有效的现场提问，可结合主讲人的回答提炼 Q&A 要点；\n"
             "  * 严禁将旁听私下讨论、闲聊或低声议论误判为主讲人观点，自动过滤无关私下讨论。\n"
@@ -627,15 +636,24 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
     elif is_dialogue:
         if has_host:
             mode_rule = (
-                f"- 模式适配（对谈模式·固定 {len(speakers) or 2} 人·有主持人）："
+                f"- 模式适配（对谈模式·固定 {len(speakers) or 2} 人·有主持人·议题相对固定）："
                 "辅助主持人把控节奏，综合提炼各位嘉宾的背景、故事与观点碰撞，推荐有助于深化思辨或自然转场的提问。\n"
             )
         else:
             mode_rule = (
-                f"- 模式适配（对谈模式·固定 {len(speakers) or 2} 人·无主持人）："
+                f"- 模式适配（对谈模式·固定 {len(speakers) or 2} 人·无主持人·议题相对固定）："
                 "所有参与者为平等对谈方，无单一主持人；请综合提炼各方核心背景、故事与观点交锋，"
                 "推荐面向全场的延展话题或深化讨论切入点。\n"
             )
+    elif is_chat:
+        participant_names = [str(s.get("name") or "参与者") for s in speakers]
+        mode_rule = (
+            f"- 模式适配（聊天讨论模式·{len(speakers) or 2}人自由讨论·议题动态流转）："
+            f"参与者（{', '.join(participant_names) or '多人'}）可能多人自由穿插发言，议题会随对话自然流转。\n"
+            "  * 请重点识别当前正在讨论的议题（`currentTopic`），并维护完整的议题流转轨迹（`topicFlow`）；\n"
+            "  * 当对话明显转向新话题时，将前一个议题标记为 `ended`，新增 `active` 议题并填写 `transitionFrom`（从哪个议题转入）；\n"
+            "  * 评估每个议题与核心主题/参考提纲的相关性（`high` 高度相关 / `medium` 延伸相关 / `off_topic` 偏离主线），给出简短说明。\n"
+        )
     else:
         respondent_names = [
             str(s.get("name") or "回答人")
@@ -691,6 +709,22 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
         else '  "keyPoints": ["全场关键要点<=80字"],\n'
     )
 
+    prev_topic_flow_section = ""
+    topic_flow_schema = ""
+    if is_chat:
+        prev_tf_json = json.dumps(prev_insight.get("topicFlow") or [], ensure_ascii=False)
+        prev_topic_flow_section = (
+            f"# 已有议题流转轨迹（请在此基础上保留历史已结束议题，如发生新转向则追加或更新当前 active 议题）\n"
+            f"- 当前议题: {prev_insight.get('currentTopic') or '尚未识别'}\n"
+            f"- 轨迹: {prev_tf_json}\n\n"
+        )
+        topic_flow_schema = (
+            ',\n  "currentTopic": "当前正在讨论的具体议题<=30字",'
+            '\n  "topicFlow": [{"id": "tf_topic_1", "topic": "议题名称<=30字", "status": "active|ended", '
+            '"relevance": "high|medium|off_topic", "relevanceNote": "相关性或转向说明<=50字", '
+            '"transitionFrom": "上一个议题名称(可选)", "startMs": 0, "speakers": ["发言人"]}]'
+        )
+
     return (
         f"# 会前准备\n"
         f"- 场景: {scenario}\n"
@@ -701,6 +735,7 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
         f"- {background_title}: {prep.get('counterpartBackground') or '无'}\n\n"
         f"{target_fields_section}"
         f"# {outline_title}\n{outline_desc}\n\n"
+        f"{prev_topic_flow_section}"
         f"# {profile_heading}\n{prev_profile_json}\n\n"
         f"# 已有全场要点\n{prev_keypoints_json}\n\n"
         f"# 已问过或已忽略的问题（严禁重复推荐相同意思的问题）\n"
@@ -724,7 +759,8 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
         f'  "turnSummaries": [{{"speakerId": "speakerId", "startMs": 0, "summary": "发言小结<=50字"}}],\n'
         f"{keypoints_rule}"
         f'  "outlineCoverage": [{{"id": "提纲id", "status": "covered|partial|not_started", "note": "简要依据<=40字"}}]'
-        f"{target_fields_schema}\n"
+        f"{target_fields_schema}"
+        f"{topic_flow_schema}\n"
         f"}}"
     )
 
@@ -909,7 +945,7 @@ def normalize_live_insight(
         if tf_id not in seen_tf_ids and (not valid_tf_ids or tf_id in valid_tf_ids):
             target_field_updates.append(prev_tf)
 
-    return {
+    result: Dict[str, Any] = {
         "profile": profile,
         "questions": questions,
         "turnSummaries": turn_summaries,
@@ -917,6 +953,76 @@ def normalize_live_insight(
         "outlineCoverage": outline_coverage,
         "targetFieldUpdates": target_field_updates,
     }
+    if scenario == "chat":
+        raw_flow = raw.get("topicFlow") or []
+        norm_flow: List[Dict[str, Any]] = []
+        seen_topics: set = set()
+        for idx, tf in enumerate(raw_flow[:16]):
+            if not isinstance(tf, dict):
+                continue
+            t_name = _clip_str(tf.get("topic"), 30)
+            if not t_name or t_name in seen_topics:
+                continue
+            seen_topics.add(t_name)
+            rel = str(tf.get("relevance") or "high")
+            if rel not in ("high", "medium", "off_topic"):
+                rel = "medium"
+            st = "active" if tf.get("status") == "active" else "ended"
+            item: Dict[str, Any] = {
+                "id": str(tf.get("id") or f"topic_{idx + 1}"),
+                "topic": t_name,
+                "status": st,
+                "relevance": rel,
+                "relevanceNote": _clip_str(tf.get("relevanceNote"), 50),
+                "transitionFrom": _clip_str(tf.get("transitionFrom"), 30),
+                "startMs": max(0, int(tf.get("startMs") or 0)),
+            }
+            spks = [_clip_str(s, 20) for s in (tf.get("speakers") or [])[:6] if str(s or "").strip()]
+            if spks:
+                item["speakers"] = spks
+            norm_flow.append(item)
+
+        if not norm_flow and isinstance(prev, dict) and prev.get("topicFlow"):
+            norm_flow = list(prev["topicFlow"])
+
+        cur_topic = _clip_str(raw.get("currentTopic"), 30)
+        if not cur_topic:
+            active_items = [x for x in norm_flow if x.get("status") == "active"]
+            if active_items:
+                cur_topic = active_items[-1]["topic"]
+            elif norm_flow:
+                cur_topic = norm_flow[-1]["topic"]
+                norm_flow[-1]["status"] = "active"
+            elif isinstance(prev, dict):
+                cur_topic = _clip_str(prev.get("currentTopic"), 30)
+        elif norm_flow:
+            # Ensure only the latest matching or last topic is active
+            matched = False
+            for item in norm_flow:
+                if item["topic"] == cur_topic:
+                    item["status"] = "active"
+                    matched = True
+                else:
+                    item["status"] = "ended"
+            if not matched:
+                for item in norm_flow:
+                    item["status"] = "ended"
+                norm_flow.append(
+                    {
+                        "id": f"topic_{len(norm_flow) + 1}",
+                        "topic": cur_topic,
+                        "status": "active",
+                        "relevance": "high",
+                        "relevanceNote": "",
+                        "transitionFrom": norm_flow[-1]["topic"] if norm_flow else "",
+                        "startMs": max(0, last_summarized_ms),
+                    }
+                )
+
+        result["currentTopic"] = cur_topic
+        result["topicFlow"] = norm_flow
+
+    return result
 
 
 class VolcStreamingAsr:

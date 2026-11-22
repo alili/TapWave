@@ -888,6 +888,62 @@ class LiveSessionLogicTests(unittest.TestCase):
         self.assertEqual(by_id["tf_1"]["value"], "约50万")
         self.assertEqual(by_id["tf_2"]["status"], "captured")
 
+    def test_chat_scenario_topic_flow_prompt_and_normalize(self) -> None:
+        prompt = live_session.build_live_insight_prompt(
+            {
+                "scenario": "chat",
+                "prep": {"topic": "Q4 产品规划"},
+                "speakers": [
+                    {"id": "spk_self", "name": "我", "role": "self"},
+                    {"id": "spk_other_1", "name": "张三", "role": "counterpart"},
+                    {"id": "spk_other_2", "name": "李四", "role": "counterpart"},
+                ],
+                "utterances": [
+                    {"id": "u1", "speakerId": "spk_other_1", "startMs": 3000, "text": "我们先对一下Q4优先级。"},
+                    {"id": "u2", "speakerId": "spk_other_2", "startMs": 15000, "text": "顺便聊聊AI录音分析的UI。"},
+                ],
+                "lastSummarizedMs": -1,
+            }
+        )
+        self.assertIn("聊天讨论模式", prompt)
+        self.assertIn("currentTopic", prompt)
+        self.assertIn("topicFlow", prompt)
+
+        norm = live_session.normalize_live_insight(
+            {
+                "profile": {},
+                "questions": [],
+                "currentTopic": "AI 录音分析 UI",
+                "topicFlow": [
+                    {
+                        "id": "t1",
+                        "topic": "Q4 优先级对齐",
+                        "status": "ended",
+                        "relevance": "high",
+                        "relevanceNote": "紧扣主题",
+                        "startMs": 3000,
+                        "speakers": ["张三"],
+                    },
+                    {
+                        "id": "t2",
+                        "topic": "AI 录音分析 UI",
+                        "status": "active",
+                        "relevance": "medium",
+                        "relevanceNote": "延伸讨论具体界面",
+                        "transitionFrom": "Q4 优先级对齐",
+                        "startMs": 15000,
+                        "speakers": ["李四"],
+                    },
+                ],
+            },
+            scenario="chat",
+        )
+        self.assertEqual(norm["currentTopic"], "AI 录音分析 UI")
+        self.assertEqual(len(norm["topicFlow"]), 2)
+        self.assertEqual(norm["topicFlow"][0]["status"], "ended")
+        self.assertEqual(norm["topicFlow"][1]["status"], "active")
+        self.assertEqual(norm["topicFlow"][1]["relevance"], "medium")
+
 
 if __name__ == "__main__":
     unittest.main()

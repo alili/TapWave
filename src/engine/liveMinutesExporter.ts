@@ -8,6 +8,7 @@ export function formatLiveMmSs(ms: number): string {
 }
 
 function scenarioMinutesTitle(scenario: LiveScenario): string {
+  if (scenario === 'chat') return '聊天讨论纪要';
   if (scenario === 'sales') return '销售拜访纪要';
   if (scenario === 'dialogue') return '对谈纪要';
   if (scenario === 'listen') return '讲座/分享笔记';
@@ -124,6 +125,25 @@ export function buildLiveSessionMarkdown(snap: LiveSessionSnapshot): string {
           ? ` [${formatLiveMmSs(tf.evidenceMs)}]`
           : '';
       lines.push(`- **${tf.label}**（${stLabel}）${valText}${tsText}`);
+    }
+    lines.push('');
+  }
+
+  if (snap.topicFlow && snap.topicFlow.length > 0) {
+    lines.push('## 议题流转与相关性');
+    for (const tf of snap.topicFlow) {
+      const relLabel =
+        tf.relevance === 'high'
+          ? '高度相关'
+          : tf.relevance === 'off_topic'
+            ? '偏离主线'
+            : '延伸相关';
+      const statusLabel = tf.status === 'active' ? '当前议题' : '已聊过';
+      const fromText = tf.transitionFrom ? `（接续自：${tf.transitionFrom}）` : '';
+      const noteText = tf.relevanceNote ? ` — ${tf.relevanceNote}` : '';
+      lines.push(
+        `- [${formatLiveMmSs(tf.startMs)}] **${tf.topic}** [${statusLabel} · ${relLabel}]${fromText}${noteText}`
+      );
     }
     lines.push('');
   }

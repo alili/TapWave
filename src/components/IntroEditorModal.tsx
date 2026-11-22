@@ -1230,7 +1230,7 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
                 className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[11px] text-zinc-200 flex items-center gap-1 cursor-pointer"
               >
                 {embedded ? (
-                  <span>返回音轨视图</span>
+                  <span>返回音轨</span>
                 ) : (
                   <>
                     <X className="w-3 h-3" />

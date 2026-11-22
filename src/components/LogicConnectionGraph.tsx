@@ -324,14 +324,77 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
         BOTTOM_ARC_PAD
       : curY + BOTTOM_ARC_PAD;
 
-    // ===== 边路由与端口分配 =====
+    // ===== 时间轴柔性曲线（粗线、彩色、支持微弧与跨行 S 形回环） =====
+    let timelineFlowPath = '';
+    if (timelineRowAxes.length > 0) {
+      const segs: string[] = [];
+      timelineRowAxes.forEach((rowAxis, rIdx) => {
+        const pts = rowAxis.nodes.map((n) => ({
+          x: n.x + nodeW / 2,
+          y: rowAxis.axisY,
+        }));
+        if (pts.length === 0) return;
+
+        const rowStartX = Math.min(rowAxis.startX, pts[0].x - 12);
+        const rowEndX = Math.max(rowAxis.endX, pts[pts.length - 1].x + 12);
+
+        if (rIdx === 0) {
+          segs.push(`M ${rowStartX.toFixed(1)} ${rowAxis.axisY.toFixed(1)}`);
+          segs.push(
+            `Q ${((rowStartX + pts[0].x) / 2).toFixed(1)} ${(rowAxis.axisY - 4).toFixed(1)}, ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
+          );
+        }
+
+        // 同行节点间采用柔性微弧贝塞尔曲线连接，而非死板直线
+        for (let i = 0; i < pts.length - 1; i += 1) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const midX = (a.x + b.x) / 2;
+          const arch = i % 2 === 0 ? -5.5 : 4.5;
+          segs.push(
+            `C ${(a.x + (b.x - a.x) * 0.35).toFixed(1)} ${(a.y + arch).toFixed(1)}, ${(a.x + (b.x - a.x) * 0.65).toFixed(1)} ${(b.y + arch).toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}`
+          );
+          void midX;
+        }
+
+        const lastPt = pts[pts.length - 1];
+        if (rIdx === timelineRowAxes.length - 1) {
+          // 末行收尾延伸
+          segs.push(
+            `Q ${((lastPt.x + rowEndX) / 2).toFixed(1)} ${(lastPt.y - 3).toFixed(1)}, ${rowEndX.toFixed(1)} ${lastPt.y.toFixed(1)}`
+          );
+        } else {
+          // 换行：从本行末节点通过右侧→行间通道→左侧优雅 S 形回环连接到下一行首节点
+          const nextRow = timelineRowAxes[rIdx + 1];
+          const nextFirst = nextRow.nodes[0];
+          if (nextFirst) {
+            const nextPt = {
+              x: nextFirst.x + nodeW / 2,
+              y: nextRow.axisY,
+            };
+            const turnRightX = Math.min(totalW - 8, Math.max(lastPt.x + 26, rowEndX + 6));
+            const turnLeftX = Math.max(8, Math.min(nextPt.x - 26, nextRow.startX - 6));
+            const midRowY = (lastPt.y + NODE_H + TIMELINE_AXIS_OFFSET + nextPt.y) / 2;
+            segs.push(
+              `C ${turnRightX.toFixed(1)} ${lastPt.y.toFixed(1)}, ${turnRightX.toFixed(1)} ${midRowY.toFixed(1)}, ${((turnRightX + turnLeftX) / 2).toFixed(1)} ${midRowY.toFixed(1)}`
+            );
+            segs.push(
+              `C ${turnLeftX.toFixed(1)} ${midRowY.toFixed(1)}, ${turnLeftX.toFixed(1)} ${nextPt.y.toFixed(1)}, ${nextPt.x.toFixed(1)} ${nextPt.y.toFixed(1)}`
+            );
+          }
+        }
+      });
+      timelineFlowPath = segs.join(' ');
+    }
+
+    // ===== 边路由与端口分配（支持树状发散 + 跨多行防遮挡绕行） =====
     type EndpointSpec = {
       edge: LogicGraphEdge;
       src: PositionedNode;
       dst: PositionedNode;
       srcSide: Side;
       dstSide: Side;
-      mode: 'adjacent_lr' | 'arc_top' | 'arc_bottom' | 'vertical';
+      mode: 'adjacent_lr' | 'arc_top' | 'arc_bottom' | 'vertical' | 'detour';
     };
 
     const specs: EndpointSpec[] = [];
@@ -340,6 +403,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       const dst = nodeById.get(edge.target);
       if (!src || !dst) continue;
 
+      const rowDiff = Math.abs(dst.row - src.row);
       if (src.row === dst.row) {
         const colDiff = dst.col - src.col;
         if (colDiff === 1) {
@@ -363,24 +427,36 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
             mode: useTop ? 'arc_top' : 'arc_bottom',
           });
         }
-      } else if (src.row < dst.row) {
+      } else if (rowDiff === 1) {
         specs.push({
           edge,
           src,
           dst,
-          srcSide: 'bottom',
-          dstSide: 'top',
+          srcSide: src.row < dst.row ? 'bottom' : 'top',
+          dstSide: src.row < dst.row ? 'top' : 'bottom',
           mode: 'vertical',
         });
       } else {
+        // 跨多行连线：走安全绕行通道，不穿越中间行卡片
         specs.push({
           edge,
           src,
           dst,
-          srcSide: 'top',
-          dstSide: 'bottom',
-          mode: 'vertical',
+          srcSide: src.row < dst.row ? 'bottom' : 'top',
+          dstSide: src.row < dst.row ? 'top' : 'bottom',
+          mode: 'detour',
         });
+      }
+    }
+
+    // 统计一对多垂直发散（树状扇出），便于共用树干出口并向子节点柔性发散
+    const fanOutGroups = new Map<string, EndpointSpec[]>();
+    for (const s of specs) {
+      if (s.mode === 'vertical') {
+        const k = `${s.src.node.id}:${s.srcSide}`;
+        const list = fanOutGroups.get(k) ?? [];
+        list.push(s);
+        fanOutGroups.set(k, list);
       }
     }
 
@@ -424,8 +500,15 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
     for (const [key, list] of portBuckets.entries()) {
       list.sort((a, b) => a.peerCenter - b.peerCenter);
       const count = list.length;
+      const isTreeFanOut = (fanOutGroups.get(key)?.length ?? 0) > 1;
       list.forEach((item, idx) => {
-        const ratio = count === 1 ? 0.5 : 0.22 + (0.56 * idx) / (count - 1);
+        // 树状发散时将出口收束在节点底/顶部中间区域，形成清晰的树干发散感
+        const ratio =
+          count === 1
+            ? 0.5
+            : isTreeFanOut
+              ? 0.42 + (0.16 * idx) / (count - 1)
+              : 0.22 + (0.56 * idx) / (count - 1);
         portRatioMap.set(`${key}:${item.edgeId}`, ratio);
       });
     }
@@ -450,8 +533,39 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       }
     };
 
+    // 计算可用垂直通道（左外侧、列间缝隙、右外侧），用于跨多行连线避障
+    const candidateGutters: number[] = [Math.max(10, PAD_X * 0.48)];
+    for (let c = 0; c < maxColsUsed - 1; c += 1) {
+      const leftBound = PAD_X + c * (nodeW + H_GAP) + nodeW;
+      candidateGutters.push(leftBound + H_GAP / 2);
+    }
+    candidateGutters.push(Math.min(totalW - 10, totalW - PAD_X * 0.48));
+
+    const pickClearGutterX = (
+      minRow: number,
+      maxRow: number,
+      preferX: number,
+      detourOffsetIdx: number
+    ): number => {
+      const middleNodes = positioned.filter(
+        (n) => n.row > minRow && n.row < maxRow
+      );
+      const clear = candidateGutters.filter((gx) =>
+        middleNodes.every((n) => gx < n.x - 6 || gx > n.x + nodeW + 6)
+      );
+      const pool = clear.length > 0 ? clear : [candidateGutters[0], candidateGutters[candidateGutters.length - 1]];
+      const sorted = [...pool].sort(
+        (a, b) => Math.abs(a - preferX) - Math.abs(b - preferX)
+      );
+      const base = sorted[0] ?? preferX;
+      // 多条绕行线轻微错开，避免重叠
+      const jitter = ((detourOffsetIdx % 3) - 1) * 5;
+      return Math.max(8, Math.min(totalW - 8, base + jitter));
+    };
+
     let topArcIdx = 0;
     let bottomArcIdx = 0;
+    let detourIdx = 0;
     const routedEdges: RoutedEdge[] = specs.map((s) => {
       const p0 = getAnchor(s.src, s.srcSide, s.edge.id, false);
       const p3 = getAnchor(s.dst, s.dstSide, s.edge.id, true);
@@ -462,38 +576,78 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       let labelY = (p0.y + p3.y) / 2;
 
       if (s.mode === 'adjacent_lr') {
-        const dx = Math.max(12, (p3.x - p0.x) * 0.45);
+        const dx = Math.max(14, (p3.x - p0.x) * 0.48);
         const c1x = p0.x + dx;
         const c1y = p0.y;
         const c2x = p3.x - dx;
         const c2y = p3.y;
         pathD = `M ${p0.x} ${p0.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p3.x} ${p3.y}`;
         labelX = cubicPointAt(p0.x, c1x, c2x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, 0.5) - 9;
+        labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, 0.5) - 10;
       } else if (s.mode === 'arc_top') {
         const span = Math.abs(s.dst.col - s.src.col);
-        const arcLift = Math.min(28, 14 + span * 4 + (topArcIdx % 2) * 6);
+        const arcLift = Math.min(34, 16 + span * 5 + (topArcIdx % 3) * 6);
         topArcIdx += 1;
         const cy = Math.min(p0.y, p3.y) - arcLift;
         pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${cy}, ${p3.x} ${cy}, ${p3.x} ${p3.y}`;
         labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) - 1;
+        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) - 2;
       } else if (s.mode === 'arc_bottom') {
         const span = Math.abs(s.dst.col - s.src.col);
-        const arcDrop = Math.min(34, 16 + span * 5 + (bottomArcIdx % 2) * 7);
+        const arcDrop = Math.min(40, 18 + span * 6 + (bottomArcIdx % 3) * 7);
         bottomArcIdx += 1;
         const cy = Math.max(p0.y, p3.y) + arcDrop;
         pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${cy}, ${p3.x} ${cy}, ${p3.x} ${p3.y}`;
         labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) + 3;
+        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) + 4;
+      } else if (s.mode === 'detour') {
+        const minRow = Math.min(s.src.row, s.dst.row);
+        const maxRow = Math.max(s.src.row, s.dst.row);
+        const preferX = (p0.x + p3.x) / 2;
+        const gutterX = pickClearGutterX(minRow, maxRow, preferX, detourIdx);
+        detourIdx += 1;
+
+        const dir = s.src.row < s.dst.row ? 1 : -1;
+        const exitY = p0.y + dir * 20;
+        const enterY = p3.y - dir * 20;
+        const midY = (exitY + enterY) / 2;
+
+        pathD = [
+          `M ${p0.x.toFixed(1)} ${p0.y.toFixed(1)}`,
+          `C ${p0.x.toFixed(1)} ${exitY.toFixed(1)}, ${gutterX.toFixed(1)} ${p0.y.toFixed(1)}, ${gutterX.toFixed(1)} ${((exitY + midY) / 2).toFixed(1)}`,
+          `L ${gutterX.toFixed(1)} ${((enterY + midY) / 2).toFixed(1)}`,
+          `C ${gutterX.toFixed(1)} ${p3.y.toFixed(1)}, ${p3.x.toFixed(1)} ${enterY.toFixed(1)}, ${p3.x.toFixed(1)} ${p3.y.toFixed(1)}`,
+        ].join(' ');
+        labelX = gutterX;
+        labelY = midY;
       } else {
-        const dy = Math.max(20, Math.abs(p3.y - p0.y) * 0.45);
-        const c1y = s.srcSide === 'bottom' ? p0.y + dy : p0.y - dy;
-        const c2y = s.dstSide === 'top' ? p3.y - dy : p3.y + dy;
-        pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${c1y}, ${p3.x} ${c2y}, ${p3.x} ${p3.y}`;
-        const t = s.src.col % 2 === 0 ? 0.42 : 0.58;
-        labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, t);
-        labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, t);
+        // 相邻行垂直连线：支持一对多树状发散（共用短树干再柔性分叉）
+        const fanGroup = fanOutGroups.get(`${s.src.node.id}:${s.srcSide}`) ?? [];
+        const isTreeFanOut = fanGroup.length > 1;
+        const dir = s.srcSide === 'bottom' ? 1 : -1;
+
+        if (isTreeFanOut) {
+          const stemLen = 14;
+          const trunkX = s.src.x + nodeW / 2;
+          const trunkEndY = p0.y + dir * stemLen;
+          const midY = (trunkEndY + p3.y) / 2;
+          pathD = [
+            `M ${p0.x.toFixed(1)} ${p0.y.toFixed(1)}`,
+            `Q ${p0.x.toFixed(1)} ${(p0.y + dir * 7).toFixed(1)}, ${trunkX.toFixed(1)} ${trunkEndY.toFixed(1)}`,
+            `C ${trunkX.toFixed(1)} ${midY.toFixed(1)}, ${p3.x.toFixed(1)} ${midY.toFixed(1)}, ${p3.x.toFixed(1)} ${p3.y.toFixed(1)}`,
+          ].join(' ');
+          const t = 0.58;
+          labelX = cubicPointAt(trunkX, trunkX, p3.x, p3.x, t);
+          labelY = cubicPointAt(trunkEndY, midY, midY, p3.y, t);
+        } else {
+          const dy = Math.max(24, Math.abs(p3.y - p0.y) * 0.5);
+          const c1y = p0.y + dir * dy;
+          const c2y = p3.y - dir * dy;
+          pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${c1y}, ${p3.x} ${c2y}, ${p3.x} ${p3.y}`;
+          const t = s.src.col % 2 === 0 ? 0.44 : 0.56;
+          labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, t);
+          labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, t);
+        }
       }
 
       return {
@@ -517,6 +671,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       globalBandTop,
       timelineBandTop,
       timelineRowAxes,
+      timelineFlowPath,
     };
   }, [logicMap.nodes, logicMap.edges, containerWidth, layoutMode]);
 
@@ -702,43 +857,77 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                   <path d="M0.5,1 L7,4 L0.5,7 Z" fill={color} />
                 </marker>
               ))}
+              <linearGradient id="logic-timeline-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.9" />
+                <stop offset="50%" stopColor="#3b82f6" stopOpacity="0.95" />
+                <stop offset="100%" stopColor="#818cf8" stopOpacity="0.9" />
+              </linearGradient>
               <marker
                 id="logic-timeline-axis-arrow"
-                markerWidth="7"
-                markerHeight="7"
-                refX="6"
-                refY="3.5"
+                markerWidth="9"
+                markerHeight="9"
+                refX="7"
+                refY="4.5"
                 orient="auto"
                 markerUnits="userSpaceOnUse"
               >
-                <path d="M0.5,0.8 L6,3.5 L0.5,6.2 Z" fill="#3f3f46" />
+                <path d="M0.5,1 L7.5,4.5 L0.5,8 Z" fill="#38bdf8" />
               </marker>
             </defs>
 
-            {/* 每行时间线顶部横向刻度轴 */}
+            {/* 连续柔性时间流主轴（更粗 + 蓝青渐变 + 跨行 S 曲线串联） */}
+            {layout.timelineFlowPath && (
+              <path
+                d={layout.timelineFlowPath}
+                fill="none"
+                stroke="url(#logic-timeline-gradient)"
+                strokeWidth={2.8}
+                strokeLinecap="round"
+                strokeOpacity={0.85}
+                markerEnd="url(#logic-timeline-axis-arrow)"
+              />
+            )}
+
+            {/* 每行时间线节点刻度点与短引线 */}
             {layout.timelineRowAxes.map((rowAxis) => (
               <g key={`axis-${rowAxis.row}`}>
-                <line
-                  x1={rowAxis.startX}
-                  y1={rowAxis.axisY}
-                  x2={rowAxis.endX}
-                  y2={rowAxis.axisY}
-                  stroke="#27272a"
-                  strokeWidth={1.1}
-                  markerEnd="url(#logic-timeline-axis-arrow)"
-                />
                 {rowAxis.nodes.map((item) => {
                   const cx = item.x + layout.nodeW / 2;
                   return (
                     <g key={`tick-${item.node.id}`}>
-                      <circle cx={cx} cy={rowAxis.axisY} r={2.5} fill="#3b82f6" />
+                      <line
+                        x1={cx}
+                        y1={rowAxis.axisY}
+                        x2={cx}
+                        y2={item.y}
+                        stroke="#38bdf8"
+                        strokeOpacity={0.35}
+                        strokeWidth={1.2}
+                        strokeDasharray="2 2"
+                      />
+                      <circle
+                        cx={cx}
+                        cy={rowAxis.axisY}
+                        r={5}
+                        fill="#38bdf8"
+                        fillOpacity={0.2}
+                      />
+                      <circle
+                        cx={cx}
+                        cy={rowAxis.axisY}
+                        r={3}
+                        fill="#38bdf8"
+                        stroke="#09090b"
+                        strokeWidth={1}
+                      />
                       <text
                         x={cx}
-                        y={rowAxis.axisY - 5}
+                        y={rowAxis.axisY - 7}
                         textAnchor="middle"
                         fontSize={8.5}
                         fontFamily="monospace"
-                        fill="#93c5fd"
+                        fontWeight={600}
+                        fill="#bae6fd"
                       >
                         {formatLiveMmSs(item.node.evidenceMs)}
                       </text>
@@ -820,12 +1009,12 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
               (onlyExpandable && !node.expandableForQuestion && !isTopic);
 
             const borderCls = isTopic
-              ? 'border-cyan-500/50 bg-cyan-950/40'
+              ? 'border-cyan-500/60 bg-[#0b1b24]'
               : node.expandableForQuestion
-                ? 'border-amber-400/80 bg-amber-950/25 shadow-[0_0_12px_rgba(245,158,11,0.18)]'
+                ? 'border-amber-400/80 bg-[#1b1509] shadow-[0_0_12px_rgba(245,158,11,0.18)]'
                 : node.isRecurring
-                  ? 'border-indigo-500/55 bg-indigo-950/25'
-                  : 'border-zinc-800 bg-zinc-900/90 hover:border-zinc-600';
+                  ? 'border-indigo-500/60 bg-[#121224]'
+                  : 'border-zinc-800 bg-zinc-900 hover:border-zinc-600';
 
             return (
               <div
@@ -853,7 +1042,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                   height: `${NODE_H}px`,
                   opacity: dimmed ? 0.28 : 1,
                 }}
-                className={`absolute rounded-lg border px-2 py-1.5 flex flex-col justify-between cursor-pointer transition-all select-none ${borderCls} ${
+                className={`absolute z-10 rounded-lg border px-2 py-1.5 flex flex-col justify-between cursor-pointer transition-all select-none ${borderCls} ${
                   isSelected ? 'ring-2 ring-blue-400/70' : ''
                 }`}
               >

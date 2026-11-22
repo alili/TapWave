@@ -247,6 +247,142 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
 
       {/* 主滚动区域 */}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+        {/* 聊天模式：当前议题与议题流转 / 相关性追踪 */}
+        {snap.scenario === 'chat' && (() => {
+          const flow = snap.topicFlow ?? [];
+          const activeItem =
+            flow.find((f) => f.status === 'active') ??
+            (flow.length > 0 ? flow[flow.length - 1] : undefined);
+          const displayCurrentTopic =
+            snap.currentTopic?.trim() ||
+            activeItem?.topic ||
+            snap.prep?.topic?.trim() ||
+            '正在识别当前讨论议题…';
+          const relMeta = (rel?: 'high' | 'medium' | 'off_topic') => {
+            if (rel === 'off_topic') {
+              return {
+                label: '偏离主线',
+                cls: 'bg-rose-500/15 text-rose-300 border-rose-500/40',
+              };
+            }
+            if (rel === 'medium') {
+              return {
+                label: '延伸相关',
+                cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+              };
+            }
+            return {
+              label: '高度相关',
+              cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40',
+            };
+          };
+          const curRel = relMeta(activeItem?.relevance);
+
+          return (
+            <section className="rounded-xl border border-cyan-500/35 bg-gradient-to-br from-cyan-950/35 via-zinc-900/75 to-zinc-900/80 p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="px-2 py-0.5 rounded-md bg-cyan-500/20 border border-cyan-500/40 text-[11px] font-semibold text-cyan-200 shrink-0">
+                    当前议题
+                  </span>
+                  <h3 className="text-sm font-bold text-zinc-100 truncate">
+                    {displayCurrentTopic}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {activeItem && (
+                    <span className={`px-2 py-0.5 rounded border text-[10px] font-medium ${curRel.cls}`}>
+                      {curRel.label}
+                    </span>
+                  )}
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    共 {flow.length} 个议题节点
+                  </span>
+                </div>
+              </div>
+
+              {(activeItem?.transitionFrom || activeItem?.relevanceNote) && (
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-300 bg-zinc-950/60 border border-zinc-800/80 rounded-lg px-2.5 py-1.5">
+                  {activeItem.transitionFrom && (
+                    <span className="text-cyan-300/90">
+                      流转自：<span className="font-medium">{activeItem.transitionFrom}</span>
+                    </span>
+                  )}
+                  {activeItem.transitionFrom && activeItem.relevanceNote && (
+                    <span className="text-zinc-600">·</span>
+                  )}
+                  {activeItem.relevanceNote && (
+                    <span className="text-zinc-300">{activeItem.relevanceNote}</span>
+                  )}
+                </div>
+              )}
+
+              {flow.length > 0 ? (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-medium text-zinc-400">议题流转与相关性轨迹</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {flow.map((item, idx) => {
+                      const rm = relMeta(item.relevance);
+                      const isActive = item.status === 'active';
+                      return (
+                        <React.Fragment key={item.id || `${item.topic}-${idx}`}>
+                          <div
+                            className={`rounded-lg border px-2.5 py-1.5 text-xs space-y-1 transition ${
+                              isActive
+                                ? 'border-cyan-500/50 bg-cyan-950/35 shadow-sm'
+                                : 'border-zinc-800 bg-zinc-950/70'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  isActive ? 'bg-cyan-400 animate-pulse' : 'bg-zinc-600'
+                                }`}
+                              />
+                              <span className={`font-semibold ${isActive ? 'text-cyan-100' : 'text-zinc-200'}`}>
+                                {item.topic}
+                              </span>
+                              <span className={`px-1.5 py-0.2 rounded border text-[10px] ${rm.cls}`}>
+                                {rm.label}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => onJumpToMs(item.startMs)}
+                                className="text-[10px] font-mono text-blue-400 hover:underline cursor-pointer ml-1"
+                              >
+                                [{formatLiveMmSs(item.startMs)}]
+                              </button>
+                            </div>
+                            {(item.relevanceNote || (item.speakers && item.speakers.length > 0)) && (
+                              <div className="text-[10px] text-zinc-400 flex flex-wrap items-center gap-1.5">
+                                {item.speakers && item.speakers.length > 0 && (
+                                  <span className="text-zinc-300">
+                                    参与：{item.speakers.join('、')}
+                                  </span>
+                                )}
+                                {item.relevanceNote && (
+                                  <span className="truncate max-w-xs">{item.relevanceNote}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {idx < flow.length - 1 && (
+                            <span className="text-zinc-500 text-xs font-mono shrink-0">→</span>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/50 py-3 px-3 text-[11px] text-zinc-400">
+                  多人聊天开始后，AI 将持续识别当前议题、追踪话题流转轨迹并评估与核心主题的相关性…
+                </div>
+              )}
+            </section>
+          );
+        })()}
+
         {/* 1. 核心四维实时 KPI 卡片 */}
         <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
           {/* 语速 */}

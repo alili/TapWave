@@ -1,4 +1,4 @@
-export type LiveScenario = 'interview' | 'dialogue' | 'sales' | 'listen';
+export type LiveScenario = 'chat' | 'dialogue' | 'listen' | 'interview' | 'sales';
 export type LiveAsrEngineMode = 'auto' | 'volcengine' | 'local';
 export type LiveSpeakerRole = 'self' | 'counterpart';
 export type LiveSpeakerKind =
@@ -150,6 +150,18 @@ export interface LiveTurnSummary {
   summary: string;
 }
 
+export interface LiveTopicFlowItem {
+  id: string;
+  topic: string;
+  status: 'active' | 'ended';
+  relevance: 'high' | 'medium' | 'off_topic';
+  relevanceNote?: string;
+  transitionFrom?: string;
+  startMs: number;
+  endMs?: number;
+  speakers?: string[];
+}
+
 export interface LiveFinalSummary {
   overview: string;
   keyTakeaways: string[];
@@ -193,6 +205,8 @@ export interface LiveSessionSnapshot {
   keyPoints: string[];
   outline: LiveOutlineItem[];
   targetFields?: LiveTargetFieldItem[];
+  currentTopic?: string;
+  topicFlow?: LiveTopicFlowItem[];
   lastInsightAt: number | null;
   analyzingUpToUtteranceId: string | null;
   analyzedUpToUtteranceId: string | null;
@@ -266,6 +280,8 @@ export type LiveSidecarEvent =
         value?: string;
         evidenceMs?: number;
       }>;
+      currentTopic?: string;
+      topicFlow?: LiveTopicFlowItem[];
       basedOnUtteranceId?: string;
       generatedAt?: number;
     }

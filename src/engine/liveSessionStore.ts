@@ -56,6 +56,8 @@ export function createInitialLiveSnapshot(): LiveSessionSnapshot {
     keyPoints: [],
     outline: [],
     targetFields: [],
+    currentTopic: '',
+    topicFlow: [],
     lastInsightAt: null,
     analyzingUpToUtteranceId: null,
     analyzedUpToUtteranceId: null,
@@ -240,6 +242,9 @@ export function applyLiveEvent(
         keyPoints: ev.keyPoints,
         outline: nextOutline,
         targetFields: nextTargetFields,
+        currentTopic:
+          typeof ev.currentTopic === 'string' ? ev.currentTopic : snap.currentTopic,
+        topicFlow: Array.isArray(ev.topicFlow) ? ev.topicFlow : snap.topicFlow,
         lastInsightAt: ev.generatedAt ?? Date.now(),
         analyzedUpToUtteranceId: ev.basedOnUtteranceId ?? snap.analyzedUpToUtteranceId,
         analyzingUpToUtteranceId: null,
@@ -348,6 +353,11 @@ let activeTransport: LiveTransportHandle | null = null;
 let activeCapture: LiveAudioCaptureHandle | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 let audioSeq = 0;
+let partialSpeakerOverride: {
+  speakerId: string;
+  applyToLabel: boolean;
+  startMs: number;
+} | null = null;
 
 function emitSnap(next: LiveSessionSnapshot): void {
   snapshot = next;
@@ -381,6 +391,7 @@ function startElapsedTimer(): void {
 
 async function cleanupHardwareAndTransport(): Promise<void> {
   clearElapsedTimer();
+  partialSpeakerOverride = null;
   const cap = activeCapture;
   activeCapture = null;
   if (cap) {
@@ -532,10 +543,59 @@ export async function startLiveSession(opts: {
   try {
     const transportPromise = startLiveSessionTransport(startPayload, (ev) => {
       let next = applyLiveEvent(snapshot, ev);
+      let deferredAssign: {
+        utteranceId: string;
+        speakerId: string;
+        applyToLabel: boolean;
+      } | null = null;
+
+      if (ev.type === 'partial' && partialSpeakerOverride) {
+        if (Math.abs(ev.startMs - partialSpeakerOverride.startMs) <= 2000 && next.partial) {
+          next = {
+            ...next,
+            partial: {
+              ...next.partial,
+              speakerId: partialSpeakerOverride.speakerId,
+            },
+          };
+        } else {
+          partialSpeakerOverride = null;
+        }
+      } else if (ev.type === 'final' && partialSpeakerOverride) {
+        const override = partialSpeakerOverride;
+        partialSpeakerOverride = null;
+        if (Math.abs(ev.utterance.startMs - override.startMs) <= 5000) {
+          next = {
+            ...next,
+            utterances: next.utterances.map((u) =>
+              u.id === ev.utterance.id
+                ? { ...u, speakerId: override.speakerId, speakerSource: 'manual' }
+                : u
+            ),
+          };
+          deferredAssign = {
+            utteranceId: ev.utterance.id,
+            speakerId: override.speakerId,
+            applyToLabel: override.applyToLabel,
+          };
+        }
+      }
+
       if (!captureReady && next.phase === 'recording') {
         next = { ...next, phase: 'starting' };
       }
       emitSnap(next);
+
+      if (deferredAssign) {
+        activeTransport?.send([
+          {
+            type: 'assign_speaker',
+            utteranceId: deferredAssign.utteranceId,
+            speakerId: deferredAssign.speakerId,
+            applyToLabel: deferredAssign.applyToLabel,
+          },
+        ]);
+      }
 
       if (ev.type === 'error' && ev.fatal) {
         void cleanupHardwareAndTransport();
@@ -821,6 +881,109 @@ export function addAndAssignLiveSpeaker(
     { type: 'assign_speaker', utteranceId, speakerId: speaker.id, applyToLabel },
   ]);
   return speaker;
+}
+
+function findRecentUtteranceForPartial(startMs?: number): LiveUtterance | undefined {
+  if (typeof startMs !== 'number' || snapshot.utterances.length === 0) return undefined;
+  for (let i = snapshot.utterances.length - 1; i >= 0; i -= 1) {
+    const u = snapshot.utterances[i];
+    if (Math.abs(u.startMs - startMs) <= 5000) {
+      return u;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 为正在实时听写中的片段（partial）指定发言人，并在其定稿后自动继承与同步。
+ * 若点选瞬间该句恰好已定稿，则自动回落到对应的刚定稿语句。
+ */
+export function assignLivePartialSpeaker(
+  speakerId: string,
+  applyToLabel = true,
+  fallbackStartMs?: number
+): string | null {
+  if (snapshot.partial) {
+    partialSpeakerOverride = {
+      speakerId,
+      applyToLabel,
+      startMs: snapshot.partial.startMs,
+    };
+    emitSnap({
+      ...snapshot,
+      partial: { ...snapshot.partial, speakerId },
+    });
+    return null;
+  }
+  const finalized = findRecentUtteranceForPartial(fallbackStartMs);
+  if (finalized) {
+    assignLiveSpeaker(finalized.id, speakerId, applyToLabel);
+    return finalized.id;
+  }
+  return null;
+}
+
+/**
+ * 新建发言人并立即切换给正在实时听写中的片段（partial）。
+ * 若点选瞬间该句恰好已定稿，则自动回落到对应的刚定稿语句。
+ */
+export function addAndAssignLivePartialSpeaker(
+  name: string,
+  role: LiveSpeakerRole = 'counterpart',
+  applyToLabel = true,
+  fallbackStartMs?: number
+): { speaker: LiveSpeaker; assignedUtteranceId: string | null } {
+  const cleanName = name.trim() || `发言人 ${snapshot.speakers.length + 1}`;
+  const speaker: LiveSpeaker = {
+    id: `spk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    name: cleanName,
+    role,
+  };
+
+  if (snapshot.partial) {
+    partialSpeakerOverride = {
+      speakerId: speaker.id,
+      applyToLabel,
+      startMs: snapshot.partial.startMs,
+    };
+    emitSnap({
+      ...snapshot,
+      speakers: [...snapshot.speakers, speaker],
+      partial: { ...snapshot.partial, speakerId: speaker.id },
+    });
+    activeTransport?.send([{ type: 'add_speaker', speaker }]);
+    return { speaker, assignedUtteranceId: null };
+  }
+
+  const finalized = findRecentUtteranceForPartial(fallbackStartMs);
+  if (finalized) {
+    emitSnap({
+      ...snapshot,
+      speakers: [...snapshot.speakers, speaker],
+      utterances: snapshot.utterances.map((u) =>
+        u.id === finalized.id
+          ? { ...u, speakerId: speaker.id, speakerSource: 'manual' }
+          : u
+      ),
+    });
+    activeTransport?.send([
+      { type: 'add_speaker', speaker },
+      {
+        type: 'assign_speaker',
+        utteranceId: finalized.id,
+        speakerId: speaker.id,
+        applyToLabel,
+      },
+    ]);
+    return { speaker, assignedUtteranceId: finalized.id };
+  }
+
+  emitSnap({
+    ...snapshot,
+    speakers: [...snapshot.speakers, speaker],
+  });
+  activeTransport?.send([{ type: 'add_speaker', speaker }]);
+  return { speaker, assignedUtteranceId: null };
 }
 
 export function requestLiveInsight(): void {
