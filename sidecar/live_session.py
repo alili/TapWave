@@ -231,6 +231,8 @@ class SpeakerResolver:
         self,
         speakers: List[Dict[str, Any]],
         first_speaker_id: Optional[str] = None,
+        auto_discover: bool = False,
+        max_auto_speakers: int = 12,
     ) -> None:
         self.speakers = list(speakers) if speakers else [
             {"id": "spk_self", "name": "我", "role": "self"},
@@ -240,7 +242,10 @@ class SpeakerResolver:
         self.first_speaker_id = (
             first_speaker_id if first_speaker_id in self.speaker_ids else self.speaker_ids[0]
         )
+        self.auto_discover = bool(auto_discover)
+        self.max_auto_speakers = max(2, int(max_auto_speakers))
         self.max_clusters = max(1, len(self.speaker_ids))
+        self._newly_added_speakers: List[Dict[str, Any]] = []
         self.ring = AudioRingBuffer()
         self.label_map: Dict[str, str] = {}
         self.centroids: Dict[str, Tuple[np.ndarray, int]] = {}
@@ -285,6 +290,12 @@ class SpeakerResolver:
                     return True
             return False
 
+    def pop_newly_added_speakers(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            added = list(self._newly_added_speakers)
+            self._newly_added_speakers.clear()
+            return added
+
     def _allocate_speaker_for_label(self, label: str) -> str:
         if label in self.label_map:
             return self.label_map[label]
@@ -295,6 +306,22 @@ class SpeakerResolver:
             unused = [sid for sid in self.speaker_ids if sid not in used]
             if unused:
                 chosen = unused[0]
+            elif self.auto_discover and len(self.speakers) < self.max_auto_speakers:
+                idx = len(self.speakers) + 1
+                existing_ids = set(self.speaker_ids)
+                while f"spk_{idx}" in existing_ids:
+                    idx += 1
+                chosen = f"spk_{idx}"
+                speaker_obj = {
+                    "id": chosen,
+                    "name": f"发言人 {idx}",
+                    "role": "counterpart",
+                    "speakerKind": "guest",
+                }
+                self.speakers.append(speaker_obj)
+                self.speaker_ids.append(chosen)
+                self.max_clusters = max(self.max_clusters, len(self.speaker_ids))
+                self._newly_added_speakers.append(dict(speaker_obj))
             else:
                 chosen = self.speaker_ids[len(self.label_map) % len(self.speaker_ids)]
         self.label_map[label] = chosen
@@ -316,7 +343,8 @@ class SpeakerResolver:
                 best_dist = dist
                 best_label = label
 
-        if best_dist < LIVE_VOICEPRINT_NEW_CLUSTER_DIST or len(self.centroids) >= self.max_clusters:
+        cluster_limit = self.max_auto_speakers if self.auto_discover else self.max_clusters
+        if best_dist < LIVE_VOICEPRINT_NEW_CLUSTER_DIST or len(self.centroids) >= cluster_limit:
             centroid, cnt = self.centroids[best_label]
             alpha = 1.0 / float(min(cnt + 1, 12))
             updated = (1.0 - alpha) * centroid + alpha * feat
@@ -646,10 +674,10 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
                 "推荐面向全场的延展话题或深化讨论切入点。\n"
             )
     elif is_chat:
-        participant_names = [str(s.get("name") or "参与者") for s in speakers]
+        participant_names = [str(s.get("name") or "发言人") for s in speakers]
         mode_rule = (
-            f"- 模式适配（聊天讨论模式·{len(speakers) or 2}人自由讨论·议题动态流转）："
-            f"参与者（{', '.join(participant_names) or '多人'}）可能多人自由穿插发言，议题会随对话自然流转。\n"
+            f"- 模式适配（聊天讨论模式·不限人数自由讨论·议题动态流转）："
+            f"参与者（{', '.join(participant_names) or '自动识别发言人'}）可能多人自由穿插发言，议题会随对话自然流转。\n"
             "  * 请重点识别当前正在讨论的议题（`currentTopic`），并维护完整的议题流转轨迹（`topicFlow`）；\n"
             "  * 当对话明显转向新话题时，将前一个议题标记为 `ended`，新增 `active` 议题并填写 `transitionFrom`（从哪个议题转入）；\n"
             "  * 评估每个议题与核心主题/参考提纲的相关性（`high` 高度相关 / `medium` 延伸相关 / `off_topic` 偏离主线），给出简短说明。\n"
@@ -731,7 +759,7 @@ def build_live_insight_prompt(ctx: Dict[str, Any]) -> str:
         f"{mode_rule}"
         f"- 话题: {prep.get('topic') or '未填写'}\n"
         f"- 目标: {prep.get('goals') or '未填写'}\n"
-        f"- {counterpart_title}: {', '.join(prep.get('counterpartNames') or []) or prep.get('counterpartName') or ('主讲人' if is_listen else '对方')}\n"
+        f"- {counterpart_title}: {', '.join(prep.get('counterpartNames') or []) or prep.get('counterpartName') or ('主讲人' if is_listen else '自由参与（自动识别发言人）' if is_chat else '对方')}\n"
         f"- {background_title}: {prep.get('counterpartBackground') or '无'}\n\n"
         f"{target_fields_section}"
         f"# {outline_title}\n{outline_desc}\n\n"
@@ -2256,7 +2284,11 @@ def run_live_session() -> None:
     final_summary: Optional[Dict[str, Any]] = None
     utt_counter = 0
 
-    resolver = SpeakerResolver(speakers=speakers, first_speaker_id=first_speaker_id)
+    resolver = SpeakerResolver(
+        speakers=speakers,
+        first_speaker_id=first_speaker_id,
+        auto_discover=(scenario == "chat"),
+    )
 
     def _build_session_doc() -> Dict[str, Any]:
         with state_lock:
@@ -2352,6 +2384,9 @@ def run_live_session() -> None:
             int(f["endMs"]),
             cloud_speaker_id=f.get("cloudSpeakerId"),
         )
+        for added_spk in resolver.pop_newly_added_speakers():
+            copilot.add_speaker(added_spk)
+            emit({"type": "speaker_added", "speaker": added_spk})
         vp_meta = resolver.get_utterance_voiceprint(uid)
         utt_obj = {
             "id": uid,

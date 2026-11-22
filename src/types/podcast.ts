@@ -303,6 +303,7 @@ export interface ListenerBenefitItem {
   title: string;
   codeOrLink: string;
   description: string;
+  imageUrl?: string;
 }
 
 export interface PodcastShownotes {

@@ -167,6 +167,11 @@ describe('liveSpeechAnalytics', () => {
     expect(matchedNode).toBeDefined();
     expect(matchedNode?.expandableForQuestion).toBe(true);
     expect(matchedNode?.questionHint).toContain('INT8');
+
+    const questionNodes = res.logicMap.nodes.filter((n) => n.kind === 'question');
+    expect(questionNodes.length).toBeGreaterThanOrEqual(1);
+    expect(questionNodes.some((n) => n.questionHint?.includes('INT8'))).toBe(true);
+    expect(res.logicMap.edges.some((e) => e.relation === 'question_suggest')).toBe(true);
   });
 
   it('computes insight last-update timestamp and next-round progress', () => {

@@ -36,14 +36,68 @@ const TIMELINE_AXIS_OFFSET = 18;
 const BOTTOM_ARC_PAD = 42;
 
 const RELATION_BADGE_STYLE: Record<LogicRelationType, string> = {
-  viewpoint: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
-  story: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
-  causal: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-  contrast: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-  progression: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
-  example: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
-  conclusion: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
-  outline: 'bg-zinc-700/50 text-zinc-300 border-zinc-600/60',
+  viewpoint: 'bg-blue-500/20 text-blue-200 border-blue-400/50',
+  story: 'bg-purple-500/20 text-purple-200 border-purple-400/50',
+  causal: 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50',
+  contrast: 'bg-orange-500/20 text-orange-200 border-orange-400/50',
+  progression: 'bg-teal-500/20 text-teal-200 border-teal-400/50',
+  example: 'bg-indigo-500/20 text-indigo-200 border-indigo-400/50',
+  conclusion: 'bg-rose-500/20 text-rose-200 border-rose-400/50',
+  outline: 'bg-slate-600/35 text-slate-200 border-slate-400/50',
+};
+
+const NODE_CARD_THEME: Record<
+  LogicRelationType,
+  { card: string; accent: string; label: string; dot: string }
+> = {
+  viewpoint: {
+    card: 'border-blue-500/55 bg-blue-950/45 hover:border-blue-400/80',
+    accent: 'bg-blue-400',
+    label: '观点',
+    dot: 'bg-blue-400',
+  },
+  story: {
+    card: 'border-purple-500/55 bg-purple-950/45 hover:border-purple-400/80',
+    accent: 'bg-purple-400',
+    label: '案例',
+    dot: 'bg-purple-400',
+  },
+  causal: {
+    card: 'border-emerald-500/55 bg-emerald-950/45 hover:border-emerald-400/80',
+    accent: 'bg-emerald-400',
+    label: '因果',
+    dot: 'bg-emerald-400',
+  },
+  contrast: {
+    card: 'border-orange-500/55 bg-orange-950/45 hover:border-orange-400/80',
+    accent: 'bg-orange-400',
+    label: '转折',
+    dot: 'bg-orange-400',
+  },
+  progression: {
+    card: 'border-teal-500/55 bg-teal-950/45 hover:border-teal-400/80',
+    accent: 'bg-teal-400',
+    label: '递进',
+    dot: 'bg-teal-400',
+  },
+  example: {
+    card: 'border-indigo-500/55 bg-indigo-950/45 hover:border-indigo-400/80',
+    accent: 'bg-indigo-400',
+    label: '举例',
+    dot: 'bg-indigo-400',
+  },
+  conclusion: {
+    card: 'border-rose-500/55 bg-rose-950/45 hover:border-rose-400/80',
+    accent: 'bg-rose-400',
+    label: '结论',
+    dot: 'bg-rose-400',
+  },
+  outline: {
+    card: 'border-slate-500/55 bg-slate-900/75 hover:border-slate-400/80',
+    accent: 'bg-slate-400',
+    label: '提纲',
+    dot: 'bg-slate-400',
+  },
 };
 
 const EDGE_COLOR: Record<LogicGraphEdgeRelation, string> = {
@@ -53,12 +107,13 @@ const EDGE_COLOR: Record<LogicGraphEdgeRelation, string> = {
   support_of: '#818cf8',
   example: '#818cf8',
   causal: '#34d399',
-  contrast: '#fbbf24',
-  progression: '#22d3ee',
+  contrast: '#fb923c',
+  progression: '#2dd4bf',
   conclusion: '#fb7185',
   echo: '#a78bfa',
   sequence: '#64748b',
-  outline: '#71717a',
+  outline: '#94a3b8',
+  question_suggest: '#f59e0b',
 };
 
 type Side = 'top' | 'bottom' | 'left' | 'right';
@@ -173,10 +228,11 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       topic: 0,
       viewpoint: 1,
       outline: 2,
+      question: 3,
     };
     const sortedGlobal = [...globalNodes].sort((a, b) => {
-      const oa = globalOrder[a.kind] ?? 3;
-      const ob = globalOrder[b.kind] ?? 3;
+      const oa = globalOrder[a.kind] ?? 4;
+      const ob = globalOrder[b.kind] ?? 4;
       if (oa !== ob) return oa - ob;
       if ((b.occurrenceCount ?? 0) !== (a.occurrenceCount ?? 0)) {
         return (b.occurrenceCount ?? 0) - (a.occurrenceCount ?? 0);
@@ -189,6 +245,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
       support: 1,
       story: 2,
       utterance: 3,
+      question: 4,
     };
     const sortedTimeline = [...timelineAll].sort((a, b) => {
       if (a.evidenceMs !== b.evidenceMs) return a.evidenceMs - b.evidenceMs;
@@ -891,8 +948,10 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
             {/* 每行时间线节点刻度点与短引线 */}
             {layout.timelineRowAxes.map((rowAxis) => (
               <g key={`axis-${rowAxis.row}`}>
-                {rowAxis.nodes.map((item) => {
-                  const cx = item.x + layout.nodeW / 2;
+                {rowAxis.nodes
+                  .filter((item) => item.node.kind !== 'question')
+                  .map((item) => {
+                    const cx = item.x + layout.nodeW / 2;
                   return (
                     <g key={`tick-${item.node.id}`}>
                       <line
@@ -945,8 +1004,11 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                 ? connectedToSelected.edgeIds.has(edge.id)
                 : onlyExpandable
                   ? Boolean(
-                      srcPos?.node.expandableForQuestion ||
-                        dstPos?.node.expandableForQuestion
+                      edge.relation === 'question_suggest' ||
+                        srcPos?.node.expandableForQuestion ||
+                        dstPos?.node.expandableForQuestion ||
+                        srcPos?.node.kind === 'question' ||
+                        dstPos?.node.kind === 'question'
                     )
                   : true;
 
@@ -1004,17 +1066,22 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
           {layout.positioned.map(({ node, x, y }) => {
             const isSelected = selectedNodeId === node.id;
             const isTopic = node.kind === 'topic';
+            const isQuestion = node.kind === 'question';
             const dimmed =
               (selectedNodeId !== null && !connectedToSelected.ids.has(node.id)) ||
-              (onlyExpandable && !node.expandableForQuestion && !isTopic);
+              (onlyExpandable && !node.expandableForQuestion && !isQuestion && !isTopic);
 
+            const theme = NODE_CARD_THEME[node.relation] ?? NODE_CARD_THEME.outline;
             const borderCls = isTopic
-              ? 'border-cyan-500/60 bg-[#0b1b24]'
-              : node.expandableForQuestion
-                ? 'border-amber-400/80 bg-[#1b1509] shadow-[0_0_12px_rgba(245,158,11,0.18)]'
-                : node.isRecurring
-                  ? 'border-indigo-500/60 bg-[#121224]'
-                  : 'border-zinc-800 bg-zinc-900 hover:border-zinc-600';
+              ? 'border-cyan-400/70 bg-cyan-950/55 hover:border-cyan-300/90 shadow-[0_0_12px_rgba(34,211,238,0.12)]'
+              : isQuestion
+                ? 'border-dashed border-amber-400/85 bg-gradient-to-br from-amber-950/75 to-[#1c1306] hover:border-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.2)]'
+                : theme.card;
+            const accentCls = isTopic
+              ? 'bg-cyan-400'
+              : isQuestion
+                ? 'bg-amber-400'
+                : theme.accent;
 
             return (
               <div
@@ -1025,7 +1092,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                   setSelectedNodeId((prev) => (prev === node.id ? null : node.id))
                 }
                 onDoubleClick={() => {
-                  if (node.evidenceMs > 0 || node.kind !== 'topic') {
+                  if (node.evidenceMs > 0 || !isTopic) {
                     handleJumpToMs(node.evidenceMs);
                   }
                 }}
@@ -1040,37 +1107,54 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                   top: `${y}px`,
                   width: `${layout.nodeW}px`,
                   height: `${NODE_H}px`,
-                  opacity: dimmed ? 0.28 : 1,
+                  opacity: dimmed ? 0.25 : 1,
                 }}
-                className={`absolute z-10 rounded-lg border px-2 py-1.5 flex flex-col justify-between cursor-pointer transition-all select-none ${borderCls} ${
-                  isSelected ? 'ring-2 ring-blue-400/70' : ''
+                className={`absolute z-10 rounded-lg border pl-2.5 pr-2 py-1.5 flex flex-col justify-between cursor-pointer transition-all select-none overflow-hidden ${borderCls} ${
+                  isSelected ? 'ring-2 ring-blue-400/80' : ''
                 }`}
               >
+                {/* 左侧彩色标识条，让不同逻辑块一目了然 */}
+                <span
+                  aria-hidden="true"
+                  className={`absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r ${accentCls}`}
+                />
+
                 <div className="flex items-center justify-between gap-1">
                   <div className="flex items-center gap-1 min-w-0">
-                    <span
-                      className={`px-1 py-0.5 rounded border text-[8.5px] font-medium truncate max-w-[78px] ${
-                        isTopic
-                          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                          : RELATION_BADGE_STYLE[node.relation]
-                      }`}
-                    >
-                      {node.relationLabel}
-                    </span>
-                    {node.isRecurring && (node.occurrenceCount ?? 0) >= 2 && (
-                      <span className="px-1 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[8px] font-medium shrink-0">
+                    {isQuestion ? (
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded border border-amber-400/60 bg-amber-500/20 text-amber-200 text-[8.5px] font-semibold truncate max-w-[92px]">
+                        <Sparkles className="w-2.5 h-2.5 shrink-0 text-amber-300" />
+                        <span className="truncate">{node.relationLabel}</span>
+                      </span>
+                    ) : (
+                      <span
+                        className={`px-1 py-0.5 rounded border text-[8.5px] font-medium truncate max-w-[78px] ${
+                          isTopic
+                            ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50'
+                            : RELATION_BADGE_STYLE[node.relation]
+                        }`}
+                      >
+                        {node.relationLabel}
+                      </span>
+                    )}
+                    {!isQuestion && node.isRecurring && (node.occurrenceCount ?? 0) >= 2 && (
+                      <span className="px-1 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/50 text-indigo-200 text-[8px] font-medium shrink-0">
                         ×{node.occurrenceCount}
                       </span>
                     )}
                   </div>
 
-                  {node.expandableForQuestion ? (
+                  {isQuestion ? (
+                    <span className="px-1 py-0.5 rounded bg-amber-400/15 text-amber-300 text-[8px] font-semibold shrink-0">
+                      提问建议
+                    </span>
+                  ) : node.expandableForQuestion ? (
                     <span
                       title={node.questionHint || node.expandReason}
-                      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-amber-200 text-[8.5px] font-semibold shrink-0"
+                      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-amber-200 text-[8px] font-semibold shrink-0"
                     >
-                      <Sparkles className="w-2.5 h-2.5" />
-                      <span>可提问</span>
+                      <Sparkles className="w-2 h-2" />
+                      <span>可深挖</span>
                     </span>
                   ) : (
                     !isTopic && (
@@ -1080,7 +1164,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                           e.stopPropagation();
                           handleJumpToMs(node.evidenceMs);
                         }}
-                        className="text-[8.5px] font-mono text-blue-400 hover:underline cursor-pointer shrink-0"
+                        className="text-[8.5px] font-mono text-sky-300 hover:underline cursor-pointer shrink-0"
                       >
                         [{formatLiveMmSs(node.evidenceMs)}]
                       </button>
@@ -1088,7 +1172,11 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
                   )}
                 </div>
 
-                <div className="text-[10.5px] font-medium text-zinc-100 leading-tight line-clamp-2">
+                <div
+                  className={`text-[10.5px] font-medium leading-tight line-clamp-2 ${
+                    isQuestion ? 'text-amber-100' : 'text-zinc-100'
+                  }`}
+                >
                   {node.title}
                 </div>
               </div>
@@ -1097,11 +1185,33 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
         </div>
       </div>
 
+      {/* 色彩图例 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[10px] text-zinc-400 shrink-0">
+        <span className="inline-flex items-center gap-1">
+          <span className="w-2 h-2 rounded-sm bg-cyan-400" />
+          <span>主题</span>
+        </span>
+        {(
+          Object.entries(NODE_CARD_THEME) as Array<
+            [LogicRelationType, (typeof NODE_CARD_THEME)[LogicRelationType]]
+          >
+        ).map(([rel, cfg]) => (
+          <span key={rel} className="inline-flex items-center gap-1">
+            <span className={`w-2 h-2 rounded-sm ${cfg.dot}`} />
+            <span>{cfg.label}</span>
+          </span>
+        ))}
+        <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
+          <span className="w-2.5 h-2 rounded-sm border border-dashed border-amber-400 bg-amber-500/30" />
+          <span>提问建议节点</span>
+        </span>
+      </div>
+
       {/* 选中节点详情与提问拓展提示条 */}
       {selectedNode && (
         <div
           className={`rounded-lg border p-2.5 text-xs space-y-1.5 ${
-            selectedNode.expandableForQuestion
+            selectedNode.kind === 'question' || selectedNode.expandableForQuestion
               ? 'border-amber-500/45 bg-amber-950/20'
               : 'border-zinc-800 bg-zinc-900/80'
           }`}
@@ -1110,10 +1220,14 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
             <div className="flex items-center gap-1.5">
               <span
                 className={`px-1.5 py-0.5 rounded border text-[10px] ${
-                  RELATION_BADGE_STYLE[selectedNode.relation]
+                  selectedNode.kind === 'question'
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/50 font-semibold'
+                    : selectedNode.kind === 'topic'
+                      ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50'
+                      : RELATION_BADGE_STYLE[selectedNode.relation]
                 }`}
               >
-                {selectedNode.relationLabel}
+                {selectedNode.kind === 'question' ? '提问建议节点' : selectedNode.relationLabel}
               </span>
               {selectedNode.isRecurring && (
                 <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[10px]">
@@ -1135,7 +1249,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
               )}
             </div>
 
-            {selectedNode.kind !== 'topic' && (
+            {selectedNode.kind !== 'topic' && selectedNode.evidenceMs > 0 && (
               <button
                 type="button"
                 onClick={() => handleJumpToMs(selectedNode.evidenceMs)}
@@ -1148,14 +1262,14 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
           </div>
 
           <div className="text-zinc-100 font-medium">{selectedNode.title}</div>
-          {selectedNode.detail && (
+          {selectedNode.detail && selectedNode.detail !== selectedNode.questionHint && (
             <div className="text-[11px] text-zinc-400">{selectedNode.detail}</div>
           )}
           {selectedNode.questionHint && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200 flex items-start gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0 mt-0.5" />
               <span>
-                <strong>提问拓展建议：</strong>
+                <strong>{selectedNode.kind === 'question' ? '建议提问：' : '提问拓展建议：'}</strong>
                 {selectedNode.questionHint}
               </span>
             </div>

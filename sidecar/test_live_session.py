@@ -760,6 +760,29 @@ class LiveSessionLogicTests(unittest.TestCase):
         self.assertEqual(upd["speakerId"], "spk_guest_2")
         self.assertEqual(upd["speakerSource"], "manual")
 
+    def test_speaker_resolver_auto_discover_in_chat_mode(self) -> None:
+        resolver = live_session.SpeakerResolver(
+            speakers=[{"id": "spk_1", "name": "发言人 1", "role": "counterpart"}],
+            first_speaker_id="spk_1",
+            auto_discover=True,
+        )
+        s1, _, _ = resolver.resolve("u_1", 0, 500, cloud_speaker_id="1")
+        self.assertEqual(s1, "spk_1")
+        self.assertEqual(resolver.pop_newly_added_speakers(), [])
+
+        s2, _, _ = resolver.resolve("u_2", 600, 1200, cloud_speaker_id="2")
+        self.assertEqual(s2, "spk_2")
+        added_2 = resolver.pop_newly_added_speakers()
+        self.assertEqual(len(added_2), 1)
+        self.assertEqual(added_2[0]["name"], "发言人 2")
+
+        s3, _, _ = resolver.resolve("u_3", 1300, 1800, cloud_speaker_id="3")
+        self.assertEqual(s3, "spk_3")
+        added_3 = resolver.pop_newly_added_speakers()
+        self.assertEqual(len(added_3), 1)
+        self.assertEqual(added_3[0]["name"], "发言人 3")
+        self.assertEqual(len(resolver.speakers), 3)
+
     def test_scenario_prompt_adaptations(self) -> None:
         # 1. Dialogue without host
         dialogue_prompt = live_session.build_live_insight_prompt(

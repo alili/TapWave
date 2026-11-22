@@ -10,7 +10,6 @@ import {
   FileText,
   Gift,
   Image as ImageIcon,
-  KeyRound,
   Link2,
   Plus,
   RefreshCw,
@@ -21,7 +20,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  CartoonAvatarStyle,
   GuestSocialAccount,
   LotteryDrawCondition,
   PodcastProjectState,
@@ -48,10 +46,9 @@ import {
 } from '../engine/shownotesGenerator';
 import { runPythonSidecarShownotes } from '../engine/tauriBridge';
 import {
-  CARTOON_AVATAR_PALETTES,
-  CARTOON_AVATAR_STYLES,
-  CartoonAvatar,
-} from './CartoonAvatar';
+  buildLlmConfigForFeature,
+  getCachedAiPlatformConfig,
+} from '../engine/aiPlatformConfig';
 import {
   POSTER_THEME_OPTIONS,
   renderActivityPosterDataUrl,
@@ -91,12 +88,6 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
   const [copiedType, setCopiedType] = useState<'md' | 'txt' | null>(null);
   const [posterUrl, setPosterUrl] = useState<string>('');
   const [renderingPoster, setRenderingPoster] = useState(false);
-  const [showLlmConfig, setShowLlmConfig] = useState(false);
-
-  const hasApiKey = Boolean(
-    state.llmConfig.apiKey.trim() ||
-      (state.asrConfig?.provider === 'deepseek' && state.asrConfig?.apiKey?.trim())
-  );
 
   const shownotes: PodcastShownotes = useMemo(() => {
     if (state.shownotes) return state.shownotes;
@@ -127,7 +118,7 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
     [onUpdateState, timeline]
   );
 
-  // 一键智能生成（优先云端大模型，无密钥或失败时无缝回退本地智能生成）
+  // 一键智能生成（自动读取全局 AI 配置，无密钥或设为仅本地时回退本地智能生成）
   const handleOneClickGenerate = async () => {
     setGenerating(true);
     try {
@@ -139,10 +130,23 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
       }));
       const contentSegments = buildNaturalContentSegments(state, timeline);
 
+      const platformCfg = getCachedAiPlatformConfig();
+      const routedLlm = platformCfg
+        ? buildLlmConfigForFeature(platformCfg, 'shownotes_generate', state.llmConfig)
+        : state.llmConfig;
+      const forceLocalOnly = Boolean('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly);
+      const canUseCloud =
+        !forceLocalOnly &&
+        Boolean(
+          routedLlm.apiKey.trim() ||
+            state.llmConfig.apiKey.trim() ||
+            (state.asrConfig?.provider === 'deepseek' && state.asrConfig?.apiKey?.trim())
+        );
+
       let finalShownotes = localDraft;
       let usedCloud = false;
 
-      if (hasApiKey) {
+      if (canUseCloud) {
         try {
           const res = await runPythonSidecarShownotes(
             state,
@@ -165,7 +169,7 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
 
       onNotify(
         usedCloud
-          ? '✨ 已通过云端大模型一键生成 Shownotes（含简介、时间轴与活动建议）！'
+          ? `✨ 已通过全局 AI 配置（${routedLlm.provider}）一键生成 Shownotes！`
           : '✨ 已根据当前精剪文稿与时间轴一键生成完整 Shownotes！'
       );
     } finally {
@@ -258,6 +262,21 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleBenefitImageUpload = (benefitId: string, file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : undefined;
+      if (!dataUrl) return;
+      updateShownotes((sn) => ({
+        ...sn,
+        benefits: sn.benefits.map((b) =>
+          b.id === benefitId ? { ...b, imageUrl: dataUrl } : b
+        ),
+      }));
+    };
+    reader.readAsDataURL(file);
+  };
+
   const navTabs: Array<{ id: ShownotesSection; label: string; icon: React.ReactNode }> = [
     { id: 'summary', label: '节目简介', icon: <FileText className="w-3.5 h-3.5" /> },
     { id: 'guests', label: `节目嘉宾 (${shownotes.guests.length})`, icon: <Users className="w-3.5 h-3.5" /> },
@@ -286,23 +305,6 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={() => setShowLlmConfig((v) => !v)}
-              className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition ${
-                hasApiKey
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                  : 'border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300'
-              }`}
-              title="配置 DeepSeek / 云端大模型 API Key"
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>
-                {hasApiKey
-                  ? `AI: ${state.llmConfig.provider === 'deepseek' || !state.llmConfig.apiKey.trim() ? 'DeepSeek' : state.llmConfig.provider}`
-                  : '配置 DeepSeek Key'}
-              </span>
-            </button>
-
             <button
               onClick={handleOneClickGenerate}
               disabled={generating}
@@ -354,61 +356,6 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
           </div>
         </div>
 
-        {/* 可折叠 DeepSeek / 云端大模型 API Key 配置条 */}
-        {showLlmConfig && (
-          <div className="shrink-0 px-5 py-2.5 border-b border-zinc-800 bg-zinc-900/90 flex items-center gap-2.5 flex-wrap text-xs">
-            <span className="text-amber-300 font-semibold">大模型引擎:</span>
-            <select
-              value={state.llmConfig.provider}
-              onChange={(e) => {
-                const nextProvider = e.target.value as 'deepseek' | 'gemini' | 'openai';
-                onUpdateState((p) => ({
-                  ...p,
-                  llmConfig: {
-                    ...p.llmConfig,
-                    provider: nextProvider,
-                    baseUrl:
-                      nextProvider === 'deepseek'
-                        ? 'https://api.deepseek.com/v1'
-                        : nextProvider === 'openai'
-                        ? 'https://api.openai.com/v1'
-                        : p.llmConfig.baseUrl,
-                    model:
-                      nextProvider === 'deepseek'
-                        ? 'deepseek-chat'
-                        : nextProvider === 'gemini'
-                        ? 'gemini-2.5-flash'
-                        : 'gpt-4o-mini',
-                  },
-                }));
-              }}
-              className="px-2 py-1 rounded border border-zinc-700 bg-zinc-950 text-zinc-100"
-            >
-              <option value="deepseek">DeepSeek API (deepseek-chat)</option>
-              <option value="gemini">Gemini API</option>
-              <option value="openai">OpenAI / 兼容网关</option>
-            </select>
-            <input
-              type="password"
-              value={state.llmConfig.apiKey}
-              onChange={(e) =>
-                onUpdateState((p) => ({
-                  ...p,
-                  llmConfig: { ...p.llmConfig, apiKey: e.target.value },
-                }))
-              }
-              placeholder="输入 DeepSeek API Key (sk-...)，同时用于节目概要与 Shownotes 生成"
-              className="flex-1 min-w-[260px] px-2.5 py-1 rounded border border-zinc-700 bg-zinc-950 text-zinc-100"
-            />
-            <button
-              onClick={() => setShowLlmConfig(false)}
-              className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium cursor-pointer"
-            >
-              完成
-            </button>
-          </div>
-        )}
-
         {/* 二级导航 Tab */}
         <div className="shrink-0 px-5 py-2 border-b border-zinc-800 bg-zinc-900/50 flex items-center gap-1.5 overflow-x-auto">
           {navTabs.map((tab) => (
@@ -433,8 +380,8 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
           <div className="lg:col-span-7 p-5 overflow-y-auto space-y-4 border-r border-zinc-800/80">
             {/* 1. 节目简介 */}
             {activeSection === 'summary' && (
-              <div className="space-y-4">
-                <div>
+              <div className="h-full flex flex-col gap-4">
+                <div className="shrink-0">
                   <label className="text-xs font-semibold text-zinc-300 block mb-1.5">
                     单集标题
                   </label>
@@ -449,8 +396,8 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                   />
                 </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
+                <div className="flex-1 min-h-0 flex flex-col">
+                  <div className="shrink-0 flex items-center justify-between mb-1.5">
                     <label className="text-xs font-semibold text-zinc-300">
                       节目简介（建议 500 字左右）
                     </label>
@@ -465,13 +412,12 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                     </span>
                   </div>
                   <textarea
-                    rows={14}
                     value={shownotes.summary}
                     onChange={(e) =>
                       updateShownotes((sn) => ({ ...sn, summary: e.target.value }))
                     }
                     placeholder="点击上方「一键智能生成」，将自动根据精剪文稿生成约 500 字的节目简介..."
-                    className="w-full px-3 py-2.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs leading-relaxed text-zinc-100 focus:outline-none focus:border-blue-500 resize-y"
+                    className="flex-1 min-h-[360px] w-full px-3 py-2.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs leading-relaxed text-zinc-100 focus:outline-none focus:border-blue-500 resize-y"
                   />
                 </div>
               </div>
@@ -482,7 +428,7 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-zinc-400">
-                    支持配置每位嘉宾的名字、联系方式、社交账户与专属卡通头像
+                    支持配置每位嘉宾的名字、联系方式、社交账户与头像
                   </span>
                   <div className="flex items-center gap-2">
                     <button
@@ -558,16 +504,20 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                   >
                     <div className="flex items-start gap-3.5">
                       <div className="flex flex-col items-center gap-1.5 shrink-0">
-                        <CartoonAvatar
-                          name={guest.name}
-                          style={guest.avatarStyle}
-                          bgColor={guest.avatarBgColor}
-                          customAvatarUrl={guest.customAvatarUrl}
-                          size={60}
-                        />
+                        {guest.customAvatarUrl ? (
+                          <img
+                            src={guest.customAvatarUrl}
+                            alt={guest.name}
+                            className="w-[60px] h-[60px] rounded-full object-cover border border-zinc-700"
+                          />
+                        ) : (
+                          <div className="w-[60px] h-[60px] rounded-full bg-zinc-800 border border-dashed border-zinc-600 flex items-center justify-center text-zinc-300 text-lg font-semibold select-none">
+                            {guest.name.trim().slice(0, 1) || <Users className="w-5 h-5 text-zinc-500" />}
+                          </div>
+                        )}
                         <label className="text-[10px] text-blue-400 hover:text-blue-300 cursor-pointer flex items-center gap-0.5">
                           <Upload className="w-2.5 h-2.5" />
-                          <span>传图</span>
+                          <span>{guest.customAvatarUrl ? '更换头像' : '上传头像'}</span>
                           <input
                             type="file"
                             accept="image/*"
@@ -575,11 +525,13 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                             onChange={(e) => {
                               const f = e.target.files?.[0];
                               if (f) handleAvatarUpload(guest.id, f);
+                              e.target.value = '';
                             }}
                           />
                         </label>
                         {guest.customAvatarUrl && (
                           <button
+                            type="button"
                             onClick={() =>
                               updateShownotes((sn) => ({
                                 ...sn,
@@ -588,9 +540,9 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                                 ),
                               }))
                             }
-                            className="text-[10px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                            className="text-[10px] text-zinc-400 hover:text-red-400 cursor-pointer"
                           >
-                            用卡通
+                            移除
                           </button>
                         )}
                       </div>
@@ -814,62 +766,6 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                         </button>
                       </div>
                     </div>
-
-                    {/* 卡通头像造型 & 背景色选择 */}
-                    <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-1 flex-wrap">
-                        <span className="text-[11px] text-zinc-400 mr-1">卡通造型:</span>
-                        {CARTOON_AVATAR_STYLES.map((st) => (
-                          <button
-                            key={st.id}
-                            onClick={() =>
-                              updateShownotes((sn) => ({
-                                ...sn,
-                                guests: sn.guests.map((g) =>
-                                  g.id === guest.id
-                                    ? {
-                                        ...g,
-                                        avatarStyle: st.id as CartoonAvatarStyle,
-                                        customAvatarUrl: undefined,
-                                      }
-                                    : g
-                                ),
-                              }))
-                            }
-                            className={`px-2 py-0.5 rounded text-[11px] border cursor-pointer transition ${
-                              guest.avatarStyle === st.id && !guest.customAvatarUrl
-                                ? 'border-blue-500 bg-blue-500/20 text-blue-200'
-                                : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
-                            }`}
-                          >
-                            {st.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="flex items-center gap-1.5">
-                        {CARTOON_AVATAR_PALETTES.map((c) => (
-                          <button
-                            key={c}
-                            onClick={() =>
-                              updateShownotes((sn) => ({
-                                ...sn,
-                                guests: sn.guests.map((g) =>
-                                  g.id === guest.id ? { ...g, avatarBgColor: c } : g
-                                ),
-                              }))
-                            }
-                            style={{ backgroundColor: c }}
-                            className={`w-4 h-4 rounded-full cursor-pointer transition ${
-                              guest.avatarBgColor === c
-                                ? 'ring-2 ring-white scale-110'
-                                : 'opacity-70 hover:opacity-100'
-                            }`}
-                            title="切换头像背景色"
-                          />
-                        ))}
-                      </div>
-                    </div>
                   </div>
                   );
                 })}
@@ -879,85 +775,81 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
             {/* 3. 时间轴 */}
             {activeSection === 'timeline' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400">
-                    章节粒度建议 3 到 8 分钟（全篇 6 到 15 个节点），标题公式：[核心主题/观点] + [具体细节/金句/反常识点]（12~25字）
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        const hasOverHour = shownotes.timeline.some((item) => item.timeSec >= 3600);
-                        const lines = shownotes.timeline
-                          .slice()
-                          .sort((a, b) => a.timeSec - b.timeSec)
-                          .map((t) => formatTimelineRow(t, hasOverHour));
-                        navigator.clipboard.writeText(lines.join('\n'));
-                        onNotify('📋 已按标准格式复制时间轴至剪贴板');
-                      }}
-                      title="复制符合小宇宙/Apple Podcasts标准的时间轴文本（时间戳与标题间一个空格隔开，无破折号）"
-                      className="px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 flex items-center gap-1 cursor-pointer transition"
-                    >
-                      <Copy className="w-3.5 h-3.5 text-zinc-400" />
-                      <span>复制时间轴</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        const sortedTimeline = [...shownotes.timeline].sort((a, b) => a.timeSec - b.timeSec);
-                        if (sortedTimeline.length === 0) return;
-                        onUpdateState((prev) => {
-                          const updatedBlocks = prev.blocks.map((b) => {
-                            const bStart = timeline.blockEditedStartsSec[b.blockId] ?? 0;
-                            let matchedTitle = sortedTimeline[0]?.title || '';
-                            for (let j = sortedTimeline.length - 1; j >= 0; j--) {
-                              if (bStart >= sortedTimeline[j].timeSec - 0.5) {
-                                matchedTitle = sortedTimeline[j].title;
-                                break;
-                              }
+                <div className="flex items-center justify-end gap-2 flex-nowrap">
+                  <button
+                    onClick={() => {
+                      const hasOverHour = shownotes.timeline.some((item) => item.timeSec >= 3600);
+                      const lines = shownotes.timeline
+                        .slice()
+                        .sort((a, b) => a.timeSec - b.timeSec)
+                        .map((t) => formatTimelineRow(t, hasOverHour));
+                      navigator.clipboard.writeText(lines.join('\n'));
+                      onNotify('📋 已按标准格式复制时间轴至剪贴板');
+                    }}
+                    title="复制符合小宇宙/Apple Podcasts标准的时间轴文本（时间戳与标题间一个空格隔开，无破折号）"
+                    className="px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                    <span>复制</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      const sortedTimeline = [...shownotes.timeline].sort((a, b) => a.timeSec - b.timeSec);
+                      if (sortedTimeline.length === 0) return;
+                      onUpdateState((prev) => {
+                        const updatedBlocks = prev.blocks.map((b) => {
+                          const bStart = timeline.blockEditedStartsSec[b.blockId] ?? 0;
+                          let matchedTitle = sortedTimeline[0]?.title || '';
+                          for (let j = sortedTimeline.length - 1; j >= 0; j--) {
+                            if (bStart >= sortedTimeline[j].timeSec - 0.5) {
+                              matchedTitle = sortedTimeline[j].title;
+                              break;
                             }
-                            return { ...b, chapterTitle: matchedTitle };
-                          });
-                          return { ...prev, blocks: updatedBlocks };
+                          }
+                          return { ...b, chapterTitle: matchedTitle };
                         });
-                        onNotify(`✓ 已将 ${shownotes.timeline.length} 个 Shownotes 智能章节应用至文稿与波形时间轴`);
-                      }}
-                      title="将 Shownotes 提取的智能章节同步写回文稿各段落与波形时间轴"
-                      className="px-2.5 py-1 rounded-lg border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-xs text-indigo-300 font-medium flex items-center gap-1 cursor-pointer transition"
-                    >
-                      <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>应用到文稿智能章节</span>
-                    </button>
-                    <button
-                      onClick={() =>
-                        updateShownotes((sn) => ({
-                          ...sn,
-                          timeline: buildTimelineItemsFromProject(state, timeline),
-                        }))
-                      }
-                      className="px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 cursor-pointer"
-                    >
-                      同步精剪时间轴
-                    </button>
-                    <button
-                      onClick={() =>
-                        updateShownotes((sn) => ({
-                          ...sn,
-                          timeline: [
-                            ...sn.timeline,
-                            {
-                              id: `tl_m_${Date.now()}`,
-                              timeSec: Math.round(timeline.totalEditedDurationSec / 2),
-                              title: '新话题节点',
-                              summary: '',
-                            },
-                          ],
-                        }))
-                      }
-                      className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>添加节点</span>
-                    </button>
-                  </div>
+                        return { ...prev, blocks: updatedBlocks };
+                      });
+                      onNotify(`✓ 已将 ${shownotes.timeline.length} 个 Shownotes 智能章节应用至文稿与波形时间轴`);
+                    }}
+                    title="将 Shownotes 提取的智能章节同步写回文稿各段落与波形时间轴"
+                    className="px-2.5 py-1 rounded-lg border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-xs text-indigo-300 font-medium flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span>应用到章节</span>
+                  </button>
+                  <button
+                    onClick={() =>
+                      updateShownotes((sn) => ({
+                        ...sn,
+                        timeline: buildTimelineItemsFromProject(state, timeline),
+                      }))
+                    }
+                    title="同步精剪时间轴"
+                    className="px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    同步精剪
+                  </button>
+                  <button
+                    onClick={() =>
+                      updateShownotes((sn) => ({
+                        ...sn,
+                        timeline: [
+                          ...sn.timeline,
+                          {
+                            id: `tl_m_${Date.now()}`,
+                            timeSec: Math.round(timeline.totalEditedDurationSec / 2),
+                            title: '新话题节点',
+                            summary: '',
+                          },
+                        ],
+                      }))
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5 shrink-0" />
+                    <span>添加节点</span>
+                  </button>
                 </div>
 
                 {shownotes.timeline.map((item) => (
@@ -1433,6 +1325,65 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                       placeholder="领取步骤、适用范围与有效期说明"
                       className="w-full px-2.5 py-1.5 rounded border border-zinc-700 bg-zinc-950 text-zinc-300"
                     />
+
+                    {/* 听友福利图片（二维码 / 礼品图 / 活动配图） */}
+                    <div className="pt-1 flex items-center gap-3">
+                      {ben.imageUrl ? (
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={ben.imageUrl}
+                            alt={ben.title || '福利图片'}
+                            className="w-20 h-20 rounded-lg border border-zinc-700 object-cover bg-zinc-950"
+                          />
+                          <div className="flex flex-col gap-1.5">
+                            <label className="px-2.5 py-1 rounded border border-zinc-700 bg-zinc-950 hover:bg-zinc-800 text-[11px] text-blue-300 cursor-pointer inline-flex items-center gap-1">
+                              <Upload className="w-3 h-3" />
+                              <span>更换图片</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0];
+                                  if (f) handleBenefitImageUpload(ben.id, f);
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateShownotes((sn) => ({
+                                  ...sn,
+                                  benefits: sn.benefits.map((b) =>
+                                    b.id === ben.id ? { ...b, imageUrl: undefined } : b
+                                  ),
+                                }))
+                              }
+                              className="px-2.5 py-1 rounded border border-zinc-800 hover:border-red-500/40 text-[11px] text-zinc-400 hover:text-red-400 cursor-pointer inline-flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>移除图片</span>
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <label className="px-3 py-1.5 rounded-lg border border-dashed border-zinc-700 hover:border-blue-500/60 bg-zinc-950/60 hover:bg-zinc-900 text-[11px] text-zinc-400 hover:text-blue-300 cursor-pointer inline-flex items-center gap-1.5 transition">
+                          <ImageIcon className="w-3.5 h-3.5" />
+                          <span>上传福利图片（如听友群二维码、资料包封面或礼品图）</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              if (f) handleBenefitImageUpload(ben.id, f);
+                              e.target.value = '';
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1502,13 +1453,17 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                           key={g.id}
                           className="flex items-center gap-2.5 p-2 rounded-lg bg-zinc-900 border border-zinc-800/80"
                         >
-                          <CartoonAvatar
-                            name={g.name}
-                            style={g.avatarStyle}
-                            bgColor={g.avatarBgColor}
-                            customAvatarUrl={g.customAvatarUrl}
-                            size={34}
-                          />
+                          {g.customAvatarUrl ? (
+                            <img
+                              src={g.customAvatarUrl}
+                              alt={g.name}
+                              className="w-[34px] h-[34px] rounded-full object-cover border border-zinc-700 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-[34px] h-[34px] rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300 text-xs font-semibold shrink-0">
+                              {g.name.trim().slice(0, 1) || '?'}
+                            </div>
+                          )}
                           <div className="min-w-0 flex-1">
                             <div className="font-semibold text-zinc-100 truncate">
                               {g.name}
@@ -1579,11 +1534,20 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                     <div className="text-[11px] font-semibold text-emerald-400 mb-1">
                       🎁 听友福利
                     </div>
-                    <ul className="space-y-1 text-zinc-300">
+                    <ul className="space-y-2 text-zinc-300">
                       {shownotes.benefits.map((b) => (
-                        <li key={b.id}>
-                          • <strong className="text-zinc-100">{b.title}</strong>
-                          {b.codeOrLink ? `（${b.codeOrLink}）` : ''}：{b.description}
+                        <li key={b.id} className="space-y-1.5">
+                          <div>
+                            • <strong className="text-zinc-100">{b.title}</strong>
+                            {b.codeOrLink ? `（${b.codeOrLink}）` : ''}：{b.description}
+                          </div>
+                          {b.imageUrl && (
+                            <img
+                              src={b.imageUrl}
+                              alt={b.title || '福利图片'}
+                              className="max-h-36 rounded-lg border border-zinc-800 object-contain bg-zinc-900"
+                            />
+                          )}
                         </li>
                       ))}
                     </ul>

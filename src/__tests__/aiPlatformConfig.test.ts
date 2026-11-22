@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AI_PROVIDERS_CATALOG,
+  GEMINI_RECOMMENDED_MODELS,
   applyPlatformConfigToProjectState,
   buildAsrConfigFromPlatform,
   buildLlmConfigForFeature,
@@ -140,5 +141,19 @@ describe('AI Platform Configuration Engine', () => {
     expect(cleared.providers.gemini.apiKey).toBe('');
     expect(countConfiguredProviders(cleared)).toBe(0);
     expect(AI_PROVIDERS_CATALOG.length).toBe(5);
+  });
+
+  it('provides recommended mainstream Gemini models and preserves selected model id', () => {
+    const ids = GEMINI_RECOMMENDED_MODELS.map((m) => m.id);
+    expect(ids).toContain('gemini-4-hydrogen');
+    expect(ids).toContain('gemini-3.8-flash');
+    expect(ids).toContain('gemini-2.5-flash');
+
+    const normalized = normalizeAiPlatformConfig({
+      providers: {
+        gemini: { apiKey: 'AIza-test', model: 'gemini-4-hydrogen' },
+      },
+    });
+    expect(normalized.providers.gemini.model).toBe('gemini-4-hydrogen');
   });
 });

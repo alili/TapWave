@@ -244,6 +244,10 @@ export type LiveSidecarEvent =
       utterance: LiveUtterance;
     }
   | {
+      type: 'speaker_added';
+      speaker: LiveSpeaker;
+    }
+  | {
       type: 'utterance_update';
       utteranceId: string;
       speakerId: string;

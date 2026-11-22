@@ -167,6 +167,64 @@ export const AI_PROVIDERS_CATALOG: AiProviderDescriptor[] = [
 
 const BROWSER_STORAGE_KEY = 'tapwave_local_ai_config_v1';
 
+export interface GeminiModelPreset {
+  id: string;
+  label: string;
+  tag?: string;
+  description: string;
+}
+
+export const GEMINI_RECOMMENDED_MODELS: GeminiModelPreset[] = [
+  {
+    id: 'gemini-4-hydrogen',
+    label: 'Gemini 4 Hydrogen',
+    tag: '推荐',
+    description: '新一代高速主力模型，兼顾理解力与响应速度，适合日常文稿分析与纠错',
+  },
+  {
+    id: 'gemini-4-argon',
+    label: 'Gemini 4 Argon',
+    tag: '高效推理',
+    description: '高性价比推理模型，推理更快、Token 消耗更低',
+  },
+  {
+    id: 'gemini-4-neon',
+    label: 'Gemini 4 Neon',
+    tag: '均衡',
+    description: '均衡深度推理与长文本归纳能力，适合复杂节目分析与 Shownotes',
+  },
+  {
+    id: 'gemini-4-carbon',
+    label: 'Gemini 4 Carbon',
+    tag: '旗舰',
+    description: '旗舰级复杂推理模型，1M 上下文窗口，适合超长播客深度提炼',
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    tag: 'Flash',
+    description: 'Gemini 3 系列最新高性价比 Flash 模型，高吞吐低延迟',
+  },
+  {
+    id: 'gemini-3.1-pro-preview',
+    label: 'Gemini 3.1 Pro',
+    tag: 'Preview',
+    description: 'Gemini 3 系列高能力 Pro 预览版',
+  },
+  {
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash',
+    tag: '旧版兼容',
+    description: '旧版快速模型（官方正逐步迁移至新版 Flash / Gemini 4 系列）',
+  },
+  {
+    id: 'gemini-2.5-pro',
+    label: 'Gemini 2.5 Pro',
+    tag: '旧版兼容',
+    description: '旧版稳定推理模型，保留向后兼容',
+  },
+];
+
 export function createDefaultAiPlatformConfig(): AiPlatformConfig {
   return {
     version: 1,

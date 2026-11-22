@@ -1,5 +1,4 @@
 import {
-  CartoonAvatarStyle,
   PodcastShownotes,
   PosterTheme,
   ShownotesGuest,
@@ -125,112 +124,28 @@ function wrapTextLines(
   return lines;
 }
 
-function drawCanvasCartoonAvatar(
+function drawInitialAvatar(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
   radius: number,
-  style: CartoonAvatarStyle,
+  name: string,
   bgColor: string
 ) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.clip();
-
-  // 背景
   ctx.fillStyle = bgColor || '#3b82f6';
-  ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
-
-  const s = radius / 40;
-
-  // 身体
-  ctx.fillStyle = '#1e293b';
-  ctx.beginPath();
-  ctx.ellipse(cx, cy + 36 * s, 23 * s, 18 * s, 0, Math.PI, 0);
   ctx.fill();
 
-  // 猫耳
-  if (style === 'cat') {
-    ctx.fillStyle = '#fde68a';
-    ctx.strokeStyle = '#1f2937';
-    ctx.lineWidth = 2 * s;
-    ctx.beginPath();
-    ctx.moveTo(cx - 22 * s, cy - 10 * s);
-    ctx.lineTo(cx - 18 * s, cy - 30 * s);
-    ctx.lineTo(cx - 5 * s, cy - 18 * s);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(cx + 22 * s, cy - 10 * s);
-    ctx.lineTo(cx + 18 * s, cy - 30 * s);
-    ctx.lineTo(cx + 5 * s, cy - 18 * s);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
-
-  // 头部
-  ctx.fillStyle = '#fde68a';
-  ctx.strokeStyle = '#1f2937';
-  ctx.lineWidth = 2 * s;
-  ctx.beginPath();
-  ctx.arc(cx, cy + 1 * s, 20 * s, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  // 头发
-  ctx.fillStyle = '#1f2937';
-  ctx.beginPath();
-  ctx.arc(cx, cy - 2 * s, 20 * s, Math.PI, 0);
-  ctx.fill();
-
-  // 眼睛
-  ctx.fillStyle = '#1f2937';
-  ctx.beginPath();
-  ctx.arc(cx - 7.5 * s, cy + 1 * s, 2.6 * s, 0, Math.PI * 2);
-  ctx.arc(cx + 7.5 * s, cy + 1 * s, 2.6 * s, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 微笑
-  ctx.strokeStyle = '#1f2937';
-  ctx.lineWidth = 2 * s;
-  ctx.beginPath();
-  ctx.arc(cx, cy + 5 * s, 5 * s, 0.15 * Math.PI, 0.85 * Math.PI);
-  ctx.stroke();
-
-  // 配饰
-  if (style === 'glasses') {
-    ctx.strokeStyle = '#111827';
-    ctx.lineWidth = 2 * s;
-    ctx.strokeRect(cx - 15 * s, cy - 4 * s, 12 * s, 9 * s);
-    ctx.strokeRect(cx + 3 * s, cy - 4 * s, 12 * s, 9 * s);
-  } else if (style === 'headphones') {
-    ctx.strokeStyle = '#f8fafc';
-    ctx.lineWidth = 4 * s;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 22 * s, Math.PI, 0);
-    ctx.stroke();
-  } else if (style === 'mic') {
-    ctx.fillStyle = '#e2e8f0';
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.6 * s;
-    drawRoundRect(ctx, cx - 4 * s, cy + 17 * s, 8 * s, 11 * s, 4 * s);
-    ctx.fill();
-    ctx.stroke();
-  } else if (style === 'astro') {
-    ctx.strokeStyle = '#e0f2fe';
-    ctx.lineWidth = 3 * s;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 28 * s, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
+  const initial = (name || '?').trim().slice(0, 1).toUpperCase();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${Math.round(radius * 0.82)}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(initial, cx, cy + 1);
   ctx.restore();
 
-  // 外框描边
   ctx.strokeStyle = 'rgba(255,255,255,0.45)';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
@@ -272,7 +187,7 @@ async function drawGuestAvatar(
       return;
     }
   }
-  drawCanvasCartoonAvatar(ctx, cx, cy, radius, guest.avatarStyle, guest.avatarBgColor);
+  drawInitialAvatar(ctx, cx, cy, radius, guest.name, guest.avatarBgColor);
 }
 
 /**
@@ -485,6 +400,22 @@ export async function renderActivityPosterDataUrl(
     ctx.stroke();
 
     const firstBen = shownotes.benefits[0];
+    let textMaxW = contentW - 44;
+    if (firstBen.imageUrl) {
+      const benImg = await loadImage(firstBen.imageUrl);
+      if (benImg) {
+        const imgSize = 68;
+        const imgX = padX + contentW - imgSize - 14;
+        const imgY = y + (benH - imgSize) / 2;
+        ctx.save();
+        drawRoundRect(ctx, imgX, imgY, imgSize, imgSize, 10);
+        ctx.clip();
+        ctx.drawImage(benImg, imgX, imgY, imgSize, imgSize);
+        ctx.restore();
+        textMaxW = contentW - 44 - imgSize - 16;
+      }
+    }
+
     ctx.fillStyle = palette.accent;
     ctx.font = 'bold 17px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
     ctx.fillText(`听友福利：${firstBen.title}`, padX + 22, y + 36);
@@ -494,7 +425,7 @@ export async function renderActivityPosterDataUrl(
     const benDesc = wrapTextLines(
       ctx,
       `${firstBen.codeOrLink ? `[${firstBen.codeOrLink}] ` : ''}${firstBen.description}`,
-      contentW - 44,
+      textMaxW,
       1
     );
     ctx.fillText(benDesc[0] || '', padX + 22, y + 68);

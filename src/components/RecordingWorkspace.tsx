@@ -479,28 +479,17 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
         firstSpeakerId = 'spk_other_1';
       }
     } else {
-      // 聊天模式：多人自由发言讨论，重点追踪议题流转与相关性
-      const totalCount = Math.max(2, Math.min(6, form.speakerCount));
-      effectiveSpeakerCount = totalCount;
-      speakers.push({
-        id: 'spk_self',
-        name: selfName,
-        role: 'self',
-        speakerKind: 'guest',
-      });
-      const otherCount = totalCount - 1;
-      for (let i = 1; i <= otherCount; i++) {
-        const respName =
-          parsedCounterparts[i - 1] ||
-          (otherCount === 1 ? primaryCounterpartName : `${counterpartDefault}${i}`);
-        speakers.push({
-          id: `spk_other_${i}`,
-          name: respName,
+      // 聊天模式：自由发言讨论，无需预先指定人数与称呼，录制中自动识别发言人
+      effectiveSpeakerCount = 0;
+      speakers = [
+        {
+          id: 'spk_1',
+          name: '发言人 1',
           role: 'counterpart',
           speakerKind: 'guest',
-        });
-      }
-      firstSpeakerId = 'spk_self';
+        },
+      ];
+      firstSpeakerId = 'spk_1';
     }
 
     const outline = form.outlineText
@@ -523,15 +512,16 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       .filter((s) => s.role === 'counterpart')
       .map((s) => s.name);
 
+    const isChatScenario = form.scenario === 'chat';
     const prep: LiveSessionPrep = {
       scenario: form.scenario,
       title: form.title.trim() || form.topic.trim() || '未命名录制',
       topic: form.topic.trim(),
       goals: form.goals.trim(),
-      counterpartName: primaryCounterpartName,
-      counterpartNames,
+      counterpartName: isChatScenario ? '' : primaryCounterpartName,
+      counterpartNames: isChatScenario ? [] : counterpartNames,
       counterpartBackground: form.counterpartBackground.trim(),
-      selfName,
+      selfName: isChatScenario ? '' : selfName,
       speakerCount: effectiveSpeakerCount,
       firstSpeakerId,
       hasHost: form.scenario === 'dialogue' ? form.hasHost : undefined,
@@ -667,7 +657,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                     ? '演讲模式：主讲人核心信息提炼（议题相对固定），自动分离并过滤旁听私下讨论与现场提问'
                     : isDialogueForm
                       ? '对谈模式：固定人数多方对话（可选有/无主持人），议题相对固定，持续提炼观点碰撞'
-                      : '聊天模式：多人自由发言讨论，重点追踪当前议题、议题流转轨迹与主题相关性'}
+                      : '聊天模式：自由发言讨论，无需预设人数与称呼，自动识别发言人并追踪议题流转'}
                 </p>
               </div>
             </div>
@@ -840,117 +830,107 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               />
             </div>
 
-            <div className="space-y-1">
-              <label className="text-xs text-zinc-400">{counterpartLabel}</label>
-              <input
-                type="text"
-                value={form.counterpartName}
-                onChange={(e) => setForm((f) => ({ ...f, counterpartName: e.target.value }))}
-                placeholder={
-                  isListenForm
-                    ? '主讲人姓名'
-                    : isChatForm
-                      ? '例如：张三, 李四, 王五'
-                      : '例如：嘉宾A, 嘉宾B'
-                }
-                className={FORM_INPUT_CLS}
-              />
-            </div>
-
-            {isListenForm ? (
-              <div className="space-y-1">
-                <label className="text-xs text-zinc-400">现场声道分离</label>
-                <label
-                  className="w-full h-9 flex items-center gap-2.5 px-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 cursor-pointer"
-                  title="仅重点提炼主讲人信息，自动过滤旁听私下闲聊"
-                >
-                  <input
-                    type="checkbox"
-                    checked={form.captureAudience}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, captureAudience: e.target.checked }))
-                    }
-                    className="rounded border-zinc-600 bg-zinc-900 text-rose-500 shrink-0"
-                  />
-                  <span className="font-medium text-zinc-100 truncate">
-                    分离现场提问 / 私下讨论
-                  </span>
-                </label>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2.5">
+            {!isChatForm && (
+              <>
                 <div className="space-y-1">
-                  <label className="text-xs text-zinc-400">
-                    {isDialogueForm
-                      ? form.hasHost
-                        ? '主持人称呼'
-                        : '对谈结构'
-                      : '我的称呼'}
-                  </label>
-                  {isDialogueForm && !form.hasHost ? (
-                    <button
-                      type="button"
-                      onClick={() => setForm((f) => ({ ...f, hasHost: true }))}
-                      className="w-full h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-amber-300 hover:border-amber-500/50 transition cursor-pointer text-left truncate"
-                      title="点击切换为有主持人模式"
+                  <label className="text-xs text-zinc-400">{counterpartLabel}</label>
+                  <input
+                    type="text"
+                    value={form.counterpartName}
+                    onChange={(e) => setForm((f) => ({ ...f, counterpartName: e.target.value }))}
+                    placeholder={
+                      isListenForm
+                        ? '主讲人姓名'
+                        : '例如：嘉宾A, 嘉宾B'
+                    }
+                    className={FORM_INPUT_CLS}
+                  />
+                </div>
+
+                {isListenForm ? (
+                  <div className="space-y-1">
+                    <label className="text-xs text-zinc-400">现场声道分离</label>
+                    <label
+                      className="w-full h-9 flex items-center gap-2.5 px-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 cursor-pointer"
+                      title="仅重点提炼主讲人信息，自动过滤旁听私下闲聊"
                     >
-                      无主持人 (点击切换)
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-1">
                       <input
-                        type="text"
-                        value={form.selfName}
-                        onChange={(e) => setForm((f) => ({ ...f, selfName: e.target.value }))}
-                        className="w-full min-w-0 h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                        type="checkbox"
+                        checked={form.captureAudience}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, captureAudience: e.target.checked }))
+                        }
+                        className="rounded border-zinc-600 bg-zinc-900 text-rose-500 shrink-0"
                       />
-                      {isDialogueForm && (
+                      <span className="font-medium text-zinc-100 truncate">
+                        分离现场提问 / 私下讨论
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className="space-y-1">
+                      <label className="text-xs text-zinc-400">
+                        {isDialogueForm
+                          ? form.hasHost
+                            ? '主持人称呼'
+                            : '对谈结构'
+                          : '我的称呼'}
+                      </label>
+                      {isDialogueForm && !form.hasHost ? (
                         <button
                           type="button"
-                          onClick={() => setForm((f) => ({ ...f, hasHost: false }))}
-                          className="shrink-0 h-9 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
-                          title="切换为无主持人平等对谈"
+                          onClick={() => setForm((f) => ({ ...f, hasHost: true }))}
+                          className="w-full h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-amber-300 hover:border-amber-500/50 transition cursor-pointer text-left truncate"
+                          title="点击切换为有主持人模式"
                         >
-                          去主持
+                          无主持人 (点击切换)
                         </button>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={form.selfName}
+                            onChange={(e) => setForm((f) => ({ ...f, selfName: e.target.value }))}
+                            className="w-full min-w-0 h-9 px-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                          />
+                          {isDialogueForm && (
+                            <button
+                              type="button"
+                              onClick={() => setForm((f) => ({ ...f, hasHost: false }))}
+                              className="shrink-0 h-9 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                              title="切换为无主持人平等对谈"
+                            >
+                              去主持
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-zinc-400">
-                    {isDialogueForm ? '固定人数' : '讨论人数'}
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={Math.max(2, form.speakerCount)}
-                      onChange={(e) =>
-                        setForm((f) => ({ ...f, speakerCount: Number(e.target.value) }))
-                      }
-                      className={FORM_SELECT_CLS}
-                    >
-                      {isChatForm ? (
-                        <>
-                          <option value={2}>2 人聊天</option>
-                          <option value={3}>3 人聊天</option>
-                          <option value={4}>4 人聊天</option>
-                          <option value={5}>5 人聊天</option>
-                          <option value={6}>6 人聊天</option>
-                        </>
-                      ) : (
-                        <>
+                    <div className="space-y-1">
+                      <label className="text-xs text-zinc-400">
+                        {isDialogueForm ? '固定人数' : '讨论人数'}
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={Math.max(2, form.speakerCount)}
+                          onChange={(e) =>
+                            setForm((f) => ({ ...f, speakerCount: Number(e.target.value) }))
+                          }
+                          className={FORM_SELECT_CLS}
+                        >
                           <option value={2}>2 人对谈</option>
                           <option value={3}>3 人对谈</option>
                           <option value={4}>4 人对谈</option>
                           <option value={5}>5 人对谈</option>
                           <option value={6}>6 人对谈</option>
-                        </>
-                      )}
-                    </select>
-                    <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+                        </select>
+                        <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
+                )}
+              </>
             )}
           </div>
 

@@ -114,12 +114,34 @@ export function applyLiveEvent(
         },
       };
 
-    case 'final':
+    case 'speaker_added': {
+      const exists = snap.speakers.some((s) => s.id === ev.speaker.id);
+      if (exists) return snap;
       return {
         ...snap,
+        speakers: [...snap.speakers, ev.speaker],
+      };
+    }
+
+    case 'final': {
+      const hasSpeaker = snap.speakers.some((s) => s.id === ev.utterance.speakerId);
+      const nextSpeakers = hasSpeaker
+        ? snap.speakers
+        : [
+            ...snap.speakers,
+            {
+              id: ev.utterance.speakerId,
+              name: `发言人 ${snap.speakers.length + 1}`,
+              role: 'counterpart' as const,
+            },
+          ];
+      return {
+        ...snap,
+        speakers: nextSpeakers,
         partial: null,
         utterances: [...snap.utterances, ev.utterance],
       };
+    }
 
     case 'utterance_update':
       return {

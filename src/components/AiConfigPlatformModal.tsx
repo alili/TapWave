@@ -21,6 +21,7 @@ import {
   AiFeatureId,
   AiPlatformConfig,
   AiProviderId,
+  GEMINI_RECOMMENDED_MODELS,
   LlmFeatureProvider,
   clearAllAiPlatformSecrets,
   getAiPlatformStorageDisplayPath,
@@ -713,43 +714,89 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
                   revealed={isFieldRevealed('gm_key')}
                   onToggleReveal={() => toggleFieldReveal('gm_key')}
                 />
-                <div className="space-y-1 text-xs">
-                  <label className="text-[11px] text-zinc-400">Gemini 模型名称</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={draft.providers.gemini.model}
-                      onChange={(e) =>
-                        setDraft((p) => ({
-                          ...p,
-                          providers: {
-                            ...p.providers,
-                            gemini: { ...p.providers.gemini, model: e.target.value },
-                          },
-                        }))
-                      }
-                      placeholder="gemini-2.5-flash"
-                      className="flex-1 px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-950 text-zinc-100 font-mono text-[11px]"
-                    />
-                    {['gemini-2.5-flash', 'gemini-2.5-pro'].map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() =>
-                          setDraft((p) => ({
-                            ...p,
-                            providers: {
-                              ...p.providers,
-                              gemini: { ...p.providers.gemini, model: preset },
-                            },
-                          }))
-                        }
-                        className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-[10px] text-zinc-300 cursor-pointer"
-                      >
-                        {preset}
-                      </button>
-                    ))}
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] text-zinc-400">Gemini 模型名称</label>
+                    <span className="text-[10px] text-zinc-500">
+                      支持手动输入或点选当前主流模型
+                    </span>
                   </div>
+                  <input
+                    type="text"
+                    list="gemini-recommended-models"
+                    value={draft.providers.gemini.model}
+                    onChange={(e) =>
+                      setDraft((p) => ({
+                        ...p,
+                        providers: {
+                          ...p.providers,
+                          gemini: { ...p.providers.gemini, model: e.target.value },
+                        },
+                      }))
+                    }
+                    placeholder="例如 gemini-4-hydrogen / gemini-3.8-flash"
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-950 text-zinc-100 font-mono text-[11px]"
+                  />
+                  <datalist id="gemini-recommended-models">
+                    {GEMINI_RECOMMENDED_MODELS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                        {preset.tag ? ` (${preset.tag})` : ''} - {preset.description}
+                      </option>
+                    ))}
+                  </datalist>
+                  <div className="flex flex-wrap gap-1.5">
+                    {GEMINI_RECOMMENDED_MODELS.map((preset) => {
+                      const active = draft.providers.gemini.model.trim() === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          title={preset.description}
+                          onClick={() =>
+                            setDraft((p) => ({
+                              ...p,
+                              providers: {
+                                ...p.providers,
+                                gemini: { ...p.providers.gemini, model: preset.id },
+                              },
+                            }))
+                          }
+                          className={`px-2 py-1 rounded-md border text-[10px] transition flex items-center gap-1 cursor-pointer ${
+                            active
+                              ? 'border-blue-500/70 bg-blue-950/60 text-blue-200'
+                              : 'border-zinc-700/80 bg-zinc-900 hover:bg-zinc-800 text-zinc-300'
+                          }`}
+                        >
+                          <span className="font-mono">{preset.id}</span>
+                          {preset.tag && (
+                            <span
+                              className={`px-1 py-0.2 rounded text-[9px] ${
+                                active
+                                  ? 'bg-blue-500/20 text-blue-300'
+                                  : preset.tag === '旧版兼容'
+                                    ? 'bg-zinc-800 text-zinc-500'
+                                    : 'bg-zinc-800 text-zinc-400'
+                              }`}
+                            >
+                              {preset.tag}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const matched = GEMINI_RECOMMENDED_MODELS.find(
+                      (m) => m.id === draft.providers.gemini.model.trim(),
+                    );
+                    return matched ? (
+                      <p className="text-[11px] text-zinc-400 leading-relaxed">
+                        <span className="text-zinc-300 font-medium">{matched.label}：</span>
+                        {matched.description}
+                      </p>
+                    ) : null;
+                  })()}
                 </div>
               </div>
             )}

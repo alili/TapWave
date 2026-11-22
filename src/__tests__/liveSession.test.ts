@@ -552,4 +552,43 @@ describe('liveMinutesExporter buildLiveSessionMarkdown', () => {
     expect(md).toContain('## 议题流转与相关性');
     expect(md).toContain('**议题流转 UI 设计** [当前议题 · 高度相关]（接续自：Q4 核心目标对齐）');
   });
+
+  it('auto-adds speakers on speaker_added and unknown speakerId in final utterance', () => {
+    let snap: LiveSessionSnapshot = {
+      ...createInitialLiveSnapshot(),
+      scenario: 'chat',
+      speakers: [{ id: 'spk_1', name: '发言人 1', role: 'counterpart' }],
+    };
+
+    snap = applyLiveEvent(snap, {
+      type: 'speaker_added',
+      speaker: { id: 'spk_2', name: '发言人 2', role: 'counterpart' },
+    });
+    // duplicate speaker_added should be ignored
+    snap = applyLiveEvent(snap, {
+      type: 'speaker_added',
+      speaker: { id: 'spk_2', name: '发言人 2', role: 'counterpart' },
+    });
+    expect(snap.speakers).toHaveLength(2);
+    expect(snap.speakers[1].name).toBe('发言人 2');
+
+    // final with an unseen speakerId should also be auto-registered as fallback
+    snap = applyLiveEvent(snap, {
+      type: 'final',
+      utterance: {
+        id: 'u_3',
+        text: '第三位发言人加入讨论',
+        startMs: 3000,
+        endMs: 4200,
+        speakerId: 'spk_3',
+        speakerSource: 'cloud',
+      },
+    });
+    expect(snap.speakers).toHaveLength(3);
+    expect(snap.speakers[2]).toEqual({
+      id: 'spk_3',
+      name: '发言人 3',
+      role: 'counterpart',
+    });
+  });
 });
