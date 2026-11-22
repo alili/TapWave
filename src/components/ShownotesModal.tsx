@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   Award,
+  BookOpen,
   Check,
   Clock,
   Copy,
@@ -26,12 +27,13 @@ import {
   PodcastShownotes,
   PosterTheme,
   ShownotesGuest,
+  ShownotesReferenceCategory,
 } from '../types/podcast';
 import { TimelineComputation } from '../engine/timelineEngine';
 import {
   buildGuestsFromTracks,
   buildLocalShownotes,
-  buildNaturalContentSegments,
+  buildPureSrtTranscript,
   buildTimelineItemsFromProject,
   countSummaryChars,
   DRAW_CONDITION_LABELS,
@@ -43,6 +45,7 @@ import {
   formatTimecode,
   formatTimelineRow,
   mergeCloudShownotes,
+  REFERENCE_CATEGORY_LABELS,
 } from '../engine/shownotesGenerator';
 import { runPythonSidecarShownotes } from '../engine/tauriBridge';
 import {
@@ -85,25 +88,33 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
     }
   }, [open, initialTab]);
   const [generating, setGenerating] = useState(false);
+  const [lastEngineLabel, setLastEngineLabel] = useState<string>('');
   const [copiedType, setCopiedType] = useState<'md' | 'txt' | null>(null);
   const [posterUrl, setPosterUrl] = useState<string>('');
   const [renderingPoster, setRenderingPoster] = useState(false);
+  const autoTriggeredRef = useRef(false);
+
+  const cloudAvailability = useMemo(() => {
+    const platformCfg = getCachedAiPlatformConfig();
+    const routedLlm = platformCfg
+      ? buildLlmConfigForFeature(platformCfg, 'shownotes_generate', state.llmConfig)
+      : state.llmConfig;
+    const forceLocalOnly = Boolean('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly);
+    const hasKey = Boolean(
+      routedLlm.apiKey.trim() ||
+        state.llmConfig.apiKey.trim() ||
+        (state.asrConfig?.provider === 'deepseek' && state.asrConfig?.apiKey?.trim())
+    );
+    return {
+      canUseCloud: !forceLocalOnly && hasKey,
+      provider: routedLlm.provider,
+    };
+  }, [state.llmConfig, state.asrConfig]);
 
   const shownotes: PodcastShownotes = useMemo(() => {
     if (state.shownotes) return state.shownotes;
     return buildLocalShownotes(state, timeline);
   }, [state, timeline]);
-
-  // 首次打开时如果工程中尚未持久化 shownotes，自动写入一次初始生成结果
-  useEffect(() => {
-    if (open && !state.shownotes) {
-      const initial = buildLocalShownotes(state, timeline);
-      onUpdateState((prev) => ({
-        ...prev,
-        shownotes: prev.shownotes ?? initial,
-      }));
-    }
-  }, [open, state, timeline, onUpdateState]);
 
   const updateShownotes = useCallback(
     (updater: (prevSn: PodcastShownotes) => PodcastShownotes) => {
@@ -118,47 +129,45 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
     [onUpdateState, timeline]
   );
 
-  // 一键智能生成（自动读取全局 AI 配置，无密钥或设为仅本地时回退本地智能生成）
-  const handleOneClickGenerate = async () => {
+  // 一键智能生成：将当前精剪播客文字稿发送给 AI 生成 Shownotes（无密钥或设为仅本地时回退本地智能生成）
+  const handleOneClickGenerate = useCallback(async () => {
     setGenerating(true);
     try {
       const localDraft = buildLocalShownotes(state, timeline, state.shownotes);
-      const chapterInputs = localDraft.timeline.map((t) => ({
-        timeSec: t.timeSec,
-        timeLabel: formatTimecode(t.timeSec),
-        title: t.title,
-      }));
-      const contentSegments = buildNaturalContentSegments(state, timeline);
+      const srtTranscript = buildPureSrtTranscript(state, timeline);
 
-      const platformCfg = getCachedAiPlatformConfig();
-      const routedLlm = platformCfg
-        ? buildLlmConfigForFeature(platformCfg, 'shownotes_generate', state.llmConfig)
-        : state.llmConfig;
-      const forceLocalOnly = Boolean('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly);
-      const canUseCloud =
-        !forceLocalOnly &&
-        Boolean(
-          routedLlm.apiKey.trim() ||
-            state.llmConfig.apiKey.trim() ||
-            (state.asrConfig?.provider === 'deepseek' && state.asrConfig?.apiKey?.trim())
-        );
+      if (!srtTranscript.trim()) {
+        setLastEngineLabel('缺少有效录音转文字内容');
+        onNotify('⚠️ 当前工程尚无有效的录音转文字内容，请先完成语音转文字后再生成 Shownotes。');
+        return;
+      }
 
       let finalShownotes = localDraft;
       let usedCloud = false;
+      let fallbackReason = '';
 
-      if (canUseCloud) {
+      if (cloudAvailability.canUseCloud) {
         try {
           const res = await runPythonSidecarShownotes(
             state,
-            chapterInputs,
-            contentSegments
+            srtTranscript
           );
-          if (res?.shownotes) {
+          if (res?.shownotes && (res.shownotes.summary?.trim() || (res.shownotes.timeline?.length ?? 0) > 0)) {
             finalShownotes = mergeCloudShownotes(localDraft, res.shownotes);
             usedCloud = true;
+          } else {
+            fallbackReason = res?.fallbackReason || 'AI 返回内容为空或格式无效';
           }
-        } catch {
-          // 云端异常时保持本地高质量生成结果
+        } catch (err) {
+          fallbackReason = String(err);
+        }
+
+        if (!usedCloud) {
+          setLastEngineLabel(`云端 AI 生成失败（${fallbackReason}）`);
+          onNotify(
+            `⚠️ 云端 AI 生成 Shownotes 失败（${fallbackReason}），请检查 AI 模型配置或网络后重试。`
+          );
+          return;
         }
       }
 
@@ -167,15 +176,40 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
         shownotes: finalShownotes,
       }));
 
-      onNotify(
-        usedCloud
-          ? `✨ 已通过全局 AI 配置（${routedLlm.provider}）一键生成 Shownotes！`
-          : '✨ 已根据当前精剪文稿与时间轴一键生成完整 Shownotes！'
-      );
+      if (usedCloud) {
+        setLastEngineLabel(
+          `已由 ${cloudAvailability.provider} AI 根据 SRT 文字稿（${srtTranscript.length} 字符）生成`
+        );
+        onNotify(
+          `✨ 已将 SRT 录音转文字稿发送给 AI（${cloudAvailability.provider}）并生成 Shownotes！`
+        );
+      } else {
+        setLastEngineLabel('本地智能生成（未配置云端 AI 密钥）');
+        onNotify('✨ 已根据当前精剪文稿与时间轴在本地生成完整 Shownotes！');
+      }
     } finally {
       setGenerating(false);
     }
-  };
+  }, [state, timeline, cloudAvailability, onUpdateState, onNotify]);
+
+  // 首次打开时如果工程中尚未持久化 shownotes：写入初始草稿，若已配置云端 AI 则自动把文字稿发给 AI 生成
+  useEffect(() => {
+    if (!open) {
+      autoTriggeredRef.current = false;
+      return;
+    }
+    if (!state.shownotes) {
+      const initial = buildLocalShownotes(state, timeline);
+      onUpdateState((prev) => ({
+        ...prev,
+        shownotes: prev.shownotes ?? initial,
+      }));
+      if (cloudAvailability.canUseCloud && !autoTriggeredRef.current) {
+        autoTriggeredRef.current = true;
+        void handleOneClickGenerate();
+      }
+    }
+  }, [open, state, timeline, cloudAvailability.canUseCloud, onUpdateState, handleOneClickGenerate]);
 
   // 生成 / 刷新海报
   const handleRenderPoster = useCallback(
@@ -299,7 +333,10 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                 一键生成 Shownotes 与活动抽奖海报
               </h2>
               <p className="text-[11px] text-zinc-400">
-                基于当前精剪文稿、动态章节与音轨自动生成，支持随工程保存
+                {lastEngineLabel ||
+                  (cloudAvailability.canUseCloud
+                    ? `将发送精剪文字稿至 ${cloudAvailability.provider} AI 生成，支持随工程保存`
+                    : '基于当前精剪文稿、动态章节与音轨在本地生成，支持随工程保存')}
               </p>
             </div>
           </div>
@@ -311,7 +348,15 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
               className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-sm transition"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${generating ? 'animate-spin' : ''}`} />
-              <span>{generating ? '智能生成中...' : '一键智能生成'}</span>
+              <span>
+                {generating
+                  ? cloudAvailability.canUseCloud
+                    ? 'AI 阅读文稿生成中...'
+                    : '本地生成中...'
+                  : cloudAvailability.canUseCloud
+                  ? '发送文字稿给 AI 生成'
+                  : '一键智能生成'}
+              </span>
             </button>
 
             <button
@@ -380,9 +425,9 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
           <div className="lg:col-span-7 p-5 overflow-y-auto space-y-4 border-r border-zinc-800/80">
             {/* 1. 节目简介 */}
             {activeSection === 'summary' && (
-              <div className="h-full flex flex-col gap-4">
-                <div className="shrink-0">
-                  <label className="text-xs font-semibold text-zinc-300 block mb-1.5">
+              <div className="flex flex-col gap-4">
+                <div className="shrink-0 space-y-2">
+                  <label className="text-xs font-semibold text-zinc-300 block">
                     单集标题
                   </label>
                   <input
@@ -394,9 +439,40 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                     placeholder="输入播客单集标题..."
                     className="w-full px-3 py-2 rounded-lg border border-zinc-700 bg-zinc-900 text-sm text-zinc-100 focus:outline-none focus:border-blue-500"
                   />
+                  {shownotes.titleOptions && shownotes.titleOptions.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[11px] text-zinc-400 block">
+                        备选标题（点击一键应用）：
+                      </span>
+                      <div className="grid grid-cols-1 gap-1.5">
+                        {shownotes.titleOptions.map((opt, idx) => {
+                          const isSelected = shownotes.episodeTitle.trim() === opt.title.trim();
+                          return (
+                            <button
+                              key={`${opt.style}_${idx}`}
+                              type="button"
+                              onClick={() =>
+                                updateShownotes((sn) => ({ ...sn, episodeTitle: opt.title }))
+                              }
+                              className={`text-left px-2.5 py-1.5 rounded-md border text-xs transition-colors flex items-center gap-2 cursor-pointer ${
+                                isSelected
+                                  ? 'border-blue-500/60 bg-blue-500/15 text-blue-200'
+                                  : 'border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 text-zinc-300'
+                              }`}
+                            >
+                              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                {opt.label}
+                              </span>
+                              <span className="truncate">{opt.title}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex-1 min-h-0 flex flex-col">
+                <div className="flex flex-col">
                   <div className="shrink-0 flex items-center justify-between mb-1.5">
                     <label className="text-xs font-semibold text-zinc-300">
                       节目简介（建议 500 字左右）
@@ -416,9 +492,117 @@ export const ShownotesModal: React.FC<ShownotesModalProps> = ({
                     onChange={(e) =>
                       updateShownotes((sn) => ({ ...sn, summary: e.target.value }))
                     }
-                    placeholder="点击上方「一键智能生成」，将自动根据精剪文稿生成约 500 字的节目简介..."
-                    className="flex-1 min-h-[360px] w-full px-3 py-2.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs leading-relaxed text-zinc-100 focus:outline-none focus:border-blue-500 resize-y"
+                    placeholder="点击上方「一键智能生成」，将自动根据精剪文稿生成高质量节目简介..."
+                    className="min-h-[280px] w-full px-3 py-2.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs leading-relaxed text-zinc-100 focus:outline-none focus:border-blue-500 resize-y"
                   />
+                </div>
+
+                {/* 提及书影音 / 延伸资料 */}
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200">
+                      <BookOpen className="w-3.5 h-3.5 text-blue-400" />
+                      <span>提及书影音 / 延伸资料</span>
+                      <span className="text-[11px] font-normal text-zinc-500">
+                        ({shownotes.references?.length ?? 0})
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateShownotes((sn) => ({
+                          ...sn,
+                          references: [
+                            ...(sn.references ?? []),
+                            {
+                              id: `ref_${Date.now()}`,
+                              category: 'book',
+                              title: '',
+                              note: '',
+                            },
+                          ],
+                        }))
+                      }
+                      className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-[11px] text-zinc-200 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" />
+                      添加资料
+                    </button>
+                  </div>
+                  {!shownotes.references || shownotes.references.length === 0 ? (
+                    <p className="text-[11px] text-zinc-500">
+                      未从文稿中检测到提及的书影音或延伸资料，导出 Shownotes 时将自动省略此项。
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {shownotes.references.map((ref, idx) => (
+                        <div key={ref.id} className="flex items-center gap-2">
+                          <select
+                            value={ref.category}
+                            onChange={(e) => {
+                              const cat = e.target.value as ShownotesReferenceCategory;
+                              updateShownotes((sn) => ({
+                                ...sn,
+                                references: (sn.references ?? []).map((item, i) =>
+                                  i === idx ? { ...item, category: cat } : item
+                                ),
+                              }));
+                            }}
+                            className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-xs text-zinc-200 focus:outline-none focus:border-blue-500"
+                          >
+                            {Object.entries(REFERENCE_CATEGORY_LABELS).map(([k, lbl]) => (
+                              <option key={k} value={k}>
+                                {lbl}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            value={ref.title}
+                            onChange={(e) => {
+                              const title = e.target.value;
+                              updateShownotes((sn) => ({
+                                ...sn,
+                                references: (sn.references ?? []).map((item, i) =>
+                                  i === idx ? { ...item, title } : item
+                                ),
+                              }));
+                            }}
+                            placeholder="名称（如《原则》）"
+                            className="flex-1 min-w-0 px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+                          />
+                          <input
+                            type="text"
+                            value={ref.note ?? ''}
+                            onChange={(e) => {
+                              const note = e.target.value;
+                              updateShownotes((sn) => ({
+                                ...sn,
+                                references: (sn.references ?? []).map((item, i) =>
+                                  i === idx ? { ...item, note } : item
+                                ),
+                              }));
+                            }}
+                            placeholder="简短说明（可选）"
+                            className="flex-1 min-w-0 px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900 text-xs text-zinc-300 focus:outline-none focus:border-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateShownotes((sn) => ({
+                                ...sn,
+                                references: (sn.references ?? []).filter((_, i) => i !== idx),
+                              }))
+                            }
+                            className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-zinc-800 cursor-pointer"
+                            title="删除"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

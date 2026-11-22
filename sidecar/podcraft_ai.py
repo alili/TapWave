@@ -2965,90 +2965,213 @@ def handle_analyze_transcript(payload: Dict[str, Any]) -> Dict[str, Any]:
     return base_result
 
 
+def _extract_json_object(raw_text: str) -> Dict[str, Any]:
+    cleaned = (raw_text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
+def _format_ms_label(ms: Any) -> str:
+    try:
+        sec = max(0, int(float(ms) // 1000))
+    except (TypeError, ValueError):
+        sec = 0
+    hrs, rem = divmod(sec, 3600)
+    mins, secs = divmod(rem, 60)
+    if hrs > 0:
+        return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+
+def _strip_transcript_tags(raw_text: str) -> str:
+    cleaned = re.sub(r"<\|[^|>]+\|>", "", raw_text or "")
+    cleaned = re.sub(r"\[[^\]]+\][:：]?\s*", "", cleaned)
+    cleaned = cleaned.replace("😂", "")
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in cleaned.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _format_srt_ms(ms: Any) -> str:
+    try:
+        safe_ms = max(0, int(round(float(ms))))
+    except (TypeError, ValueError):
+        safe_ms = 0
+    hrs, rem = divmod(safe_ms, 3_600_000)
+    mins, rem = divmod(rem, 60_000)
+    secs, millis = divmod(rem, 1000)
+    return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+
+
+def _compact_srt_transcript(srt_text: str, max_chars: int = 55000) -> str:
+    """若 SRT 字幕块过于零碎导致总长度超出上下文安全阈值，按段自适应归并相邻字幕块以保留完整正文与起止时间。"""
+    if len(srt_text) <= max_chars:
+        return srt_text
+
+    cue_pattern = re.compile(
+        r"(?ms)^\s*\d+\s*\n(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*\n(.*?)(?=\n\s*\n\s*\d+\s*\n|\Z)"
+    )
+    matches = cue_pattern.findall(srt_text)
+    if not matches:
+        return srt_text[:max_chars]
+
+    # 先按单块约 260 字归并相邻碎块，若仍超限再增大合并粒度，确保保留从头到尾的完整内容
+    target_body_chars = 260
+    compacted = srt_text
+    for _ in range(4):
+        merged_blocks = []
+        cur_start = None
+        cur_end = None
+        cur_parts = []
+        cur_len = 0
+        for start_ts, end_ts, body in matches:
+            clean_body = re.sub(r"\s+", " ", body).strip()
+            if not clean_body:
+                continue
+            if cur_start is None:
+                cur_start = start_ts
+            cur_end = end_ts
+            cur_parts.append(clean_body)
+            cur_len += len(clean_body)
+            if cur_len >= target_body_chars:
+                idx = len(merged_blocks) + 1
+                merged_blocks.append(f"{idx}\n{cur_start} --> {cur_end}\n{''.join(cur_parts)}")
+                cur_start = None
+                cur_end = None
+                cur_parts = []
+                cur_len = 0
+        if cur_start is not None and cur_parts:
+            idx = len(merged_blocks) + 1
+            merged_blocks.append(f"{idx}\n{cur_start} --> {cur_end}\n{''.join(cur_parts)}")
+        compacted = "\n\n".join(merged_blocks)
+        if len(compacted) <= max_chars:
+            return compacted
+        target_body_chars *= 2
+    return compacted[:max_chars]
+
+
+def _unwrap_shownotes_json(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("INVALID_LLM_OUTPUT: response is not a JSON object")
+    for wrapper_key in ("shownotes", "data", "result"):
+        if (
+            not data.get("summary")
+            and not data.get("timeline")
+            and isinstance(data.get(wrapper_key), dict)
+        ):
+            data = data[wrapper_key]
+            break
+    if not isinstance(data, dict) or (
+        not str(data.get("summary") or "").strip() and not data.get("timeline")
+    ):
+        raise ValueError("INVALID_LLM_OUTPUT: missing summary and timeline")
+    return data
+
+
 def handle_generate_shownotes(payload: Dict[str, Any]) -> Dict[str, Any]:
     llm_cfg = resolve_effective_llm_config(payload)
     project_title = payload.get("projectTitle") or "未命名播客"
-    tracks = payload.get("tracks") or []
-    chapters = payload.get("chapters") or []
-    content_segments = payload.get("contentSegments") or []
-    blocks = payload.get("blocks") or []
+    srt_transcript = (payload.get("srtTranscript") or "").strip()
 
-    speaker_map = {t.get("id"): t.get("name", "发言人") for t in tracks}
-    plain_lines = []
-    for b in blocks:
-        txt = "".join(
-            "[***]" if t.get("bleeped") else t.get("text", "")
-            for t in b.get("tokens", [])
-            if not t.get("deleted") and t.get("type") not in ("silence", "laughter")
-        ).strip()
-        if txt:
-            sp = speaker_map.get(b.get("speakerId"), "发言人")
-            plain_lines.append(f"[{sp}]: {txt}")
-
-    chapter_lines = [
-        f"{c.get('timeLabel', '00:00')} {c.get('title', '')}" for c in chapters
-    ]
-
-    segment_lines = []
-    for seg in content_segments:
-        t_lbl = seg.get("timeLabel", "00:00")
-        ch_t = " / ".join(seg.get("chapterTitles") or [])
-        ex = (seg.get("excerpt") or "").strip()
-        segment_lines.append(
-            f"--- 分段起始 {t_lbl} (startSec={seg.get('startSec', 0)}) ---\n"
-            + (f"涉及话题: {ch_t}\n" if ch_t else "")
-            + f"文稿内容:\n{ex}"
-        )
+    if not srt_transcript:
+        blocks = payload.get("blocks") or []
+        srt_cues = []
+        for b in blocks:
+            active_tokens = [
+                t
+                for t in b.get("tokens", [])
+                if not t.get("deleted") and not t.get("bleeped") and t.get("type") not in ("silence", "laughter")
+            ]
+            txt = _strip_transcript_tags("".join(t.get("text", "") for t in active_tokens))
+            if not txt:
+                continue
+            start_ms = active_tokens[0].get("sourceStartMs", 0)
+            end_ms = active_tokens[-1].get("sourceEndMs", start_ms + 1000)
+            idx = len(srt_cues) + 1
+            srt_cues.append(
+                f"{idx}\n{_format_srt_ms(start_ms)} --> {_format_srt_ms(max(start_ms + 200, end_ms))}\n{txt}"
+            )
+        srt_transcript = "\n\n".join(srt_cues)
 
     if not (llm_cfg.get("apiKey") or "").strip():
-        return {"ok": True, "engine": "local_fallback", "shownotes": None}
+        return {
+            "ok": True,
+            "engine": "local_fallback",
+            "shownotes": None,
+            "fallbackReason": "NO_API_KEY",
+        }
+
+    # 剥离 SRT 序号与时间轴后校验是否包含实质文字稿内容，严禁把空文稿发给 AI 导致凭空幻想
+    srt_body_only = re.sub(
+        r"(?m)^\s*\d+\s*$|^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*$",
+        "",
+        srt_transcript,
+    ).strip()
+    if len(_strip_transcript_tags(srt_body_only)) < 10:
+        return {
+            "ok": True,
+            "engine": "local_fallback",
+            "shownotes": None,
+            "fallbackReason": "EMPTY_TRANSCRIPT",
+        }
 
     try:
-        transcript_context = (
-            "\n\n".join(segment_lines)
-            if segment_lines
-            else "\n".join(plain_lines[:100])
-        )
+        effective_srt = _compact_srt_transcript(srt_transcript, max_chars=55000)
         prompt = (
             f"# Role\n"
-            f"你是一位顶级中文播客主编与专业内容总监，擅长从多轨长篇对谈中深度消化对话内容，提炼出结构严谨、观点深刻且极具吸引力的播客 Shownotes 节目简介与时间轴。\n\n"
+            f"你是一位资深的播客制作人与内容运营专家，擅长从长篇录音转文字稿中提炼核心价值，撰写兼具吸引力与信息密度的 Shownotes（单集介绍）。\n\n"
             f"# Task\n"
-            f"阅读提供的播客《{project_title}》精剪文字稿（内含分段与时间戳，[***]为脱敏词严禁还原），将其全面梳理为高质量结构化 Shownotes，严格输出合法 JSON。\n\n"
-            f"# 【核心原则：严禁引用原文原话，必须总结段落内容】（违者视作严重不合格输出）：\n"
-            f"1. 严禁引用原文原句：\n"
-            f"   - 严禁在 summary 简介或 timeline 时间轴中出现任何双引号（“ ” \"）或单引号直接摘抄文稿中的原话！\n"
-            f"   - 严禁使用「嘉宾说了“……”」、「主播分享了关于“……”的思考」等生硬摘抄句式。\n"
-            f"   - 严禁直接复制粘贴对话口语分句（如“我觉得这个东西其实还是挺好的”、“当时我们也是没办法”）。\n"
-            f"2. 必须进行专业段落内容总结：\n"
-            f"   - 必须站在第三方客观主编视角，将两人或多人的来回口语交谈消化理解，总结出该段落所探讨的【核心议题背景、讨论焦点、对比分歧、论据要点与最终结论】。\n"
-            f"   - 语言风格应为出版级中文书面语，叙事连贯、信息密度高、逻辑层次分明。\n\n"
-            f"# 正反案例对照（请严格遵守 GOOD 范例风格）：\n"
-            f"❌ 错误示范（时间轴机械引文）: 04:12 聊聊成本：我觉得自研成本太高了，当时我们算了一笔账根本吃不消。\n"
-            f"✅ 正确示范（时间轴主旨概括）: 04:12 成本模型拆解：自研引擎与开源方案的研发ROI深度测算与权衡。\n"
-            f"❌ 错误示范（简介摘抄原话）: 讨论过程中，张三分享了关于“我们在那个时候其实走过很多弯路，账上只剩两个月工资”的思考。\n"
-            f"✅ 正确示范（简介主旨概括）: 对话系统复盘了团队在早期技术攻坚与原型验证阶段的试错教训，深入探讨了研发重心如何从追求理论指标转向解决用户真实痛点。\n\n"
-            f"# 规则与格式规范：\n"
-            f"1. 时间轴划分粒度：\n"
-            f"   - 随议题转折与核心观点切换划分节点，单节点时长约 3 到 8 分钟，全篇收敛在 6 到 15 个核心节点。\n"
-            f"   - 严格提取话题真正开始的秒数 timeSec。\n"
-            f"   - 时间轴标题 (title) 控制在 12～25 字，必须采用「[核心主题/维度]：[段落主旨概括/权衡/结论]」结构，全篇无任何原话引号。\n"
-            f"2. 节目简介 (summary)：\n"
-            f"   - 控制在 480～540 字之间，分 4 个自然段（1. 节目背景与核心价值；2. 探讨的核心议题梳理；3. 关键洞察、方法论与踩坑复盘；4. 收听建议与互动福利指引）。\n"
-            f"   - 绝不使用任何 markdown 标题（不含 # 或 **），纯正文段落，通篇无任何原文原话引用。\n\n"
+            f"请仔细阅读下方《{project_title}》的 SRT 格式录音转文字稿，**仅依据该文字稿的实际内容**，生成结构化 Shownotes，严格输出合法 JSON。\n\n"
+            f"# 最高铁律（严禁幻想与编造，违者视作完全失败）：\n"
+            f"1. **100% 忠于下方 SRT 文字稿原意**：所有标题、简介、时间轴、书影音中出现的人名、地名、产品名、数字、事件与观点，**必须全部真实出自下方 SRT 文字稿**！\n"
+            f"2. **严禁脑补或套用空话**：绝对禁止编造文稿中未提及的嘉宾背景、行业大词（如“一线实践”“商业闭环”“方法论体系”等文稿没聊过的内容）、虚构案例或不存在的互动福利。\n"
+            f"3. **时间戳必须真实对齐**：每条 timeline 的 `timeSec` 必须严格对应下方 SRT 中该话题实际开始的时间点（将 `HH:MM:SS,mmm` 换算为整数秒）。\n"
+            f"4. **禁止原话整句照搬**：用简洁准确的书面语概括段落内容，严禁在 summary 或 timeline 中大段摘抄口语原句。\n\n"
+            f"# 各板块输出要求：\n"
+            f"## 1. 备选标题（titleOptions，提供 3 个不同风格，均须紧扣文字稿真实话题）\n"
+            f"- pain_point（悬念/痛点型）：直击文字稿探讨的核心痛点或疑问\n"
+            f"- insight（干货/金句型）：突出文字稿中的核心结论或高光观点\n"
+            f"- narrative（温和/陪伴型）：适合深度对谈、故事分享的叙事感标题\n"
+            f"- 同时将最推荐的一条填入 `episodeTitle`。\n\n"
+            f"## 2. 本期简介（summary，150～420 字，视文稿信息量而定，绝不注水凑字）\n"
+            f"- 第一段（钩子）：1-2 句话点明本期文字稿探讨的核心问题或背景。\n"
+            f"- 第二段（核心内容）：忠实概括对谈的实际脉络、聊到的关键观点与具体事例。\n"
+            f"- 第三段（听众收获）：说明听完这期真实内容能获得什么启发或参考。\n"
+            f"*要求：禁止使用“欢迎收听……”“本期节目我们聊了……”等流水账开头；不使用 `#` 或 `**` 等 Markdown 符号。*\n\n"
+            f"## 3. 时间轴 / Highlights（timeline，按文稿实际话题转折划分）\n"
+            f"- 划分原则：根据文字稿中话题的实质性转折划分（忽略无意义寒暄），按实际话题数量输出（通常 3～15 个节点，文稿较短时切勿为了凑数而强行拆分或编造）。\n"
+            f"- 格式规范：\n"
+            f"  - `timeSec`：整数（秒），严格对应 SRT 中该话题实际开始的秒数。\n"
+            f"  - `title`：6～16 字核心主题短语（必须来自文稿真实议题）。\n"
+            f"  - `summary`：15～45 字具体展开说明（提炼文稿中实际提到的对比、细节、案例或结论）。\n\n"
+            f"## 4. 提及书影音 / 延伸资料（references，仅限文中明确提及）\n"
+            f"- 仅提取 SRT 文字稿中**明确提到**的书籍（book）、电影/纪录片（movie）、文章/论文（article）、工具/产品（tool）或人物（person）。\n"
+            f"- 若未提及任何延伸资料，严格返回空数组 `[]`，切勿编造。\n\n"
             f"# Output JSON 字段要求：\n"
-            f"1. episodeTitle: 吸引人的单集主标题（字符串）\n"
-            f"2. summary: 480-540字左右的中文节目简介（无引号原话，段落清晰书面总结）\n"
-            f"3. timeline: 数组，每项包含：\n"
-            f"   - timeSec: 数字(秒，对齐话题真正开始的秒数)\n"
-            f"   - title: 12~25字结构化主旨概括标题（格式为 [核心主题]：[主旨概括]）\n"
-            f"   - summary: 15~38字该段落的深度提炼说明或结论要点（可选，亦为归纳总结，不带引号）\n"
-            f"4. activitySuggestion: {{title: 互动活动标题, description: 60字内文案, posterSlogan: 16字内海报标语}}\n"
-            f"5. benefitsSuggestion: 数组，1-2项，每项包含 {{title: 福利名称, description: 领取说明}}\n\n"
-            f"参考时间轴节点：\n" + ("\n".join(chapter_lines) if chapter_lines else "无") + "\n\n"
-            f"精剪文稿分段内容：\n{transcript_context}"
+            f"1. `episodeTitle`: 最推荐的单集主标题（字符串）\n"
+            f"2. `titleOptions`: 数组（3 项），每项 `{{style: \"pain_point\"|\"insight\"|\"narrative\", label: \"悬念/痛点型\"|\"干货/金句型\"|\"温和/陪伴型\", title: 标题}}`\n"
+            f"3. `summary`: 150-420字左右的中文节目简介（纯正文分段，无 # 或 **）\n"
+            f"4. `timeline`: 数组，每项 `{{timeSec: 整数秒, title: 6~16字核心主题, summary: 15~45字真实内容展开}}`\n"
+            f"5. `references`: 数组（无则 `[]`），每项 `{{category: \"book\"|\"movie\"|\"article\"|\"tool\"|\"person\"|\"other\", title: 名称, note: 简短说明}}`\n"
+            f"6. `activitySuggestion`: 仅当文字稿中明确提到互动/抽奖活动时填写 `{{title, description, posterSlogan}}`，否则返回 `null`\n"
+            f"7. `benefitsSuggestion`: 仅当文字稿中明确提到听友福利时填写数组，否则返回 `[]`\n\n"
+            f"SRT 录音转文字稿：\n{effective_srt}"
         )
-        llm_raw = call_cloud_llm(prompt, llm_cfg)
-        llm_json = json.loads(llm_raw)
+        llm_raw = call_cloud_llm(
+            prompt,
+            llm_cfg,
+            system_prompt="你是一位严谨的播客内容编辑。你只能基于用户提供的 SRT 录音转文字稿进行归纳总结，绝不允许编造任何文字稿中未出现的内容，严格输出合法 JSON。",
+            timeout=90,
+            temperature=0.1,
+        )
+        llm_json = _unwrap_shownotes_json(_extract_json_object(llm_raw))
         if isinstance(llm_json, dict):
             # 净化消除意外遗留的生硬原话摘抄引号
             if isinstance(llm_json.get("summary"), str):
@@ -3059,9 +3182,31 @@ def handle_generate_shownotes(payload: Dict[str, Any]) -> Dict[str, Any]:
                 for item in llm_json["timeline"]:
                     if isinstance(item, dict):
                         if isinstance(item.get("title"), str):
-                            item["title"] = re.sub(r'[“"『』”]', '', item["title"]).strip()
+                            item["title"] = re.sub(r'[“"『]([^”"』]{10,})[”"』]', r'\1', item["title"]).strip()
                         if isinstance(item.get("summary"), str):
-                            item["summary"] = re.sub(r'[“"『』”]', '', item["summary"]).strip()
+                            item["summary"] = re.sub(r'[“"『]([^”"』]{10,})[”"』]', r'\1', item["summary"]).strip()
+            if isinstance(llm_json.get("titleOptions"), list):
+                cleaned_opts = []
+                for opt in llm_json["titleOptions"]:
+                    if isinstance(opt, dict) and isinstance(opt.get("title"), str) and opt["title"].strip():
+                        cleaned_opts.append({
+                            "style": opt.get("style") or "insight",
+                            "label": opt.get("label") or "备选标题",
+                            "title": opt["title"].strip(),
+                        })
+                llm_json["titleOptions"] = cleaned_opts[:3]
+            if isinstance(llm_json.get("references"), list):
+                valid_cats = {"book", "movie", "article", "tool", "person", "other"}
+                cleaned_refs = []
+                for ref in llm_json["references"]:
+                    if isinstance(ref, dict) and isinstance(ref.get("title"), str) and ref["title"].strip():
+                        cat = ref.get("category") if ref.get("category") in valid_cats else "other"
+                        cleaned_refs.append({
+                            "category": cat,
+                            "title": ref["title"].strip(),
+                            "note": (ref.get("note") or "").strip(),
+                        })
+                llm_json["references"] = cleaned_refs
         return {
             "ok": True,
             "engine": f"cloud_llm_{llm_cfg.get('provider', 'deepseek')}",

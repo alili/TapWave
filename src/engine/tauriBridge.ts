@@ -444,8 +444,10 @@ export async function runPythonSidecarAnalysis(
 
 export interface SidecarShownotesPayload {
   episodeTitle?: string;
+  titleOptions?: Array<{ style?: string; label?: string; title?: string }>;
   summary?: string;
   timeline?: Array<{ timeSec?: number; title?: string; summary?: string }>;
+  references?: Array<{ category?: string; title?: string; note?: string }>;
   activitySuggestion?: { title?: string; description?: string; posterSlogan?: string };
   benefitsSuggestion?: Array<{ title?: string; description?: string }>;
 }
@@ -457,11 +459,16 @@ export interface ContentSegmentInput {
   excerpt: string;
 }
 
+export interface SidecarShownotesResponse {
+  engine: string;
+  shownotes: SidecarShownotesPayload | null;
+  fallbackReason?: string;
+}
+
 export async function runPythonSidecarShownotes(
   state: PodcastProjectState,
-  chapters: Array<{ timeSec: number; timeLabel: string; title: string }>,
-  contentSegments?: ContentSegmentInput[]
-): Promise<{ engine: string; shownotes: SidecarShownotesPayload | null } | null> {
+  srtTranscript: string
+): Promise<SidecarShownotesResponse | null> {
   const platformCfg = getCachedAiPlatformConfig();
   const routedLlm = platformCfg
     ? buildLlmConfigForFeature(platformCfg, 'shownotes_generate', state.llmConfig)
@@ -474,31 +481,14 @@ export async function runPythonSidecarShownotes(
   const payload = {
     command: 'generate_shownotes',
     projectTitle: state.projectTitle,
-    tracks: state.tracks.map((t) => ({ id: t.id, name: t.name, role: t.role })),
-    chapters,
-    contentSegments: contentSegments ?? [],
+    srtTranscript,
     llmConfig: effectiveLlm,
-    asrConfig: {
-      provider: state.asrConfig?.provider,
-      apiKey: state.asrConfig?.apiKey,
-    },
-    blocks: state.blocks.map((b) => ({
-      blockId: b.blockId,
-      speakerId: b.speakerId,
-      tokens: b.tokens.map((t) => ({
-        id: t.id,
-        type: t.type,
-        text: t.text,
-        deleted: Boolean(t.deleted),
-        bleeped: Boolean(t.bleeped),
-      })),
-    })),
   };
   const payloadJson = JSON.stringify(payload);
 
   if (isTauriRuntime()) {
     const rawJson = await invoke<string>('run_ai_sidecar', { payloadJson });
-    return JSON.parse(rawJson) as { engine: string; shownotes: SidecarShownotesPayload | null };
+    return JSON.parse(rawJson) as SidecarShownotesResponse;
   }
 
   const resp = await fetch('/api/sidecar', {
@@ -506,8 +496,14 @@ export async function runPythonSidecarShownotes(
     headers: { 'Content-Type': 'application/json' },
     body: payloadJson,
   });
-  if (!resp.ok) return null;
-  return (await resp.json()) as { engine: string; shownotes: SidecarShownotesPayload | null };
+  if (!resp.ok) {
+    return {
+      engine: 'local_fallback',
+      shownotes: null,
+      fallbackReason: `HTTP_${resp.status}`,
+    };
+  }
+  return (await resp.json()) as SidecarShownotesResponse;
 }
 
 function triggerBrowserBlobDownload(filename: string, blob: Blob): void {

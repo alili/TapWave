@@ -7,14 +7,19 @@ import {
 } from '../data/emptyProject';
 import { computeEditedTimeline } from '../engine/timelineEngine';
 import {
+  buildCleanContentSegmentsForAi,
   buildGuestsFromTracks,
   buildLocalShownotes,
+  buildPureSrtTranscript,
   countSummaryChars,
   formatShownotesMarkdown,
   formatShownotesPlainText,
   formatTimecode,
   formatPodcastTimestamps,
+  mergeCloudShownotes,
+  stripTranscriptTagsForAi,
 } from '../engine/shownotesGenerator';
+import { parseSubtitleDocument } from '../engine/subtitleAligner';
 import { PodcastProjectState, ShownotesTimelineItem } from '../types/podcast';
 
 function buildSampleEditedProject(): PodcastProjectState {
@@ -432,5 +437,134 @@ describe('Shownotes 一键生成与持久化引擎', () => {
     expect(txt).toContain('• 陈默（微信：wx_chenmo｜飞行嘉宾）');
     expect(txt).toContain('硬件创业者 / AI产品经理 / 开源作者');
     expect(txt).toContain('即刻 @陈默 (https://web.okjike.com/u/chenmo)');
+  });
+
+  it('生成 3 种风格备选标题、避免流水账开头，并按需提取与导出书影音延伸资料', () => {
+    const project = buildSampleEditedProject();
+    // 未提及书影音时，应自动省略延伸资料区块
+    const timeline0 = computeEditedTimeline(project);
+    const snNoRef = buildLocalShownotes(project, timeline0);
+    expect(snNoRef.titleOptions).toHaveLength(3);
+    expect(snNoRef.titleOptions?.map((o) => o.style)).toEqual([
+      'pain_point',
+      'insight',
+      'narrative',
+    ]);
+    expect(snNoRef.summary).not.toMatch(/^(欢迎收听|本期节目我们聊了)/);
+    expect(snNoRef.references).toEqual([]);
+    expect(formatShownotesMarkdown(snNoRef)).not.toContain('提及书影音');
+    expect(formatShownotesPlainText(snNoRef)).not.toContain('提及书影音');
+
+    // 在文稿中提及书籍与纪录片时，自动提取并导出
+    project.blocks[1].tokens.push({
+      id: 'tok_ref',
+      type: 'word',
+      text: '推荐大家看《硬件创业十讲》这本书，还有纪录片《制造之美》。',
+      sourceStartMs: 15000,
+      sourceEndMs: 18000,
+      durationSec: 3,
+      origDurationSec: 3,
+    });
+    const timeline1 = computeEditedTimeline(project);
+    const snWithRef = buildLocalShownotes(project, timeline1);
+    expect(snWithRef.references).toHaveLength(2);
+    expect(snWithRef.references?.[0]).toMatchObject({
+      category: 'book',
+      title: '《硬件创业十讲》',
+    });
+    expect(snWithRef.references?.[1]).toMatchObject({
+      category: 'movie',
+      title: '《制造之美》',
+    });
+
+    const md = formatShownotesMarkdown(snWithRef);
+    const txt = formatShownotesPlainText(snWithRef);
+    expect(md).toContain('## 📚 提及书影音 / 延伸资料');
+    expect(md).toContain('[书籍] **《硬件创业十讲》**');
+    expect(md).toContain('[影视/纪录片] **《制造之美》**');
+    expect(txt).toContain('【提及书影音 / 延伸资料】');
+    expect(txt).toContain('• [影视/纪录片] 《制造之美》');
+
+    // 验证云端结果合并保留 3 个备选标题与延伸资料
+    const merged = mergeCloudShownotes(snNoRef, {
+      episodeTitle: '为什么 90% 的 AI 硬件都死在供应链？',
+      titleOptions: [
+        { style: 'pain_point', label: '悬念/痛点型', title: '为什么 90% 的 AI 硬件都死在供应链？' },
+        { style: 'insight', label: '干货/金句型', title: '用软件思维做硬件，是如何交了千万学费的' },
+        { style: 'narrative', label: '温和/陪伴型', title: '和陈默聊硬件创业：从图纸到量产的九十天' },
+      ],
+      references: [
+        { category: 'tool', title: 'KiCad', note: '开源 PCB 设计工具' },
+      ],
+    });
+    expect(merged.episodeTitle).toBe('为什么 90% 的 AI 硬件都死在供应链？');
+    expect(merged.titleOptions).toHaveLength(3);
+    expect(merged.references).toEqual([
+      { id: 'ref_ai_0', category: 'tool', title: 'KiCad', note: '开源 PCB 设计工具' },
+    ]);
+
+    // 验证 Shownotes 高信息密度时间轴不被 28 字截断，并保留短小概念标签引号
+    const mergedTimeline = mergeCloudShownotes(snNoRef, {
+      timeline: [
+        {
+          timeSec: 1600,
+          title: '房产与保险的底层对比',
+          summary: '当房产失去安全、流动与收益，保险如何成为替代品？（“情感容器”与“回本心理”拆解）',
+        },
+      ],
+    });
+    const mergedTxt = formatShownotesPlainText(mergedTimeline);
+    expect(mergedTxt).toContain(
+      '26:40 房产与保险的底层对比：当房产失去安全、流动与收益，保险如何成为替代品？（“情感容器”与“回本心理”拆解）'
+    );
+  });
+
+  it('发送给 AI 生成 Shownotes 时剥离所有标签与标记，输出纯净文字稿', () => {
+    expect(
+      stripTranscriptTagsForAi(
+        '[林深]: 大家好 [语音 00:01.2] 😂 [笑声] [停顿] 今天聊 <|zh|> 房产与保险 [***] 实战。'
+      )
+    ).toBe('大家好 今天聊 房产与保险 实战。');
+
+    const project = buildSampleEditedProject();
+    const timeline = computeEditedTimeline(project);
+    const cleanSegments = buildCleanContentSegmentsForAi(project, timeline);
+    expect(cleanSegments.length).toBeGreaterThan(0);
+    for (const seg of cleanSegments) {
+      expect(seg.chapterTitles).toEqual([]);
+      expect(seg.excerpt).not.toMatch(/\[[^\]]+\]/);
+      expect(seg.excerpt).not.toContain('[林深]:');
+      expect(seg.excerpt).not.toContain('[陈默]:');
+      expect(seg.excerpt).not.toContain('[***]');
+    }
+  });
+
+  it('构建标准 SRT 格式录音转文字稿，合并连续词为自然句且不含单字或剪辑分析信息', () => {
+    const project = buildSampleEditedProject();
+    // 模拟多个连续单字 token，验证会自动合并为一个完整 SRT 句块而非单字一行
+    project.blocks.push({
+      blockId: 'b_3',
+      speakerId: 't_host',
+      chapterTitle: '剪辑分析章节标记不应出现',
+      tokens: [
+        { id: 'c1', type: 'word', text: '今', sourceStartMs: 20_000, sourceEndMs: 20_300, durationSec: 0.3, origDurationSec: 0.3 },
+        { id: 'c2', type: 'word', text: '天', sourceStartMs: 20_300, sourceEndMs: 20_600, durationSec: 0.3, origDurationSec: 0.3 },
+        { id: 'c3', type: 'word', text: '复盘', sourceStartMs: 20_600, sourceEndMs: 21_200, durationSec: 0.6, origDurationSec: 0.6 },
+        { id: 'c4', type: 'word', text: '完毕。', sourceStartMs: 21_200, sourceEndMs: 22_000, durationSec: 0.8, origDurationSec: 0.8 },
+      ],
+    });
+    const timeline = computeEditedTimeline(project);
+    const srt = buildPureSrtTranscript(project, timeline);
+
+    expect(srt).toMatch(/^1\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n/);
+    expect(srt).toContain('今天复盘完毕。');
+    expect(srt).not.toContain('剪辑分析章节标记不应出现');
+    expect(srt).not.toContain('机密代号X99');
+    expect(srt).not.toMatch(/\[[^\]]+\]/);
+
+    const parsed = parseSubtitleDocument(srt, 'podcast.srt');
+    expect(parsed.format).toBe('srt');
+    expect(parsed.cues.length).toBeGreaterThanOrEqual(2);
+    expect(parsed.cues.some((c) => c.text === '今天复盘完毕。')).toBe(true);
   });
 });

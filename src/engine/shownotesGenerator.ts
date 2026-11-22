@@ -6,7 +6,10 @@ import {
   PodcastShownotes,
   ShownotesActivityInfo,
   ShownotesGuest,
+  ShownotesReferenceCategory,
+  ShownotesReferenceItem,
   ShownotesTimelineItem,
+  ShownotesTitleOption,
   SpeakerRole,
   SpeakerTrack,
 } from '../types/podcast';
@@ -38,6 +41,29 @@ export const DRAW_CONDITION_LABELS: Record<LotteryDrawCondition, string> = {
   share_screenshot: '转发本期节目并截图至听友群',
 };
 
+export const REFERENCE_CATEGORY_LABELS: Record<ShownotesReferenceCategory, string> = {
+  book: '书籍',
+  movie: '影视/纪录片',
+  article: '文章/论文',
+  tool: '工具/产品',
+  person: '提及人物',
+  other: '延伸资料',
+};
+
+export function normalizeReferenceCategory(raw?: string): ShownotesReferenceCategory {
+  if (
+    raw === 'book' ||
+    raw === 'movie' ||
+    raw === 'article' ||
+    raw === 'tool' ||
+    raw === 'person' ||
+    raw === 'other'
+  ) {
+    return raw;
+  }
+  return 'other';
+}
+
 export function getRoleDisplayLabel(role: SpeakerRole): string {
   if (role === 'host') return '主持人';
   if (role === 'co_host') return '常驻主播';
@@ -61,6 +87,22 @@ export function formatTimecode(sec: number, includeHours = true): string {
   return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
 }
 
+function composeTimelineLineText(t: ShownotesTimelineItem): string {
+  const title = (t.title || '').trim();
+  const summary = (t.summary || '').trim();
+
+  if (title && summary && !title.includes(summary)) {
+    if (title.endsWith('：') || title.endsWith(':')) {
+      return `${title}${summary}`;
+    }
+    if (title.includes('：') || title.includes(':')) {
+      return `${title} ${summary}`;
+    }
+    return `${title}：${summary}`;
+  }
+  return title || summary || '核心议题展开';
+}
+
 /**
  * 格式化标准播客智能大纲与时间轴单行输出
  * 严格遵循《智能大纲规范》：
@@ -70,27 +112,25 @@ export function formatTimecode(sec: number, includeHours = true): string {
  */
 export function formatTimelineRow(t: ShownotesTimelineItem, preferShortTime = false): string {
   const timeStr = formatTimecode(t.timeSec, !preferShortTime);
-  const title = (t.title || '').trim();
-  const summary = (t.summary || '').trim();
-
-  let lineText = '';
-  if (title && summary && !title.includes(summary)) {
-    if (title.endsWith('：') || title.endsWith(':')) {
-      lineText = `${title}${summary}`;
-    } else if (title.includes('：') || title.includes(':')) {
-      lineText = `${title} ${summary}`;
-    } else {
-      lineText = `${title}：${summary}`;
-    }
-  } else {
-    lineText = title || summary || '核心议题展开';
-  }
+  let lineText = composeTimelineLineText(t);
 
   // 整理字数，力求精炼口语化并保持在 12~25 字区间
   if (lineText.length > 28) {
     lineText = `${lineText.slice(0, 27)}…`;
   }
 
+  return `${timeStr} ${lineText}`;
+}
+
+/**
+ * 格式化 Shownotes 节目时间轴单行输出：完整保留高信息密度案例、对比与钩子，不做 28 字截断。
+ */
+export function formatShownotesTimelineRow(
+  t: ShownotesTimelineItem,
+  preferShortTime = false
+): string {
+  const timeStr = formatTimecode(t.timeSec, !preferShortTime);
+  const lineText = composeTimelineLineText(t);
   return `${timeStr} ${lineText}`;
 }
 
@@ -344,6 +384,143 @@ export function buildNaturalContentSegments(
       excerpt: g.lines.join('\n').slice(0, 600),
     };
   });
+}
+
+/**
+ * 清理文字稿中的所有标签与内部标记（如 [说话人]:、[语音 ...]、[停顿]、[笑声]、[***]、<|...|> 等），
+ * 输出纯净的播客对话文本供 AI 生成 Shownotes。
+ */
+export function stripTranscriptTagsForAi(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/<\|[^|>]+\|>/g, '')
+    .replace(/\[[^\]]+\][:：]?\s*/g, '')
+    .replace(/[😂]/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * 为云端 AI 生成 Shownotes 构建纯净文字稿分段（仅保留时间点与纯净对话文本，不带任何标签或标记）。
+ */
+export function buildCleanContentSegmentsForAi(
+  state: PodcastProjectState,
+  timeline: TimelineComputation
+): NaturalContentSegment[] {
+  const segments = buildNaturalContentSegments(state, timeline);
+  return segments
+    .map((seg) => ({
+      ...seg,
+      chapterTitles: [],
+      excerpt: stripTranscriptTagsForAi(seg.excerpt),
+    }))
+    .filter((seg) => seg.excerpt.length > 0);
+}
+
+/**
+ * 格式化标准 SRT 时间戳（HH:MM:SS,mmm）。
+ */
+export function formatSrtTimestamp(sec: number): string {
+  const safeMs = Math.max(0, Math.round(sec * 1000));
+  const hrs = Math.floor(safeMs / 3_600_000);
+  const mins = Math.floor((safeMs % 3_600_000) / 60_000);
+  const secs = Math.floor((safeMs % 60_000) / 1000);
+  const ms = safeMs % 1000;
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
+
+/**
+ * 构建纯 SRT 格式的录音转文字内容（仅包含序号、SRT 时间轴与纯净转写句子，不包含单字列表、说话人标签或剪辑分析信息）。
+ */
+export function buildPureSrtTranscript(
+  state: PodcastProjectState,
+  timeline: TimelineComputation
+): string {
+  const blockIds = new Set(state.blocks.map((b) => b.blockId));
+  const cues: Array<{ startSec: number; endSec: number; text: string }> = [];
+
+  let current: {
+    startSec: number;
+    endSec: number;
+    parts: string[];
+    charLen: number;
+  } | null = null;
+
+  const flushCue = () => {
+    if (!current) return;
+    const text = stripTranscriptTagsForAi(current.parts.join(''));
+    if (text) {
+      cues.push({
+        startSec: current.startSec,
+        endSec: Math.max(current.startSec + 0.2, current.endSec),
+        text,
+      });
+    }
+    current = null;
+  };
+
+  for (const m of timeline.mappedTokens) {
+    if (!blockIds.has(m.blockId) || m.token.deleted || m.token.bleeped || m.token.type !== 'word') {
+      continue;
+    }
+    const cleanWord = stripTranscriptTagsForAi(m.token.text);
+    if (!cleanWord) continue;
+
+    const startSec = Math.max(0, m.editedStartSec);
+    const endSec = Math.max(startSec, m.editedEndSec);
+    const gapExceeded = current ? startSec - current.endSec > 4.0 : false;
+
+    if (!current || gapExceeded) {
+      flushCue();
+      current = {
+        startSec,
+        endSec,
+        parts: [cleanWord],
+        charLen: cleanWord.length,
+      };
+    } else {
+      current.endSec = Math.max(current.endSec, endSec);
+      current.parts.push(cleanWord);
+      current.charLen += cleanWord.length;
+    }
+
+    // 聚合成自然语义句段（120~220字），避免按单句/短词拆出上千条碎块 SRT 稀释模型注意力
+    if (
+      current &&
+      ((current.charLen >= 120 && /[。！？!?]$/.test(cleanWord)) || current.charLen >= 220)
+    ) {
+      flushCue();
+    }
+  }
+  flushCue();
+
+  // 若 timeline.mappedTokens 未产出有效字幕（例如尚未计算时间轴），兜底直接从 state.blocks 提取真实转写文本
+  if (cues.length === 0 && state.blocks.length > 0) {
+    for (const block of state.blocks) {
+      const validTokens = block.tokens.filter(
+        (t) => !t.deleted && !t.bleeped && t.type !== 'silence' && t.type !== 'laughter'
+      );
+      const text = stripTranscriptTagsForAi(validTokens.map((t) => t.text).join(''));
+      if (!text) continue;
+      const startSec = Math.max(0, (validTokens[0]?.sourceStartMs ?? 0) / 1000);
+      const endSec = Math.max(
+        startSec + 0.2,
+        (validTokens[validTokens.length - 1]?.sourceEndMs ?? startSec * 1000 + 1000) / 1000
+      );
+      cues.push({ startSec, endSec, text });
+    }
+  }
+
+  return cues
+    .map(
+      (cue, idx) =>
+        `${idx + 1}\n${formatSrtTimestamp(cue.startSec)} --> ${formatSrtTimestamp(cue.endSec)}\n${cue.text}`
+    )
+    .join('\n\n');
 }
 
 const GENERIC_CHAPTER_RE = /^(章节|话题|分段|第\d+段)\s*\d*$/;
@@ -637,17 +814,115 @@ export function formatGuestSocialSummary(
   return guest.socialAccount.trim();
 }
 
-export function sanitizeShownotesSynthesizedText(raw: string): string {
+export function sanitizeShownotesSynthesizedText(
+  raw: string,
+  preserveConceptQuotes = false
+): string {
   if (!raw) return '';
-  return raw
+  let text = raw
     .replace(/分享了关于[“"『]([^”"』]+)[”"』]的思考/g, '深入探讨了$1的核心议题')
-    .replace(/[“"『]([^”"』]{10,})[”"』]/g, '$1')
-    .replace(/[“”""]/g, '')
-    .trim();
+    .replace(/[“"『]([^”"』]{10,})[”"』]/g, '$1');
+  if (!preserveConceptQuotes) {
+    text = text.replace(/[“”""]/g, '');
+  }
+  return text.trim();
 }
 
 /**
- * 提炼脱敏对话与议题内容，组织约 500 字的专业播客节目简介（通篇采用书面总结，严禁原话引号摘抄）。
+ * 基于项目主题、核心章节与嘉宾信息，生成 3 种不同风格的备选单集标题（本地离线版）。
+ */
+export function buildLocalTitleOptions(
+  state: PodcastProjectState,
+  guests: ShownotesGuest[],
+  timelineItems: ShownotesTimelineItem[]
+): ShownotesTitleOption[] {
+  const baseTitle = (state.projectTitle || '本期对谈').trim();
+  const meaningfulChapters = timelineItems.filter(
+    (item) => !/高光片头|听友福利|活动抽奖|开场介绍/.test(item.title)
+  );
+  const coreTopic =
+    meaningfulChapters[0]?.title ||
+    state.glossary.find((g) => g.type === 'hotword')?.word ||
+    baseTitle;
+  const guestNames = guests
+    .filter((g) => g.roleLabel !== '主持人')
+    .map((g) => g.name)
+    .slice(0, 2)
+    .join('、');
+
+  return [
+    {
+      style: 'pain_point',
+      label: '悬念/痛点型',
+      title: `${coreTopic}背后：为什么大多数人都在这里踩了坑？`,
+    },
+    {
+      style: 'insight',
+      label: '干货/金句型',
+      title: baseTitle,
+    },
+    {
+      style: 'narrative',
+      label: '温和/陪伴型',
+      title: guestNames
+        ? `与 ${guestNames} 聊 ${coreTopic}：那些一线实践里的真实取舍`
+        : `关于 ${coreTopic} 的深度对谈：在不确定中寻找确定性`,
+    },
+  ];
+}
+
+/**
+ * 从脱敏后的文字稿中提取明确提及的书影音/延伸资料（若无则返回空数组）。
+ */
+export function extractLocalReferences(state: PodcastProjectState): ShownotesReferenceItem[] {
+  const projectTitle = (state.projectTitle || '').trim();
+  const fullText = state.blocks
+    .map((b) =>
+      b.tokens
+        .filter((t) => !t.deleted && t.type !== 'silence' && t.type !== 'laughter')
+        .map((t) => (t.bleeped ? '[***]' : t.text))
+        .join('')
+    )
+    .join('\n');
+
+  const seen = new Set<string>();
+  const refs: ShownotesReferenceItem[] = [];
+  const bookMatches = fullText.matchAll(/《([^《》\n]{2,30})》/g);
+  for (const match of bookMatches) {
+    const title = match[1].trim();
+    if (!title || title === projectTitle || title.includes('[***]')) continue;
+    if (seen.has(title)) continue;
+    seen.add(title);
+
+    const matchIdx = match.index ?? 0;
+    const beforeCtx = fullText.slice(Math.max(0, matchIdx - 10), matchIdx);
+    const afterCtx = fullText.slice(
+      matchIdx + match[0].length,
+      Math.min(fullText.length, matchIdx + match[0].length + 6)
+    );
+    const nearCtx = `${beforeCtx}${afterCtx}`;
+    let category: ShownotesReferenceCategory = 'book';
+    if (/这本书|一书|原著|书单/.test(afterCtx) || /读过|推荐.*书/.test(beforeCtx)) {
+      category = 'book';
+    } else if (/电影|纪录片|影片|剧集|导演/.test(nearCtx)) {
+      category = 'movie';
+    } else if (/文章|论文|报告|专栏|公众号/.test(nearCtx)) {
+      category = 'article';
+    }
+
+    refs.push({
+      id: `ref_local_${refs.length + 1}`,
+      category,
+      title: `《${title}》`,
+    });
+    if (refs.length >= 8) break;
+  }
+
+  return refs;
+}
+
+/**
+ * 提炼脱敏对话与议题内容，组织约 500 字的专业播客节目简介（钩子->核心内容->听众收获，无流水账开头与引号摘抄）。
  */
 function buildFiveHundredCharSummary(
   state: PodcastProjectState,
@@ -683,41 +958,41 @@ function buildFiveHundredCharSummary(
 
   const paragraphs: string[] = [];
 
-  // 第 1 段：节目背景、全片体量与主创阵容
+  // 第 1 段（钩子）：直面核心问题与现实张力，避免“欢迎收听”式流水账开头
   paragraphs.push(
-    `欢迎收听《${title}》！本期节目全长约 ${durationMin} 分钟，由 ${guestNames} 共同录制呈现。围绕行业核心议题与大家最关心的实践话题，我们在深度对谈中展开了全方位梳理与多视角碰撞，致力于为创作者与听友带来系统性的认知启发与陪伴。`
+    `当经验不再奏效，真正的破局点往往藏在一线实践的取舍之中。在《${title}》这期约 ${durationMin} 分钟的深度对谈里，${guestNames} 坐在一起，拆解了从概念热潮走向真实落地过程中最容易被忽略的关键命题。`
   );
 
-  // 第 2 段：核心探讨议题与业务推演
+  // 第 2 段（核心内容）：对谈主线、嘉宾视角与具体场景
   if (chapterTopics) {
     paragraphs.push(
-      `在本期对话中，主创与嘉宾系统探讨了 ${chapterTopics} 等核心议题。${
-        hotwords.length > 0 ? `对谈紧扣 ${hotwords.join('、')} 等关键概念，` : ''
-      }深入剖析了从初期探索、业务逻辑推演到实际落地攻坚的全过程。嘉宾们结合一线实践背景，不仅直面真实困境与踩坑复盘，更从方法论与全局视角给出了极具操作性的解题逻辑。`
+      `整场对话沿着 ${chapterTopics} 等关键脉络层层推进。${
+        hotwords.length > 0 ? `讨论紧扣 ${hotwords.join('、')} 等核心概念，` : ''
+      }结合一线实战场景还原了从初期探索、业务推演到落地攻坚的完整过程，既直面真实困境与试错代价，也梳理出清晰的判断依据。`
     );
   }
 
-  // 第 3 段：深度思辨与段落主旨总结（杜绝引号原话机械拼接）
+  // 第 3 段（听众收获）：深度思辨、方法论与实操启发
   if (topicHighlights.length > 0) {
     paragraphs.push(
-      `对话核心脉络与观点沉淀：在交流过程中，嘉宾们${topicHighlights.join('；')}。随后针对后续演进与边界条件展开进一步思辨，深入剖析了表面现象背后的深层动因与可复用的方法论体系，给出了兼具理论高度与实操参考的思考框架。`
+      `深入复盘关键转折：${topicHighlights.join('；')}。听完这期对谈，你将厘清表象背后的深层动因，带走一套经过验证的思考框架与避坑指南，为下一阶段的决策与行动提供扎实的参考。`
     );
   } else {
     paragraphs.push(
-      `全片围绕对谈主题进行了多层次展开，不仅客观复盘了实践中的经验与踩坑教训，还对关键难点背后的权衡取舍给出了明确的解题思路。无论是技术演进、产品体验还是个人认知成长，都有兼具干货密度与启发性的总结。`
+      `整场交流不仅客观复盘了实践中的经验与教训，还对关键难点背后的权衡取舍给出了明确的解题思路。无论你关注技术演进、产品打磨还是个人成长，都能从中获得可落地的启发与思考框架。`
     );
   }
 
-  // 第 4 段：互动指引与社群收听推荐
+  // 第 4 段（收听与互动指引）：自然收尾
   paragraphs.push(
-    `如果你喜欢本期内容，欢迎订阅专辑并在评论区分享你的收听思考与共鸣！我们也准备了本期专属听友福利与互动抽奖活动，详见下方活动规则，期待与你在评论区和听友群继续深度探讨。`
+    `节目已整理好完整时间轴与嘉宾联络名片，点击下方节点即可直达你最关心的段落。如果你在收听过程中产生了共鸣或疑问，欢迎在评论区留下你的观察，也别忘了查看文末的听友交流与专属福利。`
   );
 
   let result = paragraphs.join('\n\n');
 
   // 若文稿较短导致总字数不足 440 字，补充结构化收听指南以贴近 ~500 字标准
   if (countSummaryChars(result) < 440) {
-    result += `\n\n【收听贴士】本期节目已同步整理完整时间轴与嘉宾联系名片，点击下方时间点即可快速跳转至你最感兴趣的章节。感谢每一位的陪伴与转发支持，我们下期节目不见不散！`;
+    result += `\n\n【收听贴士】本期对谈信息密度较高，建议配合下方时间轴分段收听或收藏回听；相关延伸资料与互动活动规则已同步附于文末，期待在评论区与听友群和你继续交流。`;
   }
 
   return sanitizeShownotesSynthesizedText(result);
@@ -767,10 +1042,17 @@ export function buildLocalShownotes(
   const guests = buildGuestsFromTracks(state.tracks, existing?.guests ?? []);
   const timelineItems = buildTimelineItemsFromProject(state, timeline);
   const summary = buildFiveHundredCharSummary(state, timeline, guests, timelineItems);
+  const titleOptions =
+    existing?.titleOptions && existing.titleOptions.length > 0
+      ? existing.titleOptions
+      : buildLocalTitleOptions(state, guests, timelineItems);
+  const references =
+    existing?.references !== undefined ? existing.references : extractLocalReferences(state);
 
   return {
     generatedAt: new Date().toISOString(),
     episodeTitle,
+    titleOptions,
     summary: sanitizeShownotesSynthesizedText(summary),
     guests,
     timeline: timelineItems.map((t) => ({
@@ -778,6 +1060,7 @@ export function buildLocalShownotes(
       title: sanitizeShownotesSynthesizedText(t.title),
       summary: t.summary ? sanitizeShownotesSynthesizedText(t.summary) : undefined,
     })),
+    references,
     activity: existing?.activity ?? createDefaultActivityInfo(episodeTitle),
     benefits: existing?.benefits?.length ? existing.benefits : createDefaultBenefits(),
   };
@@ -799,11 +1082,49 @@ export function mergeCloudShownotes(
               ? Math.max(0, Math.round(item.timeSec))
               : localBase.timeline[idx]?.timeSec ?? idx * 60,
           title: sanitizeShownotesSynthesizedText(
-            item.title?.trim() || localBase.timeline[idx]?.title || `章节 ${idx + 1}`
+            item.title?.trim() || localBase.timeline[idx]?.title || `章节 ${idx + 1}`,
+            true
           ),
-          summary: item.summary ? sanitizeShownotesSynthesizedText(item.summary) : undefined,
+          summary: item.summary
+            ? sanitizeShownotesSynthesizedText(item.summary, true)
+            : undefined,
         }))
       : localBase.timeline;
+
+  const mergedTitleOptions: ShownotesTitleOption[] | undefined =
+    Array.isArray(cloud.titleOptions) && cloud.titleOptions.length > 0
+      ? cloud.titleOptions
+          .filter((o) => o && typeof o.title === 'string' && o.title.trim())
+          .slice(0, 3)
+          .map((o, idx) => {
+            const style: ShownotesTitleOption['style'] =
+              o.style === 'pain_point' || o.style === 'insight' || o.style === 'narrative'
+                ? o.style
+                : (['pain_point', 'insight', 'narrative'][idx % 3] as ShownotesTitleOption['style']);
+            const defaultLabel =
+              style === 'pain_point'
+                ? '悬念/痛点型'
+                : style === 'insight'
+                ? '干货/金句型'
+                : '温和/陪伴型';
+            return {
+              style,
+              label: o.label?.trim() || defaultLabel,
+              title: o.title!.trim(),
+            };
+          })
+      : localBase.titleOptions;
+
+  const mergedReferences: ShownotesReferenceItem[] | undefined = Array.isArray(cloud.references)
+    ? cloud.references
+        .filter((r) => r && typeof r.title === 'string' && r.title.trim())
+        .map((r, idx) => ({
+          id: `ref_ai_${idx}`,
+          category: normalizeReferenceCategory(r.category),
+          title: r.title!.trim(),
+          note: r.note?.trim() || undefined,
+        }))
+    : localBase.references;
 
   const mergedActivity: ShownotesActivityInfo = {
     ...localBase.activity,
@@ -828,8 +1149,10 @@ export function mergeCloudShownotes(
     ...localBase,
     generatedAt: new Date().toISOString(),
     episodeTitle: cloud.episodeTitle?.trim() || localBase.episodeTitle,
+    titleOptions: mergedTitleOptions,
     summary: sanitizeShownotesSynthesizedText(cloud.summary?.trim() || localBase.summary),
     timeline: mergedTimeline,
+    references: mergedReferences,
     activity: mergedActivity,
     benefits: mergedBenefits,
   };
@@ -870,10 +1193,20 @@ export function formatShownotesMarkdown(sn: PodcastShownotes): string {
     lines.push('- 00:00 开场：本期对谈开场与核心议题引入');
   } else {
     for (const t of sn.timeline) {
-      lines.push(`- ${formatTimelineRow(t, hasOverHour)}`);
+      lines.push(`- ${formatShownotesTimelineRow(t, hasOverHour)}`);
     }
   }
   lines.push('');
+
+  if (sn.references && sn.references.length > 0) {
+    lines.push('## 📚 提及书影音 / 延伸资料');
+    for (const ref of sn.references) {
+      const catLabel = REFERENCE_CATEGORY_LABELS[ref.category] || '延伸资料';
+      const noteText = ref.note?.trim() ? ` — ${ref.note.trim()}` : '';
+      lines.push(`- [${catLabel}] **${ref.title}**${noteText}`);
+    }
+    lines.push('');
+  }
 
   lines.push('## 🎉 活动信息');
   lines.push(`- **活动主题**：${sn.activity.title}`);
@@ -938,9 +1271,19 @@ export function formatShownotesPlainText(sn: PodcastShownotes): string {
   lines.push('【时间轴】');
   const hasOverHour = sn.timeline.some((t) => t.timeSec >= 3600);
   for (const t of sn.timeline) {
-    lines.push(formatTimelineRow(t, hasOverHour));
+    lines.push(formatShownotesTimelineRow(t, hasOverHour));
   }
   lines.push('');
+
+  if (sn.references && sn.references.length > 0) {
+    lines.push('【提及书影音 / 延伸资料】');
+    for (const ref of sn.references) {
+      const catLabel = REFERENCE_CATEGORY_LABELS[ref.category] || '延伸资料';
+      const noteText = ref.note?.trim() ? `（${ref.note.trim()}）` : '';
+      lines.push(`• [${catLabel}] ${ref.title}${noteText}`);
+    }
+    lines.push('');
+  }
   lines.push('【活动信息】');
   lines.push(`${sn.activity.title}`);
   if (sn.activity.description.trim()) lines.push(sn.activity.description.trim());

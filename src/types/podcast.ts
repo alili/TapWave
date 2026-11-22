@@ -306,12 +306,35 @@ export interface ListenerBenefitItem {
   imageUrl?: string;
 }
 
+export interface ShownotesTitleOption {
+  style: 'pain_point' | 'insight' | 'narrative';
+  label: string;
+  title: string;
+}
+
+export type ShownotesReferenceCategory =
+  | 'book'
+  | 'movie'
+  | 'article'
+  | 'tool'
+  | 'person'
+  | 'other';
+
+export interface ShownotesReferenceItem {
+  id: string;
+  category: ShownotesReferenceCategory;
+  title: string;
+  note?: string;
+}
+
 export interface PodcastShownotes {
   generatedAt?: string;
   episodeTitle: string;
+  titleOptions?: ShownotesTitleOption[];
   summary: string;
   guests: ShownotesGuest[];
   timeline: ShownotesTimelineItem[];
+  references?: ShownotesReferenceItem[];
   activity: ShownotesActivityInfo;
   benefits: ListenerBenefitItem[];
 }

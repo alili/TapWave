@@ -131,6 +131,13 @@ pub(crate) fn find_python_bin() -> String {
 
 pub(crate) fn find_sidecar_script(app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
+    // 开发模式下优先使用工作区最新的 sidecar/podcraft_ai.py，避免被 target/debug/_up_ 中的历史副本遮蔽
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../sidecar/podcraft_ai.py"));
+        candidates.push(PathBuf::from("sidecar/podcraft_ai.py"));
+        candidates.push(PathBuf::from("../sidecar/podcraft_ai.py"));
+    }
     if let Ok(res_dir) = app.path().resource_dir() {
         candidates.push(res_dir.join("sidecar/podcraft_ai.py"));
         candidates.push(res_dir.join("_up_/sidecar/podcraft_ai.py"));
