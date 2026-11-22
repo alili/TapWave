@@ -91,6 +91,9 @@ const LazyIntroEditorModal = React.lazy(() =>
 const LazyOutroEditorView = React.lazy(() =>
   import('./components/OutroEditorView').then((m) => ({ default: m.OutroEditorView }))
 );
+const LazyRecordingWorkspace = React.lazy(() =>
+  import('./components/RecordingWorkspace').then((m) => ({ default: m.RecordingWorkspace }))
+);
 import {
   ensureNativeAudioServerPort,
   exportMasteredPodcastAudio,
@@ -133,6 +136,7 @@ import {
   TranscriptBlock,
   TranscriptToken,
   WaveformSelectionMode,
+  WorkspaceLayoutMode,
 } from './types/podcast';
 import { PLAYBACK_RATES, TopStudioBar } from './components/TopStudioBar';
 import { LeftTrackAndChapterPane } from './components/LeftTrackAndChapterPane';
@@ -491,7 +495,11 @@ export const App: React.FC = () => {
             setRightPaneCollapsed(true);
             return;
           }
-          const leftOccupied = cur.leftPaneCollapsed ? 28 : cur.leftPaneWidth;
+          const leftOccupied = cur.hasContent
+            ? cur.leftPaneCollapsed
+              ? 28
+              : cur.leftPaneWidth
+            : 0;
           const allowedMax = Math.min(
             MAX_RIGHT_PANE_WIDTH,
             Math.max(MIN_RIGHT_PANE_WIDTH, rowWidth - leftOccupied - MIN_CENTER_STAGE_WIDTH)
@@ -1239,7 +1247,7 @@ export const App: React.FC = () => {
 
     if (shortcutsModalOpen) return;
 
-    // 切换视图快捷键: ⌥ 1 (音轨视图) / ⌥ 2 (文稿视图) / ⌥ 3 (片头视图)
+    // 切换视图快捷键: ⌥ 1 (音轨视图) / ⌥ 2 (文稿视图) / ⌥ 3 (片头视图) / ⌥ 4 (片尾视图) / ⌥ 5 (录制视图)
     if (e.altKey && !e.metaKey && !e.ctrlKey) {
       if (e.key === '1') {
         e.preventDefault();
@@ -1259,6 +1267,11 @@ export const App: React.FC = () => {
       if (e.key === '4') {
         e.preventDefault();
         mutateProject((p) => ({ ...p, workspaceLayout: 'outro' }));
+        return;
+      }
+      if (e.key === '5') {
+        e.preventDefault();
+        mutateProject((p) => ({ ...p, workspaceLayout: 'record' }));
         return;
       }
     }
@@ -1435,7 +1448,11 @@ export const App: React.FC = () => {
       audioPreview.requestSeek();
       setSelectedIds(new Set());
       clearUndoHistory();
-      setState(applyPlatformConfigToProjectState(loaded, aiPlatformConfigRef.current));
+      const normalizedLoaded =
+        loaded.workspaceLayout === 'record'
+          ? { ...loaded, workspaceLayout: 'multitrack' as const }
+          : loaded;
+      setState(applyPlatformConfigToProjectState(normalizedLoaded, aiPlatformConfigRef.current));
       setIsDirty(false);
       if (clampedTarget > 0) {
         notify(
@@ -3987,7 +4004,7 @@ export const App: React.FC = () => {
   );
   const stableStepPlayhead = useLatestCallback(stepPlayhead);
   const stableWaveformCutAction = useLatestCallback(handleWaveformCutAction);
-  const stableSetWorkspaceLayout = useLatestCallback((mode: 'multitrack' | 'transcript' | 'intro' | 'outro') =>
+  const stableSetWorkspaceLayout = useLatestCallback((mode: WorkspaceLayoutMode) =>
     mutateProject((p) => ({ ...p, workspaceLayout: mode }))
   );
   const stableSwitchToIntroView = useLatestCallback(() =>
@@ -4195,8 +4212,10 @@ export const App: React.FC = () => {
       />
 
       <div ref={workspaceRowRef} className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
-        {/* 左侧音轨与素材栏（仅在音轨视图展示；文稿视图全宽替换左右侧边栏） */}
-        {(state.workspaceLayout ?? 'multitrack') !== 'transcript' &&
+        {/* 左侧音轨与素材栏（仅在音轨视图展示；文稿/录制视图全宽替换左右侧边栏） */}
+        {hasWorkspaceContent &&
+          (state.workspaceLayout ?? 'multitrack') !== 'transcript' &&
+          (state.workspaceLayout ?? 'multitrack') !== 'record' &&
           (leftPaneCollapsed ? (
             <div className="relative w-7 shrink-0 border-r border-zinc-800 bg-zinc-900/90 flex flex-col items-center py-2.5 gap-2.5 select-none">
               <button
@@ -4274,7 +4293,16 @@ export const App: React.FC = () => {
             </>
           ))}
 
-        {!hasWorkspaceContent ? (
+        {(state.workspaceLayout ?? 'multitrack') === 'record' ? (
+          <Suspense fallback={null}>
+            <LazyRecordingWorkspace
+              state={state}
+              onOpenAiPlatform={() => setAiPlatformModalOpen(true)}
+              onOpenDepGuide={() => setDepGuideModalOpen(true)}
+              onNotify={notify}
+            />
+          </Suspense>
+        ) : !hasWorkspaceContent ? (
           /* Clean Empty Studio Onboarding Screen — Zero Default Audio or Fake Text */
           <div
             onDragOver={(e) => e.preventDefault()}
@@ -4351,6 +4379,20 @@ export const App: React.FC = () => {
                   </p>
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={() => stableSetWorkspaceLayout('record')}
+                className="w-full p-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/20 text-left space-y-1.5 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 font-semibold text-sm text-rose-200">
+                  <span>🎙️</span>
+                  <span>实时录制：采访 / 对谈 / 销售助手</span>
+                </div>
+                <p className="text-xs text-zinc-300/90 leading-snug">
+                  实时转写、自动区分发言人，AI 持续提炼对方画像并推荐推动提问，结束后生成纪要
+                </p>
+              </button>
 
               {recentProjects.length > 0 && (
                 <div className="rounded-2xl border border-zinc-800/90 bg-zinc-950/60 p-3.5 space-y-2.5">
@@ -4568,9 +4610,10 @@ export const App: React.FC = () => {
           />
         )}
 
-        {/* 右侧 AI 栏（仅在音轨视图展示；文稿视图全宽替换左右侧边栏） */}
+        {/* 右侧 AI 栏（仅在音轨视图展示；文稿/录制视图全宽替换左右侧边栏） */}
         {hasWorkspaceContent &&
           (state.workspaceLayout ?? 'multitrack') !== 'transcript' &&
+          (state.workspaceLayout ?? 'multitrack') !== 'record' &&
           (rightPaneCollapsed ? (
             <div className="relative w-7 shrink-0 border-l border-zinc-800 bg-zinc-900/90 flex flex-col items-center py-2.5 gap-2.5 select-none">
               <div

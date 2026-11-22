@@ -1,5 +1,6 @@
 pub mod audio_dsp;
 pub mod live_mix_stream;
+pub mod live_session;
 pub mod models;
 pub mod video_export;
 
@@ -74,13 +75,13 @@ pub struct ModelDownloadProgressPayload {
     pub error: Option<String>,
 }
 
-fn get_user_home_dir() -> Option<PathBuf> {
+pub(crate) fn get_user_home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
 }
 
-fn find_python_bin() -> String {
+pub(crate) fn find_python_bin() -> String {
     let mut candidates = Vec::new();
     if let Some(home_path) = get_user_home_dir() {
         #[cfg(windows)]
@@ -128,7 +129,7 @@ fn find_python_bin() -> String {
     }
 }
 
-fn find_sidecar_script(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn find_sidecar_script(app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Ok(res_dir) = app.path().resource_dir() {
         candidates.push(res_dir.join("sidecar/podcraft_ai.py"));
@@ -158,7 +159,7 @@ fn find_sidecar_script(app: &AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "未找到 sidecar/podcraft_ai.py 脚本".to_string())
 }
 
-fn find_models_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn find_models_dir(app: &AppHandle) -> PathBuf {
     if let Ok(guard) = get_custom_models_dir_lock().read() {
         if let Some(ref p) = *guard {
             if p.exists() {
@@ -1664,11 +1665,17 @@ pub fn run() {
             get_local_ai_config_path,
             load_local_ai_config,
             save_local_ai_config,
+            live_session::live_session_start,
+            live_session::live_session_send,
+            live_session::live_session_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PodCraft Studio Tauri application");
 
     app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = &event {
+            live_session::kill_all();
+        }
         #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
         if let tauri::RunEvent::Opened { urls } = &event {
             for url in urls {

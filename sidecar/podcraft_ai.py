@@ -2583,7 +2583,13 @@ def handle_transcribe_stems(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def call_cloud_llm(prompt: str, llm_config: Dict[str, Any]) -> str:
+def call_cloud_llm(
+    prompt: str,
+    llm_config: Dict[str, Any],
+    system_prompt: Optional[str] = None,
+    timeout: int = 30,
+    temperature: float = 0.2,
+) -> str:
     provider = llm_config.get("provider", "gemini")
     api_key = (
         llm_config.get("apiKey")
@@ -2598,17 +2604,19 @@ def call_cloud_llm(prompt: str, llm_config: Dict[str, Any]) -> str:
     if provider == "gemini":
         model = llm_config.get("model") or "gemini-2.5-flash"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        payload = {
+        payload: Dict[str, Any] = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
+            "generationConfig": {"responseMimeType": "application/json", "temperature": temperature},
         }
+        if system_prompt:
+            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return body["candidates"][0]["content"]["parts"][0]["text"]
     else:
@@ -2621,17 +2629,22 @@ def call_cloud_llm(prompt: str, llm_config: Dict[str, Any]) -> str:
         base_url = (llm_config.get("baseUrl") or default_base).rstrip("/")
         model = llm_config.get("model") or default_model
         url = f"{base_url}/chat/completions"
+        sys_msg = (
+            system_prompt
+            if system_prompt
+            else "你是一位专业的中文播客精剪师与语言表达教练，请严格输出合法 JSON。"
+        )
         payload = {
             "model": model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是一位专业的中文播客精剪师与语言表达教练，请严格输出合法 JSON。",
+                    "content": sys_msg,
                 },
                 {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
+            "temperature": temperature,
         }
         req = urllib.request.Request(
             url,
@@ -2642,7 +2655,7 @@ def call_cloud_llm(prompt: str, llm_config: Dict[str, Any]) -> str:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return body["choices"][0]["message"]["content"]
 
@@ -3065,6 +3078,11 @@ def handle_generate_shownotes(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def main() -> None:
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "live":
+            from live_session import run_live_session
+
+            run_live_session()
+            return
         if len(sys.argv) > 1 and sys.argv[1] == "check_capabilities":
             print(json.dumps(handle_check_capabilities(), ensure_ascii=False), flush=True)
             return

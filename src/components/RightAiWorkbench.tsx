@@ -351,11 +351,11 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
           `【语流洁净度良好】：纯口癖仅 ${r.fillers} 处（${fillerPerMin} 次/分），句间停顿干脆自然。`
         );
       }
-      if (cpm > 255) {
+      if (cpm > 305) {
         tips.push(
           `【语速控制提醒】：实时语速较快（${cpm} 字/分），输出核心观点时建议适当留白降速 10%–15%。`
         );
-      } else if (cpm > 0 && cpm < 150) {
+      } else if (cpm > 0 && cpm < 140) {
         tips.push(
           `【语速节奏提醒】：实时语速偏舒缓（${cpm} 字/分），可开启「智能缩空白」让叙事更紧凑。`
         );

@@ -566,7 +566,7 @@ export function computeSpeakerRadarProfiles(
     const fluencyScore = clampScore(96 - Math.max(0, crutchesPerMin - 1.2) * 5.5);
 
     // 2. 节奏与气口 (Pacing): 语速偏离 + 语速忽快忽慢波动 + 句尾吞音
-    const pacePenalty = Math.max(0, Math.abs(avgCpm - 215) - 65) * 0.12;
+    const pacePenalty = Math.max(0, Math.abs(avgCpm - 225) - 80) * 0.12;
     const stdPenalty = Math.max(0, paceStdCpm - 45) * 0.18;
     const dropPenalty = trailingDropDb && trailingDropDb > 5.5 ? 4 : 0;
     const pacingScore = clampScore(95 - pacePenalty - stdPenalty - dropPenalty);

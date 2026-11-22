@@ -622,7 +622,7 @@ export function generateCutAnalysisReport(
           `${sortedDims[0].label}表现突出：${sortedDims[0].detail}`
         );
       }
-      if (avgCpm >= 175 && avgCpm <= 255) {
+      if (avgCpm >= 160 && avgCpm <= 305) {
         strengths.push(`平均语速 ${avgCpm} 字/分钟，处于播客黄金可听区间`);
       }
 
@@ -639,11 +639,11 @@ export function generateCutAnalysisReport(
         );
       }
 
-      if (avgCpm > 265) {
+      if (avgCpm > 310) {
         suggestions.push(
           `语速偏快（${avgCpm} 字/分），关键观点与数据转折处建议刻意放慢并留白 0.4s，给听众消化时间。`
         );
-      } else if (avgCpm > 0 && avgCpm < 155) {
+      } else if (avgCpm > 0 && avgCpm < 145) {
         suggestions.push(
           `语速偏慢（${avgCpm} 字/分），建议精简铺垫修饰语，让核心论点更早出现。`
         );

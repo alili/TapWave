@@ -1577,6 +1577,225 @@ function podcraftLocalSidecarPlugin(): Plugin {
       });
     });
 
+    // 3b. Browser-mode Persistent Live Recording Session Endpoints
+    const liveSessions = new Map<
+      string,
+      {
+        child: ReturnType<typeof spawn>;
+        sseClients: Set<import('node:http').ServerResponse>;
+        backlog: string[];
+        stdoutBuf: string;
+        exited: boolean;
+      }
+    >();
+
+    const broadcastLiveLine = (sid: string, line: string) => {
+      const sess = liveSessions.get(sid);
+      if (!sess || !line) return;
+      if (sess.sseClients.size === 0) {
+        sess.backlog.push(line);
+        if (sess.backlog.length > 400) sess.backlog.shift();
+        return;
+      }
+      const frame = `data: ${line}\n\n`;
+      for (const client of sess.sseClients) {
+        try {
+          client.write(frame);
+        } catch {
+          sess.sseClients.delete(client);
+        }
+      }
+    };
+
+    middlewares.use('/api/live/start', (req, res, next) => {
+      if (req.method !== 'POST') {
+        next();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>;
+          const sid =
+            typeof parsed.sessionId === 'string' && parsed.sessionId.trim()
+              ? parsed.sessionId.trim()
+              : `live_${Date.now()}`;
+          const rawTitle = typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : '录制';
+          const safeTitle =
+            rawTitle
+              .replace(/[^\p{L}\p{N}_-]+/gu, '-')
+              .replace(/^-+|-+$/g, '')
+              .slice(0, 32) || 'session';
+          const now = new Date();
+          const pad2 = (n: number) => String(n).padStart(2, '0');
+          const stamp = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}-${pad2(
+            now.getHours()
+          )}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+          const outputDir =
+            typeof parsed.outputDir === 'string' && parsed.outputDir.trim()
+              ? parsed.outputDir.trim()
+              : path.join(os.homedir(), 'TapWave Recordings', `${stamp}-${safeTitle}`);
+
+          fs.mkdirSync(outputDir, { recursive: true });
+          const startLine = JSON.stringify({ ...parsed, sessionId: sid, outputDir });
+
+          const existing = liveSessions.get(sid);
+          if (existing) {
+            try {
+              existing.child.kill();
+            } catch {
+              // ignore
+            }
+            liveSessions.delete(sid);
+          }
+
+          const pyBin = resolvePythonBin();
+          const scriptPath = path.join(ROOT_DIR, 'sidecar', 'podcraft_ai.py');
+          const child = spawn(pyBin, ['-u', scriptPath, 'live'], {
+            cwd: ROOT_DIR,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+
+          const entry = {
+            child,
+            sseClients: new Set<import('node:http').ServerResponse>(),
+            backlog: [] as string[],
+            stdoutBuf: '',
+            exited: false,
+          };
+          liveSessions.set(sid, entry);
+
+          child.stdout?.on('data', (d: Buffer) => {
+            entry.stdoutBuf += d.toString('utf-8');
+            const lines = entry.stdoutBuf.split(/\r?\n/);
+            entry.stdoutBuf = lines.pop() ?? '';
+            for (const ln of lines) {
+              const trimmed = ln.trim();
+              if (trimmed) broadcastLiveLine(sid, trimmed);
+            }
+          });
+          // Always drain stderr so Python never blocks on a full pipe
+          child.stderr?.on('data', () => {
+            // drain
+          });
+          child.on('close', () => {
+            entry.exited = true;
+            if (entry.stdoutBuf.trim()) {
+              broadcastLiveLine(sid, entry.stdoutBuf.trim());
+              entry.stdoutBuf = '';
+            }
+            broadcastLiveLine(sid, JSON.stringify({ type: 'process_exit' }));
+            for (const client of entry.sseClients) {
+              try {
+                client.end();
+              } catch {
+                // ignore
+              }
+            }
+            entry.sseClients.clear();
+            setTimeout(() => {
+              if (liveSessions.get(sid) === entry) liveSessions.delete(sid);
+            }, 5000);
+          });
+
+          child.stdin?.write(startLine + '\n');
+
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ sessionId: sid, outputDir }));
+        } catch (err) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
+    });
+
+    middlewares.use('/api/live/events', (req, res, next) => {
+      if (req.method !== 'GET') {
+        next();
+        return;
+      }
+      const reqUrl = new URL(req.url ?? '/api/live/events', 'http://localhost');
+      const sid = reqUrl.searchParams.get('sid') ?? '';
+      const sess = liveSessions.get(sid);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+
+      if (!sess) {
+        res.write(`data: ${JSON.stringify({ type: 'process_exit' })}\n\n`);
+        res.end();
+        return;
+      }
+
+      sess.sseClients.add(res);
+      while (sess.backlog.length > 0) {
+        const line = sess.backlog.shift();
+        if (line) res.write(`data: ${line}\n\n`);
+      }
+      if (sess.exited) {
+        res.end();
+        return;
+      }
+
+      req.on('close', () => {
+        sess.sseClients.delete(res);
+      });
+    });
+
+    middlewares.use('/api/live/send', (req, res, next) => {
+      if (req.method !== 'POST') {
+        next();
+        return;
+      }
+      const reqUrl = new URL(req.url ?? '/api/live/send', 'http://localhost');
+      const sid = reqUrl.searchParams.get('sid') ?? '';
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const sess = liveSessions.get(sid);
+        if (!sess || sess.exited || !sess.child.stdin || sess.child.stdin.destroyed) {
+          res.statusCode = 404;
+          res.end('Session not active');
+          return;
+        }
+        const body = Buffer.concat(chunks).toString('utf-8');
+        sess.child.stdin.write(body.endsWith('\n') ? body : body + '\n');
+        res.statusCode = 200;
+        res.end('ok');
+      });
+    });
+
+    middlewares.use('/api/live/stop', (req, res, next) => {
+      if (req.method !== 'POST') {
+        next();
+        return;
+      }
+      const reqUrl = new URL(req.url ?? '/api/live/stop', 'http://localhost');
+      const sid = reqUrl.searchParams.get('sid') ?? '';
+      const sess = liveSessions.get(sid);
+      if (sess && !sess.exited && sess.child.stdin && !sess.child.stdin.destroyed) {
+        sess.child.stdin.write(JSON.stringify({ type: 'stop' }) + '\n');
+        sess.child.stdin.end();
+        setTimeout(() => {
+          if (!sess.exited) {
+            try {
+              sess.child.kill();
+            } catch {
+              // ignore
+            }
+          }
+        }, 60_000);
+      }
+      res.statusCode = 200;
+      res.end('ok');
+    });
+
     // 4. Browser-mode Mastered MP3 Export endpoint (FFmpeg multi-track mix + EDL cut + -16 LUFS 192k MP3)
     middlewares.use('/api/export-mp3', (req, res, next) => {
       if (req.method !== 'POST') {

@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { formatLiveMmSs } from '../engine/liveMinutesExporter';
+import { useLiveSession } from '../engine/liveSessionStore';
 import {
   Check,
   CheckCircle2,
@@ -176,6 +178,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
 
   const hasContent = state.tracks.length > 0;
   const layoutMode = state.workspaceLayout ?? 'multitrack';
+  const liveSnap = useLiveSession();
+  const isLiveActive = liveSnap.phase === 'recording' || liveSnap.phase === 'paused';
 
   const soloLabel =
     state.autoSoloMode === 'natural_ducking'
@@ -880,13 +884,13 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                   {onToggleLeftPane && (
                     <button
                       type="button"
-                      disabled={layoutMode === 'transcript'}
+                      disabled={!hasContent || layoutMode === 'transcript'}
                       onClick={() => {
                         setOpenMenu(null);
                         onToggleLeftPane();
                       }}
                       className={`w-full px-2.5 py-1.5 rounded-lg text-zinc-200 flex items-center justify-between cursor-pointer transition ${
-                        layoutMode === 'transcript'
+                        !hasContent || layoutMode === 'transcript'
                           ? 'opacity-40 cursor-not-allowed text-zinc-500'
                           : 'hover:bg-zinc-800'
                       }`}
@@ -900,7 +904,7 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                         <span className="text-[10px] font-mono text-zinc-500">⌘ [</span>
                         {layoutMode === 'transcript' ? (
                           <span className="text-[10px] text-zinc-500">文稿全宽</span>
-                        ) : !leftPaneCollapsed ? (
+                        ) : hasContent && !leftPaneCollapsed ? (
                           <span className="text-[10px] text-emerald-400 font-medium">显示</span>
                         ) : (
                           <span className="text-[10px] text-zinc-500">隐藏</span>
@@ -1261,7 +1265,34 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
               <span>📝</span>
               <span>文稿视图</span>
             </button>
+            <button
+              type="button"
+              onClick={() => onSetWorkspaceLayout('record')}
+              className={`relative px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                layoutMode === 'record'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+              }`}
+              title="录制视图：实时转写 + AI 提问助手 (快捷键: ⌥5)"
+            >
+              <span>🎙️</span>
+              <span>录制</span>
+              {isLiveActive && (
+                <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
+              )}
+            </button>
           </div>
+          {isLiveActive && layoutMode !== 'record' && (
+            <button
+              type="button"
+              onClick={() => onSetWorkspaceLayout('record')}
+              title="点击返回正在进行的录制视图"
+              className="px-2 py-0.5 rounded-full bg-rose-500/20 border border-rose-500/40 text-[11px] font-mono text-rose-300 hover:bg-rose-500/30 flex items-center gap-1 cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+              <span>REC {formatLiveMmSs(liveSnap.elapsedMs)}</span>
+            </button>
+          )}
 
           {(onToggleLeftPane || onToggleRightPane) && (
             <div className="flex items-center gap-1 pl-1 border-l border-zinc-800">

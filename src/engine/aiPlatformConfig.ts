@@ -11,6 +11,7 @@ export type AiProviderId =
 export type AiFeatureId =
   | 'asr_transcribe'
   | 'speaker_separation'
+  | 'live_correction'
   | 'transcript_analysis'
   | 'shownotes_generate';
 
@@ -51,6 +52,7 @@ export interface AiPlatformConfig {
     enableSingleFileSpeakerSep: boolean;
     analysisProvider: LlmFeatureProvider;
     shownotesProvider: LlmFeatureProvider;
+    liveCorrectionProvider: LlmFeatureProvider;
   };
 }
 
@@ -85,6 +87,12 @@ export const AI_FEATURES_CATALOG: AiFeatureDescriptor[] = [
     description: '从单条混音音频中自动区分主持人与嘉宾声纹并拆轨',
   },
   {
+    id: 'live_correction',
+    name: '录制模式流式纠错',
+    shortLabel: '流式辅助纠正',
+    description: '录制时先用本地模型快速出字，再由云端大模型流式纠正同音错字与专有名词',
+  },
+  {
     id: 'transcript_analysis',
     name: 'AI 节目摘要与控场诊断',
     shortLabel: '节目摘要分析',
@@ -106,7 +114,12 @@ export const AI_PROVIDERS_CATALOG: AiProviderDescriptor[] = [
     badge: 'ASR + LLM 全能',
     description: '同时支持云端语音转写 (/v1/tools/asr) 与高性价比中文大模型分析',
     requiresKey: true,
-    supportedFeatures: ['asr_transcribe', 'transcript_analysis', 'shownotes_generate'],
+    supportedFeatures: [
+      'asr_transcribe',
+      'live_correction',
+      'transcript_analysis',
+      'shownotes_generate',
+    ],
   },
   {
     id: 'gemini',
@@ -115,7 +128,7 @@ export const AI_PROVIDERS_CATALOG: AiProviderDescriptor[] = [
     badge: '长文本 LLM',
     description: '超大上下文窗口，适合整期长播客文稿摘要与 Shownotes 提炼',
     requiresKey: true,
-    supportedFeatures: ['transcript_analysis', 'shownotes_generate'],
+    supportedFeatures: ['live_correction', 'transcript_analysis', 'shownotes_generate'],
   },
   {
     id: 'openai',
@@ -124,7 +137,7 @@ export const AI_PROVIDERS_CATALOG: AiProviderDescriptor[] = [
     badge: '通用接口',
     description: '支持 OpenAI 官方及各类兼容 /v1/chat/completions 的第三方中转/本地网关',
     requiresKey: true,
-    supportedFeatures: ['transcript_analysis', 'shownotes_generate'],
+    supportedFeatures: ['live_correction', 'transcript_analysis', 'shownotes_generate'],
   },
   {
     id: 'volcengine_doubao',
@@ -145,6 +158,7 @@ export const AI_PROVIDERS_CATALOG: AiProviderDescriptor[] = [
     supportedFeatures: [
       'asr_transcribe',
       'speaker_separation',
+      'live_correction',
       'transcript_analysis',
       'shownotes_generate',
     ],
@@ -189,6 +203,7 @@ export function createDefaultAiPlatformConfig(): AiPlatformConfig {
       enableSingleFileSpeakerSep: true,
       analysisProvider: 'deepseek',
       shownotesProvider: 'deepseek',
+      liveCorrectionProvider: 'deepseek',
     },
   };
 }
@@ -313,6 +328,10 @@ export function normalizeAiPlatformConfig(raw: unknown): AiPlatformConfig {
       shownotesProvider: normalizeLlmProvider(
         routing.shownotesProvider,
         def.routing.shownotesProvider
+      ),
+      liveCorrectionProvider: normalizeLlmProvider(
+        routing.liveCorrectionProvider,
+        def.routing.liveCorrectionProvider
       ),
     },
   };
@@ -451,6 +470,11 @@ export function isFeatureUsingProvider(
         return config.routing.shownotesProvider === 'local_only';
       }
       return config.routing.shownotesProvider === providerId;
+    case 'live_correction':
+      if (providerId === 'local_sensevoice') {
+        return config.routing.liveCorrectionProvider === 'local_only';
+      }
+      return config.routing.liveCorrectionProvider === providerId;
   }
 }
 
@@ -504,6 +528,13 @@ export function toggleFeatureForProvider(
         next.routing.shownotesProvider = currentlyActive ? 'local_only' : providerId;
       }
       break;
+    case 'live_correction':
+      if (providerId === 'local_sensevoice') {
+        next.routing.liveCorrectionProvider = 'local_only';
+      } else if (providerId === 'deepseek' || providerId === 'gemini' || providerId === 'openai') {
+        next.routing.liveCorrectionProvider = currentlyActive ? 'local_only' : providerId;
+      }
+      break;
   }
   return next;
 }
@@ -535,13 +566,15 @@ export function buildAsrConfigFromPlatform(
 
 export function buildLlmConfigForFeature(
   config: AiPlatformConfig,
-  feature: 'transcript_analysis' | 'shownotes_generate',
+  feature: 'transcript_analysis' | 'shownotes_generate' | 'live_correction',
   fallback?: LlmConfig
 ): LlmConfig & { forceLocalOnly?: boolean } {
   const chosen =
     feature === 'transcript_analysis'
       ? config.routing.analysisProvider
-      : config.routing.shownotesProvider;
+      : feature === 'shownotes_generate'
+      ? config.routing.shownotesProvider
+      : config.routing.liveCorrectionProvider;
 
   if (chosen === 'local_only') {
     return {

@@ -278,7 +278,7 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
             <Sparkles className="w-3 h-3 text-amber-400" />
             <span>当前功能项 AI 引擎分配（可快捷切换）</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
             {/* ASR 路由 */}
             <div className="p-2.5 rounded-xl border border-zinc-800 bg-zinc-900/90 space-y-1.5">
               <div className="flex items-center justify-between">
@@ -379,6 +379,39 @@ export const AiConfigPlatformModal: React.FC<AiConfigPlatformModalProps> = ({
                   ? '使用本地章节与关键字模板生成'
                   : hasProviderCredentials(draft, draft.routing.shownotesProvider)
                   ? '已配置对应 API Key，可直接调用'
+                  : '⚠️ 尚未填写该平台 API Key'}
+              </div>
+            </div>
+
+            {/* 录制模式流式辅助纠正路由 */}
+            <div className="p-2.5 rounded-xl border border-zinc-800 bg-zinc-900/90 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-zinc-200">录制流式纠错</span>
+                <span className="text-[10px] text-zinc-500">辅助纠正</span>
+              </div>
+              <select
+                value={draft.routing.liveCorrectionProvider}
+                onChange={(e) =>
+                  setDraft((p) => ({
+                    ...p,
+                    routing: {
+                      ...p.routing,
+                      liveCorrectionProvider: e.target.value as LlmFeatureProvider,
+                    },
+                  }))
+                }
+                className="w-full px-2 py-1 rounded-lg border border-zinc-700 bg-zinc-950 text-xs text-zinc-100 focus:outline-none focus:border-cyan-500"
+              >
+                <option value="local_only">仅本地快速识别（不纠错）</option>
+                <option value="deepseek">DeepSeek 流式纠错</option>
+                <option value="gemini">Google Gemini 流式纠错</option>
+                <option value="openai">OpenAI / 兼容流式纠错</option>
+              </select>
+              <div className="text-[10px] text-zinc-500">
+                {draft.routing.liveCorrectionProvider === 'local_only'
+                  ? '仅使用本地识别原文，不请求云端'
+                  : hasProviderCredentials(draft, draft.routing.liveCorrectionProvider)
+                  ? '已配置对应 API Key，流式纠错就绪'
                   : '⚠️ 尚未填写该平台 API Key'}
               </div>
             </div>
