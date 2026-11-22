@@ -3,6 +3,8 @@ import {
   BarChart3,
   BookOpen,
   Download,
+  Eye,
+  EyeOff,
   MessageCircleQuestion,
   PanelRightClose,
   Plus,
@@ -116,6 +118,7 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
   };
   const [cutSpeakerFilter, setCutSpeakerFilter] = useState<string>('all');
   const [cutSearchQuery, setCutSearchQuery] = useState<string>('');
+  const [showSummaryApiKey, setShowSummaryApiKey] = useState(false);
   const speakerTracks = useMemo(
     () =>
       state.tracks.some((t) => !t.isRef)
@@ -1679,24 +1682,38 @@ export const RightAiWorkbench: React.FC<RightAiWorkbenchProps> = React.memo(({
             <p className="text-zinc-300 leading-relaxed">{liveSummaryText}</p>
             <div className="pt-2 border-t border-zinc-800/80 flex items-center gap-1.5">
               <span className="text-[11px] text-zinc-400 shrink-0">DeepSeek Key:</span>
-              <input
-                type="password"
-                value={state.llmConfig.apiKey}
-                onChange={(e) =>
-                  onUpdateState((p) => ({
-                    ...p,
-                    llmConfig: {
-                      ...p.llmConfig,
-                      provider: 'deepseek',
-                      baseUrl: 'https://api.deepseek.com/v1',
-                      model: 'deepseek-chat',
-                      apiKey: e.target.value,
-                    },
-                  }))
-                }
-                placeholder="输入 DeepSeek API Key (sk-...) 生成节目概要"
-                className="flex-1 min-w-0 px-2 py-1 rounded border border-zinc-800 bg-zinc-900 text-[11px] text-zinc-100"
-              />
+              <div className="relative flex-1 min-w-0 flex items-center">
+                <input
+                  type={showSummaryApiKey ? 'text' : 'password'}
+                  value={state.llmConfig.apiKey}
+                  onChange={(e) =>
+                    onUpdateState((p) => ({
+                      ...p,
+                      llmConfig: {
+                        ...p.llmConfig,
+                        provider: 'deepseek',
+                        baseUrl: 'https://api.deepseek.com/v1',
+                        model: 'deepseek-chat',
+                        apiKey: e.target.value,
+                      },
+                    }))
+                  }
+                  placeholder="输入 DeepSeek API Key (sk-...) 生成节目概要"
+                  className="w-full pl-2 pr-7 py-1 rounded border border-zinc-800 bg-zinc-900 text-[11px] text-zinc-100"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSummaryApiKey((v) => !v)}
+                  title={showSummaryApiKey ? '隐藏 API Key' : '显示 API Key'}
+                  className="absolute right-1 p-0.5 rounded text-zinc-400 hover:text-zinc-100 cursor-pointer"
+                >
+                  {showSummaryApiKey ? (
+                    <EyeOff className="w-3 h-3" />
+                  ) : (
+                    <Eye className="w-3 h-3" />
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 

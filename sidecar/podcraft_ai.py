@@ -2843,12 +2843,43 @@ def local_analyze_fallback(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_local_ai_config_file() -> Dict[str, Any]:
+    try:
+        cfg_path = os.path.expanduser("~/.tapwave/ai_config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
 def resolve_effective_llm_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     llm_cfg = dict(payload.get("llmConfig") or {})
     asr_cfg = payload.get("asrConfig") or {}
 
+    if llm_cfg.get("forceLocalOnly") or llm_cfg.get("provider") == "local_only":
+        return {"provider": "local_only", "apiKey": "", "forceLocalOnly": True}
+
     if (llm_cfg.get("apiKey") or "").strip():
         return llm_cfg
+
+    # Try local ~/.tapwave/ai_config.json for the requested provider
+    local_cfg = _load_local_ai_config_file()
+    local_providers = local_cfg.get("providers") if isinstance(local_cfg.get("providers"), dict) else {}
+    req_provider = str(llm_cfg.get("provider") or "").strip()
+    if req_provider in ("deepseek", "gemini", "openai") and isinstance(local_providers.get(req_provider), dict):
+        p_cfg = local_providers[req_provider]
+        p_key = str(p_cfg.get("apiKey") or "").strip()
+        if p_key:
+            return {
+                "provider": req_provider,
+                "apiKey": p_key,
+                "baseUrl": p_cfg.get("llmBaseUrl") or p_cfg.get("baseUrl") or llm_cfg.get("baseUrl") or "",
+                "model": p_cfg.get("model") or llm_cfg.get("model") or "",
+            }
 
     asr_key = (asr_cfg.get("apiKey") or "").strip()
     if asr_key and asr_cfg.get("provider") == "deepseek":

@@ -15,6 +15,10 @@ import {
   setNativeAudioServerPort,
 } from '../data/emptyProject';
 import { SidecarTrackTranscribeDto } from './transcriptBuilder';
+import {
+  buildLlmConfigForFeature,
+  getCachedAiPlatformConfig,
+} from './aiPlatformConfig';
 
 export function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -385,6 +389,15 @@ export async function runPythonSidecarTranscribe(
 export async function runPythonSidecarAnalysis(
   state: PodcastProjectState
 ): Promise<Record<string, unknown> | null> {
+  const platformCfg = getCachedAiPlatformConfig();
+  const routedLlm = platformCfg
+    ? buildLlmConfigForFeature(platformCfg, 'transcript_analysis', state.llmConfig)
+    : state.llmConfig;
+  const effectiveLlm =
+    ('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly) ||
+    routedLlm.apiKey.trim()
+      ? routedLlm
+      : state.llmConfig;
   const payload = {
     command: 'analyze_transcript',
     tracks: state.tracks,
@@ -394,7 +407,7 @@ export async function runPythonSidecarAnalysis(
       maxClipSec: state.maxClipSec,
       targetTotalSec: state.targetTotalHighlightSec,
     },
-    llmConfig: state.llmConfig,
+    llmConfig: effectiveLlm,
     asrConfig: {
       provider: state.asrConfig?.provider,
       apiKey: state.asrConfig?.apiKey,
@@ -449,13 +462,22 @@ export async function runPythonSidecarShownotes(
   chapters: Array<{ timeSec: number; timeLabel: string; title: string }>,
   contentSegments?: ContentSegmentInput[]
 ): Promise<{ engine: string; shownotes: SidecarShownotesPayload | null } | null> {
+  const platformCfg = getCachedAiPlatformConfig();
+  const routedLlm = platformCfg
+    ? buildLlmConfigForFeature(platformCfg, 'shownotes_generate', state.llmConfig)
+    : state.llmConfig;
+  const effectiveLlm =
+    ('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly) ||
+    routedLlm.apiKey.trim()
+      ? routedLlm
+      : state.llmConfig;
   const payload = {
     command: 'generate_shownotes',
     projectTitle: state.projectTitle,
     tracks: state.tracks.map((t) => ({ id: t.id, name: t.name, role: t.role })),
     chapters,
     contentSegments: contentSegments ?? [],
-    llmConfig: state.llmConfig,
+    llmConfig: effectiveLlm,
     asrConfig: {
       provider: state.asrConfig?.provider,
       apiKey: state.asrConfig?.apiKey,

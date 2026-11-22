@@ -17,6 +17,7 @@ import {
   History,
   Home,
   Keyboard,
+  KeyRound,
   Library,
   LocateFixed,
   Music,
@@ -88,6 +89,8 @@ interface TopStudioBarProps {
   onOpenGlobalAuxLibrary?: (slot?: AuxAudioSlot) => void;
   onOpenIntroEditor?: () => void;
   onOpenDepGuide?: () => void;
+  onOpenAiPlatform?: () => void;
+  aiConfiguredCount?: number;
   onImportBgm?: (slot: AuxAudioSlot) => void;
   onToggleBgmEnabled?: (slot: AuxAudioSlot) => void;
   onRemoveBgm?: (slot: AuxAudioSlot) => void;
@@ -138,6 +141,8 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
   onOpenGlobalAuxLibrary,
   onOpenIntroEditor,
   onOpenDepGuide,
+  onOpenAiPlatform,
+  aiConfiguredCount = 0,
   onImportBgm,
   onToggleBgmEnabled,
   onRemoveBgm,
@@ -1061,7 +1066,23 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                     内容交付与系统环境
                   </div>
 
-                  {onOpenShownotes && (
+                  {onOpenAiPlatform && (
+          <button
+            onClick={onOpenAiPlatform}
+            title="打开 AI 配置平台：设置各平台 API Key、切换功能项引擎（仅存本地文件）"
+            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+          >
+            <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+            <span>AI 配置</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                aiConfiguredCount > 0 ? 'bg-emerald-400' : 'bg-zinc-500'
+              }`}
+            />
+          </button>
+        )}
+
+        {onOpenShownotes && (
                     <button
                       type="button"
                       disabled={!hasContent}
@@ -1074,6 +1095,25 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
                       <span className="flex items-center gap-2">
                         <FileText className="w-3.5 h-3.5 text-amber-400" />
                         <span>生成 Shownotes</span>
+                      </span>
+                    </button>
+                  )}
+
+                  {onOpenAiPlatform && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onOpenAiPlatform();
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-emerald-500/15 text-emerald-200 flex items-center justify-between cursor-pointer transition"
+                    >
+                      <span className="flex items-center gap-2">
+                        <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>AI 配置平台 (Key 与功能切换)</span>
+                      </span>
+                      <span className="text-[10px] text-emerald-400/80">
+                        {aiConfiguredCount > 0 ? `${aiConfiguredCount} 个已配` : '设置 →'}
                       </span>
                     </button>
                   )}
@@ -1287,6 +1327,22 @@ export const TopStudioBar: React.FC<TopStudioBarProps> = React.memo(({
             ))}
           </select>
         </div>
+
+        {onOpenAiPlatform && (
+          <button
+            onClick={onOpenAiPlatform}
+            title="打开 AI 配置平台：设置各平台 API Key、切换功能项引擎（仅存本地文件）"
+            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+          >
+            <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+            <span>AI 配置</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                aiConfiguredCount > 0 ? 'bg-emerald-400' : 'bg-zinc-500'
+              }`}
+            />
+          </button>
+        )}
 
         {onOpenShownotes && (
           <button

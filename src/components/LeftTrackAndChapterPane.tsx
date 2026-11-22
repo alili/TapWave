@@ -144,7 +144,7 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
   const speakerMap = Object.fromEntries(state.tracks.map((t) => [t.id, t]));
 
   return (
-    <aside className="w-full bg-zinc-900/70 p-3 flex flex-col gap-3 overflow-y-auto h-full min-h-0 select-none">
+    <aside className="w-full bg-zinc-900/70 p-3 flex flex-col gap-3 overflow-y-auto overflow-x-hidden h-full min-h-0 select-none">
       {/* ==================== 1. 当前导入的文件与音轨 ==================== */}
       <div>
         <div className="flex items-center justify-between gap-1.5 mb-2">
@@ -463,15 +463,6 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
           </button>
 
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={onAiAutoFillHighlights}
-              disabled={state.blocks.length === 0}
-              title="按声学能量与时长约束自动提炼高光金句"
-              className="px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-40 border border-purple-500/30 text-[11px] text-purple-300 font-medium flex items-center gap-1 cursor-pointer disabled:cursor-default transition"
-            >
-              <Sparkles className="w-3 h-3" />
-              <span>AI提炼</span>
-            </button>
             {state.highlights.length > 0 && (
               <button
                 onClick={onCopyQuotes}
@@ -496,25 +487,11 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
           const highlightPct = Math.min(100, (highlightSectionTotalSec / Math.max(1, targetTotalSec)) * 100);
 
           return (
-            <div className="space-y-3">
+            <div className="space-y-3 min-w-0">
               {/* 片头结构配置与全局挂载 */}
-              <div className="p-3 rounded-lg border border-zinc-800 bg-zinc-950/85 space-y-2.5 text-[11px]">
+              <div className="p-3 rounded-lg border border-zinc-800 bg-zinc-950/85 space-y-2.5 text-[11px] min-w-0">
                 <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 pb-2">
-                  <div className="flex items-center gap-1.5 font-semibold text-zinc-100">
-                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                    <span>片头高光与金句编排</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {onOpenIntroEditor && (
-                      <button
-                        type="button"
-                        onClick={onOpenIntroEditor}
-                        className="px-2 py-0.5 rounded bg-purple-600/20 hover:bg-purple-600/35 border border-purple-500/40 text-purple-200 text-[10px] font-semibold cursor-pointer"
-                      >
-                        片头编辑器
-                      </button>
-                    )}
-                    <label className="flex items-center gap-1.5 text-zinc-300 font-medium cursor-pointer hover:text-white transition">
+                  <label className="flex items-center gap-1.5 text-zinc-200 font-medium cursor-pointer hover:text-white transition">
                     <input
                       type="checkbox"
                       checked={state.coldOpenEnabled}
@@ -523,9 +500,17 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                       }
                       className="rounded accent-purple-500"
                     />
-                      <span>挂载至片头 (00:00)</span>
-                    </label>
-                  </div>
+                    <span>挂载至片头 (00:00)</span>
+                  </label>
+                  {onOpenIntroEditor && (
+                    <button
+                      type="button"
+                      onClick={onOpenIntroEditor}
+                      className="px-2 py-0.5 rounded bg-purple-600/20 hover:bg-purple-600/35 border border-purple-500/40 text-purple-200 text-[10px] font-semibold cursor-pointer shrink-0"
+                    >
+                      片头编辑器
+                    </button>
+                  )}
                 </div>
 
                 {/* 片头时间线结构时序示意 */}
@@ -543,16 +528,16 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                           总片头: {totalIntroSec.toFixed(1)}s
                         </span>
                       </div>
-                      <div className="flex items-center gap-1 overflow-x-auto text-[10px] pb-0.5">
-                        <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap shrink-0">
+                      <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap">
                           ① BGM前导 2.0s
                         </span>
                         <span className="text-zinc-600">→</span>
-                        <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/35 font-semibold whitespace-nowrap shrink-0">
+                        <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-500/35 font-semibold whitespace-nowrap">
                           ② 金句整段闪避 {highlightSectionTotalSec.toFixed(1)}s
                         </span>
                         <span className="text-zinc-600">→</span>
-                        <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${
+                        <span className={`px-1.5 py-0.5 rounded border whitespace-nowrap ${
                           state.introVoiceover?.enabled
                             ? 'bg-amber-500/20 text-amber-300 border-amber-500/35 font-semibold'
                             : 'bg-zinc-800/60 text-zinc-500 border-zinc-700/50'
@@ -560,13 +545,9 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                           ③ 固定口播 ({state.introVoiceover?.enabled ? `@${voStart.toFixed(1)}s` : '未开启'})
                         </span>
                         <span className="text-zinc-600">→</span>
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 whitespace-nowrap shrink-0">
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">
                           ④ 正片多轨
                         </span>
-                      </div>
-                      <div className="text-[10px] text-purple-300/80 bg-purple-950/30 px-1.5 py-0.5 rounded flex items-center gap-1">
-                        <Sparkles className="w-2.5 h-2.5 text-purple-400 shrink-0" />
-                        <span>金句整段闪避：金句区间全程稳压 BGM，不因句间呼吸或停顿回弹抽吸</span>
                       </div>
                     </div>
                   );
@@ -574,10 +555,10 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
 
                 {/* 1. 金句部分总时长设置 */}
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-zinc-300 font-medium">金句部分总时长 (目标)</span>
-                    <span className="font-mono text-zinc-400">
-                      人声 <span className="text-purple-300 font-semibold">{pureVoiceSec.toFixed(1)}s</span> + 间隔 <span className="text-blue-300 font-semibold">{totalGapsSec.toFixed(1)}s</span> = <span className="text-zinc-100 font-bold">{highlightSectionTotalSec.toFixed(1)}s</span> / {targetTotalSec}s
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-zinc-300 font-medium shrink-0">金句总时长</span>
+                    <span className="font-mono text-zinc-400 truncate">
+                      {pureVoiceSec.toFixed(1)}s + {totalGapsSec.toFixed(1)}s = <span className="text-zinc-100 font-bold">{highlightSectionTotalSec.toFixed(1)}s</span> / {targetTotalSec}s
                     </span>
                   </div>
 
@@ -598,7 +579,7 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                         {presetSec}s
                       </button>
                     ))}
-                    <div className="w-20 shrink-0">
+                    <div className="w-16 shrink-0">
                       <input
                         type="number"
                         value={targetTotalSec}
@@ -610,8 +591,8 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                             targetTotalHighlightSec: Number(e.target.value) || 30,
                           }))
                         }
-                        className="w-full px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-100 font-mono text-[11px] text-center"
-                        title="自定义金句部分总时长（秒）"
+                        className="w-full px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-100 font-mono text-[11px] text-center"
+                        title="自定义金句总时长（秒）"
                       />
                     </div>
                   </div>
@@ -630,95 +611,9 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                   </div>
                 </div>
 
-                {/* 2. 单句金句时长范围设置 (默认 8s-20s，支持自行设置) */}
-                <div className="space-y-1.5 p-2 rounded bg-zinc-900/60 border border-zinc-800/80">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-zinc-300 font-medium">单句金句时长范围</span>
-                    <span className="font-mono text-purple-300 font-semibold text-[10px]">
-                      {state.minClipSec ?? 8}s ~ {state.maxClipSec ?? 20}s (当前)
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    {[
-                      { label: '8s~20s (推荐)', min: 8, max: 20 },
-                      { label: '5s~15s (短篇)', min: 5, max: 15 },
-                      { label: '10s~30s (展开)', min: 10, max: 30 },
-                    ].map((preset) => {
-                      const isActive =
-                        (state.minClipSec ?? 8) === preset.min &&
-                        (state.maxClipSec ?? 20) === preset.max;
-                      return (
-                        <button
-                          key={preset.label}
-                          type="button"
-                          onClick={() =>
-                            onUpdateState((p) => ({
-                              ...p,
-                              minClipSec: preset.min,
-                              maxClipSec: preset.max,
-                            }))
-                          }
-                          className={`flex-1 py-1 rounded text-[10px] font-medium border transition cursor-pointer ${
-                            isActive
-                              ? 'bg-purple-600/30 text-purple-200 border-purple-500/60 font-semibold'
-                              : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-700 hover:text-zinc-200'
-                          }`}
-                        >
-                          {preset.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* 自定义数值调整 */}
-                  <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-0.5">
-                    <span>自定义范围:</span>
-                    <div className="flex items-center gap-1.5">
-                      <div className="flex items-center gap-1">
-                        <span>最少</span>
-                        <input
-                          type="number"
-                          value={state.minClipSec ?? 8}
-                          min={2}
-                          max={Math.max(3, (state.maxClipSec ?? 20) - 1)}
-                          onChange={(e) =>
-                            onUpdateState((p) => ({
-                              ...p,
-                              minClipSec: Math.max(1, Number(e.target.value) || 8),
-                            }))
-                          }
-                          className="w-12 px-1 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-100 font-mono text-[11px] text-center"
-                          title="单句最小时长（秒）"
-                        />
-                        <span>s</span>
-                      </div>
-                      <span>~</span>
-                      <div className="flex items-center gap-1">
-                        <span>最多</span>
-                        <input
-                          type="number"
-                          value={state.maxClipSec ?? 20}
-                          min={(state.minClipSec ?? 8) + 1}
-                          max={60}
-                          onChange={(e) =>
-                            onUpdateState((p) => ({
-                              ...p,
-                              maxClipSec: Math.max((p.minClipSec ?? 8) + 1, Number(e.target.value) || 20),
-                            }))
-                          }
-                          className="w-12 px-1 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-zinc-100 font-mono text-[11px] text-center"
-                          title="单句最大时长（秒）"
-                        />
-                        <span>s</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. 自动设置金句间的间隔 */}
+                {/* 2. 自动设置金句间的间隔 */}
                 <div className="p-2 rounded bg-zinc-900/60 border border-zinc-800/80 space-y-1.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <label className="flex items-center gap-1.5 text-zinc-200 font-medium cursor-pointer">
                       <input
                         type="checkbox"
@@ -730,18 +625,14 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
                       />
                       <span>自动均分金句间间隔</span>
                     </label>
-                    <span className="font-mono text-[10px] text-purple-300 bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/25">
+                    <span className="font-mono text-[10px] text-purple-300 bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/25 shrink-0">
                       {state.autoHighlightGap !== false
-                        ? `自动均分: ${effectiveGapSec.toFixed(2)}s/处`
-                        : `固定间隔: ${(state.highlightGapSec ?? 0.8).toFixed(1)}s`}
+                        ? `${effectiveGapSec.toFixed(2)}s/处`
+                        : `${(state.highlightGapSec ?? 0.8).toFixed(1)}s`}
                     </span>
                   </div>
 
-                  {state.autoHighlightGap !== false ? (
-                    <p className="text-[10px] text-zinc-500 leading-tight">
-                      系统已根据目标总长 {targetTotalSec}s 与金句人声实际时长 ({pureVoiceSec.toFixed(1)}s)，自动平衡计算每两句间的呼吸停顿与转场垫音（共 {gapsCount} 处）。
-                    </p>
-                  ) : (
+                  {state.autoHighlightGap === false && (
                     <div className="flex items-center gap-2 pt-1">
                       <input
                         type="range"
@@ -767,15 +658,11 @@ export const LeftTrackAndChapterPane: React.FC<LeftTrackAndChapterPaneProps> = R
 
               {/* 金句序列列表（精确记录起止时间段） */}
               {state.highlights.length === 0 ? (
-                <div className="p-3.5 rounded-lg border border-dashed border-zinc-800 text-xs text-zinc-500 text-center leading-relaxed bg-zinc-950/40">
-                  当前尚无金句。可在文稿选中文字点击「加入金句」、在波形框选高光，或点击上方「AI提炼」提取本期爆点金句！
+                <div className="p-3 rounded-lg border border-dashed border-zinc-800 text-xs text-zinc-500 text-center bg-zinc-950/40">
+                  暂无金句，可在文稿划选或波形框选「加入金句」
                 </div>
               ) : (
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px] px-1 text-zinc-400">
-                    <span>已选金句序列 ({state.highlights.length} 条)</span>
-                    <span className="text-[10px]">点击条目试听定位</span>
-                  </div>
+                <div className="space-y-1.5 min-w-0">
 
                   {state.highlights.map((hl, idx) => {
                     const spColor = speakerMap[hl.speakerId]?.color ?? '#a855f7';

@@ -345,6 +345,56 @@ async fn read_subtitle_bytes(file_path: String) -> Result<Vec<u8>, String> {
     .map_err(|e| e.to_string())?
 }
 
+fn resolve_local_ai_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(home) = get_user_home_dir() {
+        return Ok(home.join(".tapwave").join("ai_config.json"));
+    }
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("ai_config.json"))
+        .map_err(|e| format!("无法确定本地 AI 配置文件目录: {}", e))
+}
+
+#[tauri::command]
+async fn get_local_ai_config_path(app: AppHandle) -> Result<String, String> {
+    let path = resolve_local_ai_config_path(&app)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn load_local_ai_config(app: AppHandle) -> Result<String, String> {
+    let path = resolve_local_ai_config_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if !path.exists() {
+            return Ok("{}".to_string());
+        }
+        fs::read_to_string(&path)
+            .map_err(|e| format!("读取本地 AI 配置文件失败 ({}): {}", path.display(), e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_local_ai_config(app: AppHandle, config_json: String) -> Result<String, String> {
+    let path = resolve_local_ai_config_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+        }
+        fs::write(&path, config_json.as_bytes())
+            .map_err(|e| format!("保存本地 AI 配置文件失败 ({}): {}", path.display(), e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn cancel_ai_sidecar() -> Result<bool, String> {
     if let Ok(mut guard) = get_sidecar_child_pid_lock().lock() {
@@ -1611,6 +1661,9 @@ pub fn run() {
             set_custom_models_dir,
             get_pending_open_file,
             register_file_association,
+            get_local_ai_config_path,
+            load_local_ai_config,
+            save_local_ai_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PodCraft Studio Tauri application");

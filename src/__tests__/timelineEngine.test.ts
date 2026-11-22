@@ -2447,9 +2447,30 @@ describe('PodCraft Clean Workspace, Project Persistence & Timeline Engine', () =
     const tlAfterGap = computeEditedTimeline(afterGapState);
     expect(tlAfterGap.totalEditedDurationSec).toBeCloseTo(2.4, 2);
     const t2AfterGap = tlAfterGap.mappedTokens.find((m) => m.tokenId === 't2');
-    expect(t2AfterGap?.token.gapBeforeSec).toBeCloseTo(0.1, 3);
+    expect(t2AfterGap?.token.gapBeforeSec).toBeCloseTo(0.05, 3);
     expect(t2AfterGap?.editedStartSec).toBeCloseTo(0.5, 3);
     expect(t2AfterGap?.editedEndSec).toBeCloseTo(1.0, 3);
+
+    // Fidelity check: played source intervals must cover [0, 0.45] and [0.65, 2.60] without leaking (0.45, 0.65)
+    const mergedGapSources: Array<[number, number]> = [];
+    for (const sp of [...tlAfterGap.playbackSpans].sort((a, b) => a.sourceStartSec - b.sourceStartSec)) {
+      const prev = mergedGapSources[mergedGapSources.length - 1];
+      if (!prev || sp.sourceStartSec > prev[1] + 0.001) {
+        mergedGapSources.push([sp.sourceStartSec, sp.sourceEndSec]);
+      } else {
+        prev[1] = Math.max(prev[1], sp.sourceEndSec);
+      }
+    }
+    expect(mergedGapSources).toHaveLength(2);
+    expect(mergedGapSources[0][0]).toBeCloseTo(0, 3);
+    expect(mergedGapSources[0][1]).toBeCloseTo(0.45, 3);
+    expect(mergedGapSources[1][0]).toBeCloseTo(0.65, 3);
+    expect(mergedGapSources[1][1]).toBeCloseTo(2.6, 3);
+    const leakedCutOverlap = mergedGapSources.reduce(
+      (sum, [s, e]) => sum + Math.max(0, Math.min(e, 0.65) - Math.max(s, 0.45)),
+      0
+    );
+    expect(leakedCutOverlap).toBeLessThanOrEqual(0.005);
 
     const edlAfterGap = buildEdlKeepSegments(afterGapState);
     const edlDurMs = edlAfterGap.reduce((acc, s) => acc + (s.sourceEndMs - s.sourceStartMs), 0);

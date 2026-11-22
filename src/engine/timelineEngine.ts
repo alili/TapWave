@@ -1356,7 +1356,7 @@ export function applyWaveformSelectionToBlocks(
         if (marginLeftSec >= minSplitMargin && marginRightSec >= minSplitMargin && ovDur >= minSplitCut) {
           splitSeq++;
           const baseSrcStartMs = Math.round(mapped.effectiveSourceStartSec * 1000);
-          const tokSrcEndMs = baseSrcStartMs + Math.round(tok.durationSec * 1000);
+          const tokSrcEndMs = baseSrcStartMs + Math.round(mappedDur * 1000);
           const rawCutStartMs = baseSrcStartMs + Math.round(marginLeftSec * 1000);
           const rawCutEndMs = baseSrcStartMs + Math.round((ovEnd - mapped.editedStartSec) * 1000);
           const cutStartMs =
@@ -1570,6 +1570,43 @@ export function applyWaveformSelectionToBlocks(
       }
       return total;
     };
+    const mapEditedRangeToSourcePieces = (
+      a: number,
+      b: number
+    ): Array<{ srcStartMs: number; durSec: number }> => {
+      const out: Array<{ srcStartMs: number; durSec: number }> = [];
+      for (const sp of timeline.playbackSpans) {
+        if (sp.editedEndSec <= a) continue;
+        if (sp.editedStartSec >= b) break;
+        const s = Math.max(a, sp.editedStartSec);
+        const e = Math.min(b, sp.editedEndSec);
+        if (e - s >= 0.01) {
+          out.push({
+            srcStartMs: Math.round((sp.sourceStartSec + (s - sp.editedStartSec)) * 1000),
+            durSec: Number((e - s).toFixed(3)),
+          });
+        }
+      }
+      return out;
+    };
+    const keptSubIntervals = (gs: number, ge: number): Array<{ s: number; e: number }> => {
+      if (ge <= gs + 0.002) return [];
+      const res: Array<{ s: number; e: number }> = [];
+      let cur = gs;
+      for (const r of mergedRemoved) {
+        if (r.e <= cur + 0.0005) continue;
+        if (r.s >= ge - 0.0005) break;
+        if (r.s > cur + 0.002) {
+          res.push({ s: cur, e: Math.min(ge, r.s) });
+        }
+        cur = Math.max(cur, r.e);
+        if (cur >= ge - 0.002) break;
+      }
+      if (ge - cur > 0.002) {
+        res.push({ s: cur, e: ge });
+      }
+      return res;
+    };
 
     let prevKept: TranscriptToken | null = null;
     let sawNewlyDeletedBetween = false;
@@ -1619,7 +1656,43 @@ export function applyWaveformSelectionToBlocks(
                   maxSrcMs = Math.max(maxSrcMs, gapEndSrcMs);
                 }
               }
-              blk.tokens[tIdx] = { ...tok, gapBeforeSec: keptGapSec };
+              const gs = oldPrev.editedEndSec;
+              const ge = oldCurr.editedStartSec;
+              const kept = keptSubIntervals(gs, ge);
+              const lastKept = kept[kept.length - 1];
+              const hasContiguousTail =
+                !!lastKept &&
+                Math.abs(lastKept.e - ge) <= 0.002 &&
+                !leadingTrimmedIds.has(tok.id);
+              const tailGapSec = hasContiguousTail
+                ? Number((lastKept.e - lastKept.s).toFixed(3))
+                : 0;
+              const nonTailKept = hasContiguousTail ? kept.slice(0, -1) : kept;
+              if (nonTailKept.length === 0) {
+                blk.tokens[tIdx] = { ...tok, gapBeforeSec: keptGapSec };
+              } else {
+                const inserted: TranscriptToken[] = [];
+                for (const iv of nonTailKept) {
+                  for (const piece of mapEditedRangeToSourcePieces(iv.s, iv.e)) {
+                    splitSeq++;
+                    inserted.push({
+                      id: `${tok.id}__gapkeep_${splitSeq}`,
+                      type: 'silence',
+                      text: '',
+                      sourceStartMs: piece.srcStartMs,
+                      sourceEndMs: piece.srcStartMs + Math.round(piece.durSec * 1000),
+                      durationSec: piece.durSec,
+                      origDurationSec: piece.durSec,
+                      gapBeforeSec: 0,
+                    });
+                  }
+                }
+                blk.tokens[tIdx] = { ...tok, gapBeforeSec: tailGapSec };
+                if (inserted.length > 0) {
+                  blk.tokens.splice(tIdx, 0, ...inserted);
+                  tIdx += inserted.length;
+                }
+              }
             }
           }
         } else if (typeof tok.gapBeforeSec === 'number' && tok.gapBeforeSec > 0) {

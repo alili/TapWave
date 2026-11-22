@@ -111,6 +111,15 @@ import {
   getDependenciesStatus,
 } from './engine/tauriBridge';
 import { DependencyGuideModal } from './components/DependencyGuideModal';
+import { AiConfigPlatformModal } from './components/AiConfigPlatformModal';
+import {
+  AiPlatformConfig,
+  applyPlatformConfigToProjectState,
+  countConfiguredProviders,
+  createDefaultAiPlatformConfig,
+  loadAiPlatformConfigLocal,
+  saveAiPlatformConfigLocal,
+} from './engine/aiPlatformConfig';
 import { RetranscribeConfirmModal } from './components/RetranscribeConfirmModal';
 import {
   AsrConfig,
@@ -293,6 +302,12 @@ export const App: React.FC = () => {
   const [retranscribeModalOpen, setRetranscribeModalOpen] = useState(false);
   const isRetranscribeAbortedRef = useRef(false);
   const [depGuideModalOpen, setDepGuideModalOpen] = useState(false);
+  const [aiPlatformModalOpen, setAiPlatformModalOpen] = useState(false);
+  const [aiPlatformConfig, setAiPlatformConfig] = useState<AiPlatformConfig>(() =>
+    createDefaultAiPlatformConfig()
+  );
+  const aiPlatformConfigRef = useRef<AiPlatformConfig>(aiPlatformConfig);
+  aiPlatformConfigRef.current = aiPlatformConfig;
   const [globalEditingHighlight, setGlobalEditingHighlight] = useState<HighlightClip | null>(null);
   const [introEditorOpen, setIntroEditorOpen] = useState(false);
   const [shortcutsModalOpen, setShortcutsModalOpen] = useState(false);
@@ -1208,6 +1223,7 @@ export const App: React.FC = () => {
       importModalOpen ||
       retranscribeModalOpen ||
       depGuideModalOpen ||
+      aiPlatformModalOpen ||
       subtitleModalOpen ||
       auxLibraryModal.open ||
       loadingProgress.active ||
@@ -1372,6 +1388,32 @@ export const App: React.FC = () => {
     };
   }, [handleGlobalKeyDown]);
 
+  // ==================== Local AI Platform Config (~/.tapwave/ai_config.json) ====================
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAiPlatformConfigLocal().then((cfg) => {
+      if (cancelled) return;
+      setAiPlatformConfig(cfg);
+      aiPlatformConfigRef.current = cfg;
+      setState((prev) => applyPlatformConfigToProjectState(prev, cfg));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSaveAiPlatformConfig = useCallback(
+    async (nextConfig: AiPlatformConfig) => {
+      const { path, config: saved } = await saveAiPlatformConfigLocal(nextConfig);
+      setAiPlatformConfig(saved);
+      aiPlatformConfigRef.current = saved;
+      setState((prev) => applyPlatformConfigToProjectState(prev, saved));
+      notify(`🔐 AI 配置已保存到本地文件 (${path})，绝不会随工程上传`);
+    },
+    [notify]
+  );
+
   // ==================== Project File Management (New / Open / Save / Save As) ====================
 
   const applyLoadedProject = useCallback(
@@ -1393,7 +1435,7 @@ export const App: React.FC = () => {
       audioPreview.requestSeek();
       setSelectedIds(new Set());
       clearUndoHistory();
-      setState(loaded);
+      setState(applyPlatformConfigToProjectState(loaded, aiPlatformConfigRef.current));
       setIsDirty(false);
       if (clampedTarget > 0) {
         notify(
@@ -4142,6 +4184,8 @@ export const App: React.FC = () => {
         onOpenShortcuts={() => setShortcutsModalOpen(true)}
         onOpenGlobalAuxLibrary={(slot) => setAuxLibraryModal({ open: true, slot: slot || 'intro' })}
         onOpenDepGuide={() => setDepGuideModalOpen(true)}
+        onOpenAiPlatform={() => setAiPlatformModalOpen(true)}
+        aiConfiguredCount={countConfiguredProviders(aiPlatformConfig)}
         onImportBgm={stableImportBgm}
         onToggleBgmEnabled={stableToggleBgmEnabled}
         onRemoveBgm={stableRemoveBgm}
@@ -4709,6 +4753,14 @@ export const App: React.FC = () => {
         state={state}
         onUpdateState={mutateProject}
         onNotify={notify}
+      />
+
+      <AiConfigPlatformModal
+        open={aiPlatformModalOpen}
+        config={aiPlatformConfig}
+        onClose={() => setAiPlatformModalOpen(false)}
+        onSaveConfig={handleSaveAiPlatformConfig}
+        onOpenDepGuide={() => setDepGuideModalOpen(true)}
       />
 
       <SmartCutConfirmModal
