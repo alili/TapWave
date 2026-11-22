@@ -1,4 +1,5 @@
 import { GlossaryItem, SpeakerTrack, TranscriptBlock } from '../types/podcast';
+import { isSentenceFinalModalA } from './fillerRules';
 import { extractGenuineQuestionsFromTurn } from './questionAnalysis';
 import { formatMmSs, MappedTokenTimeline, OverlapTimelineRegion } from './timelineEngine';
 
@@ -208,7 +209,8 @@ export function computeSpeakerRadarProfiles(
     let bText = '';
     const bWords: AtomBlock['words'] = [];
 
-    for (const t of b.tokens) {
+    for (let ti = 0; ti < b.tokens.length; ti++) {
+      const t = b.tokens[ti];
       if (t.deleted) continue;
       if (t.type === 'silence') continue;
       if (t.type === 'word' || t.type === 'laughter') {
@@ -220,7 +222,9 @@ export function computeSpeakerRadarProfiles(
           bWords.push({
             text: t.text,
             sec: t.durationSec,
-            isFiller: t.fillerTag === 'pure' || glossaryHabitWords.has(t.text.trim()),
+            isFiller:
+              (t.fillerTag === 'pure' || glossaryHabitWords.has(t.text.trim())) &&
+              !isSentenceFinalModalA(b.tokens, ti),
             timeSec: tTime,
           });
           bText += t.text;

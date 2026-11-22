@@ -63,7 +63,6 @@ import {
   PlaybackSpan,
   projectSourceRangesMsToEditedRatios,
   resolveColdOpenClipWindows,
-  resolveEditedPlayheadToSource,
   resolveEffectiveHighlightGapSec,
   snapRangeToWordGaps,
   TimelineComputation,
@@ -81,7 +80,7 @@ import {
   TrackAcousticCalibration,
 } from '../engine/waveformEnvelopeLoader';
 import { PLAYBACK_RATES } from './TopStudioBar';
-import { audioPreview } from '../engine/audioPreviewEngine';
+import { audioPreview, resolveEditedPlayheadToSource } from '../engine/audioPreviewEngine';
 import { computeHoverScrubRate, TimelineScrubSample } from '../engine/timelineScrubSpeed';
 
 interface SpeakerDeckTurn {
@@ -1393,6 +1392,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   onMuteTrackSelected,
   onBleepSelected,
   onAddSelectedToHighlight,
+  onUpdateHighlight,
   onShortenSilence,
   onDeleteTokenIds,
   onMuteTokenIds,
@@ -1651,16 +1651,31 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   const [outroTrimDragging, setOutroTrimDragging] = useState<boolean>(false);
   const [draftOutroDurationSec, setDraftOutroDurationSec] = useState<number | null>(null);
   const outroTrimActiveRef = useRef<boolean>(false);
-  type HoverZoneType = 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge';
+  type HoverZoneType =
+    | 'none'
+    | 'playhead'
+    | 'ruler'
+    | 'outro_trim_handle'
+    | 'cut_badge'
+    | 'highlight_left'
+    | 'highlight_right'
+    | 'highlight_move';
   const hoverZoneRef = useRef<HoverZoneType>('none');
   const syncCanvasCursor = useCallback(
     (zone: HoverZoneType, isPlayheadDrag = false, isOutroDrag = false) => {
       const c = canvasRef.current;
       if (!c) return;
-      if (isPlayheadDrag || zone === 'playhead') {
+      if (
+        isPlayheadDrag ||
+        zone === 'playhead' ||
+        zone === 'highlight_left' ||
+        zone === 'highlight_right'
+      ) {
         c.style.cursor = 'ew-resize';
       } else if (isOutroDrag || zone === 'outro_trim_handle') {
         c.style.cursor = 'col-resize';
+      } else if (zone === 'highlight_move') {
+        c.style.cursor = highlightDragRef.current ? 'grabbing' : 'grab';
       } else if (zone === 'ruler' || zone === 'cut_badge') {
         c.style.cursor = 'pointer';
       } else {
@@ -1679,6 +1694,23 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     [playheadDragging, outroTrimDragging, syncCanvasCursor]
   );
   const cutBadgeHitBoxesRef = useRef<Array<{ x1: number; y1: number; x2: number; y2: number; editedSec: number }>>([]);
+  const highlightEdgeHitBoxesRef = useRef<Array<{ highlightId: string; x0: number; x1: number }>>([]);
+  const highlightBadgeHitBoxesRef = useRef<Array<{ highlightId: string; x1: number; y1: number; x2: number; y2: number }>>([]);
+  const hoveredHighlightIdRef = useRef<string | null>(null);
+  const highlightDragRef = useRef<{
+    highlight: HighlightClip;
+    mode: 'left' | 'right' | 'move';
+    origStartMs: number;
+    origEndMs: number;
+    grabOffsetMs: number;
+  } | null>(null);
+  const draftHighlightEditRef = useRef<{
+    highlightId: string;
+    sourceStartMs: number;
+    sourceEndMs: number;
+    startRatio: number;
+    endRatio: number;
+  } | null>(null);
   const scrubHoverTooltipRef = useRef<HTMLDivElement | null>(null);
   const hoverRatioRef = useRef<number | null>(null);
   const overlayDrawRafRef = useRef<number | null>(null);
@@ -1760,6 +1792,24 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       const next = !prev;
       try {
         localStorage.setItem('podcraft_show_cut_markers', String(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+  const [showHighlightZones, setShowHighlightZones] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('podcraft_show_highlight_zones') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const toggleShowHighlightZones = useCallback(() => {
+    setShowHighlightZones((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('podcraft_show_highlight_zones', String(next));
       } catch {
         // Ignore storage errors
       }
@@ -2608,6 +2658,29 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       );
     });
 
+    const highlightZones: Array<{
+      highlight: HighlightClip;
+      index: number;
+      startRatio: number;
+      endRatio: number;
+    }> = [];
+    (state.highlights ?? []).forEach((hl, idx) => {
+      if (hl.sourceEndMs <= hl.sourceStartMs) return;
+      const projected = projectSourceRangesMsToEditedRatios(
+        timeline,
+        [{ sourceStartMs: hl.sourceStartMs, sourceEndMs: hl.sourceEndMs }],
+        totalSec
+      );
+      if (projected.length > 0) {
+        highlightZones.push({
+          highlight: hl,
+          index: idx,
+          startRatio: projected[0].startRatio,
+          endRatio: projected[projected.length - 1].endRatio,
+        });
+      }
+    });
+
     return {
       rawBySpeaker: sortedRawBySpeaker,
       coldClipsBySpeaker: sortedColdBySpeaker,
@@ -2619,6 +2692,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       allOverlapZones,
       secondaryOverlapsBySpeaker,
       mutedRangesBySpeaker,
+      highlightZones,
     };
   }, [state.coldOpenEnabled, state.highlights, state.trackMuteRanges, timeline, totalSec]);
 
@@ -4666,6 +4740,113 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.fillRect(0, hoverYTop, W, hoverH);
     }
 
+    // 5a. Golden Quote / Highlight Zones (toggleable gold background + draggable edges & badge)
+    highlightEdgeHitBoxesRef.current = [];
+    highlightBadgeHitBoxesRef.current = [];
+    if (showHighlightZones && timelineZones.highlightZones.length > 0) {
+      const draftHl = draftHighlightEditRef.current;
+      for (const hz of timelineZones.highlightZones) {
+        const isDraggingThis = draftHl?.highlightId === hz.highlight.id;
+        const r1 = isDraggingThis ? draftHl.startRatio : hz.startRatio;
+        const r2 = isDraggingThis ? draftHl.endRatio : hz.endRatio;
+        if (r2 <= r1) continue;
+
+        const rawX0 = ratioToX(r1);
+        const rawX1 = ratioToX(r2);
+        if (r1 >= viewStartRatio - 0.01 && r2 <= viewEndRatio + 0.01) {
+          highlightEdgeHitBoxesRef.current.push({
+            highlightId: hz.highlight.id,
+            x0: rawX0,
+            x1: rawX1,
+          });
+        } else if (r2 >= viewStartRatio && r1 <= viewEndRatio) {
+          highlightEdgeHitBoxesRef.current.push({
+            highlightId: hz.highlight.id,
+            x0: rawX0,
+            x1: rawX1,
+          });
+        }
+
+        if (r2 < viewStartRatio || r1 > viewEndRatio) continue;
+
+        const hx0 = Math.max(0, rawX0);
+        const hx1 = Math.min(W, rawX1);
+        const hw = Math.max(4, hx1 - hx0);
+        const isHoveredThis = hoveredHighlightIdRef.current === hz.highlight.id;
+        const isActive = isDraggingThis || isHoveredThis;
+
+        ctx.save();
+        // Gold translucent background
+        ctx.fillStyle = isActive ? 'rgba(251, 191, 36, 0.22)' : 'rgba(251, 191, 36, 0.13)';
+        ctx.fillRect(hx0, RULER_H, hw, BODY_H);
+
+        // Top & bottom gold borders
+        ctx.strokeStyle = isActive ? 'rgba(252, 211, 77, 0.9)' : 'rgba(251, 191, 36, 0.55)';
+        ctx.lineWidth = isActive ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(hx0, RULER_H + 0.75);
+        ctx.lineTo(hx1, RULER_H + 0.75);
+        ctx.moveTo(hx0, H - 0.75);
+        ctx.lineTo(hx1, H - 0.75);
+        ctx.stroke();
+
+        // Left & right edge drag handles
+        const handleMidY = RULER_H + BODY_H * 0.5;
+        const drawEdgeHandle = (edgeX: number) => {
+          const ex = Math.max(1, Math.min(W - 1, edgeX));
+          ctx.fillStyle = isActive ? '#fde68a' : '#fbbf24';
+          ctx.fillRect(ex - 1, RULER_H, 2, BODY_H);
+          ctx.beginPath();
+          ctx.roundRect(ex - 2.5, handleMidY - 10, 5, 20, 2.5);
+          ctx.fill();
+          ctx.strokeStyle = '#78350f';
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        };
+        if (r1 >= viewStartRatio && rawX0 >= -4 && rawX0 <= W + 4) {
+          drawEdgeHandle(rawX0);
+        }
+        if (r2 <= viewEndRatio && rawX1 >= -4 && rawX1 <= W + 4) {
+          drawEdgeHandle(rawX1);
+        }
+
+        // Top gold badge pill (also draggable to move the whole highlight window)
+        const activeStartMs = isDraggingThis ? draftHl.sourceStartMs : hz.highlight.sourceStartMs;
+        const activeEndMs = isDraggingThis ? draftHl.sourceEndMs : hz.highlight.sourceEndMs;
+        const durText = `${((activeEndMs - activeStartMs) / 1000).toFixed(1)}s`;
+        const badgeLabel =
+          hw >= 88
+            ? `⭐ 金句${hz.index + 1} · ${durText}`
+            : `⭐ 金句${hz.index + 1}`;
+        ctx.font = '600 9.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+        ctx.textBaseline = 'middle';
+        const btw = ctx.measureText(badgeLabel).width;
+        const badgeW = btw + 10;
+        if (hw >= 28 && hx0 + badgeW <= W - 2) {
+          const badgeX = hx0 + 4;
+          const badgeY = RULER_H + 3;
+          const badgeH = 15;
+          ctx.fillStyle = isActive ? 'rgba(180, 83, 9, 0.95)' : 'rgba(146, 64, 14, 0.86)';
+          ctx.beginPath();
+          ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3.5);
+          ctx.fill();
+          ctx.strokeStyle = isActive ? 'rgba(253, 224, 71, 0.9)' : 'rgba(251, 191, 36, 0.65)';
+          ctx.lineWidth = 0.9;
+          ctx.stroke();
+          ctx.fillStyle = '#fef3c7';
+          ctx.fillText(badgeLabel, badgeX + 5, badgeY + badgeH / 2 + 0.5);
+          highlightBadgeHitBoxesRef.current.push({
+            highlightId: hz.highlight.id,
+            x1: badgeX,
+            y1: badgeY,
+            x2: badgeX + badgeW,
+            y2: badgeY + badgeH,
+          });
+        }
+        ctx.restore();
+      }
+    }
+
     // 5b. Active / Focused Speaker-Block Lane Highlight
     if (activeDeckFocusSpan && totalSec > 0) {
       const fr1 = Math.max(0, Math.min(1, activeDeckFocusSpan.startSec / totalSec));
@@ -4979,6 +5160,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     playheadDragging,
     outroTrimDragging,
     draftOutroDurationSec,
+    showHighlightZones,
     isMainStage,
     focusedTurn,
     focusedBlockOverlay,
@@ -5053,11 +5235,30 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     localY: number,
     rectWidth: number,
     rectHeight: number
-  ): 'none' | 'playhead' | 'ruler' | 'outro_trim_handle' | 'cut_badge' => {
+  ): HoverZoneType => {
+    hoveredHighlightIdRef.current = null;
     if ((showCutMarkers || cutOverviewActive) && cutBadgeHitBoxesRef.current.length > 0) {
       for (const box of cutBadgeHitBoxesRef.current) {
         if (localX >= box.x1 && localX <= box.x2 && localY >= box.y1 && localY <= box.y2) {
           return 'cut_badge';
+        }
+      }
+    }
+    if (showHighlightZones && localY > rulerHeightPx) {
+      for (const box of highlightBadgeHitBoxesRef.current) {
+        if (localX >= box.x1 && localX <= box.x2 && localY >= box.y1 && localY <= box.y2) {
+          hoveredHighlightIdRef.current = box.highlightId;
+          return 'highlight_move';
+        }
+      }
+      for (const edge of highlightEdgeHitBoxesRef.current) {
+        if (Math.abs(localX - edge.x1) <= 6) {
+          hoveredHighlightIdRef.current = edge.highlightId;
+          return 'highlight_right';
+        }
+        if (Math.abs(localX - edge.x0) <= 6) {
+          hoveredHighlightIdRef.current = edge.highlightId;
+          return 'highlight_left';
         }
       }
     }
@@ -6130,6 +6331,24 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
           <button
             type="button"
+            onClick={toggleShowHighlightZones}
+            title={
+              showHighlightZones
+                ? '点击隐藏波形上的金句金色高亮标定选区（可拖拽左右边缘或顶部标签调整范围）'
+                : '点击显示波形上的金句金色高亮标定选区'
+            }
+            className={`px-2 py-0.5 rounded-md border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition ${
+              showHighlightZones
+                ? 'bg-amber-400/20 border-amber-400/55 text-amber-200 hover:bg-amber-400/30'
+                : 'bg-zinc-900 border-zinc-700/80 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>金句标定{state.highlights.length > 0 ? ` (${state.highlights.length})` : ''}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setHoverScrubEnabled((prev) => {
                 const next = !prev;
@@ -6876,6 +7095,48 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 return;
               }
 
+              if (
+                (zone === 'highlight_left' ||
+                  zone === 'highlight_right' ||
+                  zone === 'highlight_move') &&
+                hoveredHighlightIdRef.current
+              ) {
+                const hz = timelineZones.highlightZones.find(
+                  (z) => z.highlight.id === hoveredHighlightIdRef.current
+                );
+                if (hz) {
+                  const dragSec = Math.max(0, Math.min(totalSec, ratio * totalSec));
+                  const resolved = resolveEditedPlayheadToSource(state, timeline, dragSec);
+                  const cursorMs =
+                    resolved.sourceSec !== null
+                      ? Math.round(resolved.sourceSec * 1000)
+                      : hz.highlight.sourceStartMs;
+                  const mode =
+                    zone === 'highlight_left'
+                      ? 'left'
+                      : zone === 'highlight_right'
+                      ? 'right'
+                      : 'move';
+                  highlightDragRef.current = {
+                    highlight: hz.highlight,
+                    mode,
+                    origStartMs: hz.highlight.sourceStartMs,
+                    origEndMs: hz.highlight.sourceEndMs,
+                    grabOffsetMs: cursorMs - hz.highlight.sourceStartMs,
+                  };
+                  draftHighlightEditRef.current = {
+                    highlightId: hz.highlight.id,
+                    sourceStartMs: hz.highlight.sourceStartMs,
+                    sourceEndMs: hz.highlight.sourceEndMs,
+                    startRatio: hz.startRatio,
+                    endRatio: hz.endRatio,
+                  };
+                  syncCanvasCursor(zone, false, false);
+                  scheduleOverlayDraw();
+                  return;
+                }
+              }
+
               if (zone === 'playhead' || zone === 'ruler') {
                 setPlayheadDragging(true);
                 onSeekToSec(ratio * totalSec);
@@ -6893,13 +7154,72 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                 e.clientY
               );
               const effectiveRatio =
-                playheadDragging || dragging || outroTrimDragging
+                playheadDragging || dragging || outroTrimDragging || highlightDragRef.current !== null
                   ? resolveDragRatioWithAutoPan(localX, rectWidth, ratio)
                   : ratio;
               hoverRatioRef.current = effectiveRatio;
               notifyHoverSec(effectiveRatio * totalSec);
               setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
               scheduleOverlayDraw();
+
+              if (highlightDragRef.current) {
+                const drag = highlightDragRef.current;
+                const dragSec = Math.max(0, Math.min(totalSec, effectiveRatio * totalSec));
+                const resolved = resolveEditedPlayheadToSource(state, timeline, dragSec);
+                const maxSourceMs = Math.max(
+                  drag.origEndMs,
+                  ...state.tracks.map((t) => t.durationMs || 0),
+                  Math.round(totalSec * 1000)
+                );
+                const cursorMs =
+                  resolved.sourceSec !== null
+                    ? Math.round(resolved.sourceSec * 1000)
+                    : Math.round(
+                        drag.origStartMs +
+                          (effectiveRatio - (draftHighlightEditRef.current?.startRatio ?? effectiveRatio)) *
+                            totalSec *
+                            1000
+                      );
+                let nextStartMs = drag.origStartMs;
+                let nextEndMs = drag.origEndMs;
+                if (drag.mode === 'left') {
+                  nextStartMs = Math.max(0, Math.min(drag.origEndMs - 300, cursorMs));
+                } else if (drag.mode === 'right') {
+                  nextEndMs = Math.max(drag.origStartMs + 300, Math.min(maxSourceMs, cursorMs));
+                } else {
+                  const spanMs = Math.max(300, drag.origEndMs - drag.origStartMs);
+                  nextStartMs = Math.max(
+                    0,
+                    Math.min(maxSourceMs - spanMs, cursorMs - drag.grabOffsetMs)
+                  );
+                  nextEndMs = nextStartMs + spanMs;
+                }
+                const projected = projectSourceRangesMsToEditedRatios(
+                  timeline,
+                  [{ sourceStartMs: nextStartMs, sourceEndMs: nextEndMs }],
+                  totalSec
+                );
+                const fallbackStartRatio =
+                  drag.mode === 'left'
+                    ? Math.min(effectiveRatio, draftHighlightEditRef.current?.endRatio ?? effectiveRatio)
+                    : draftHighlightEditRef.current?.startRatio ?? 0;
+                const fallbackEndRatio =
+                  drag.mode === 'right'
+                    ? Math.max(effectiveRatio, draftHighlightEditRef.current?.startRatio ?? effectiveRatio)
+                    : draftHighlightEditRef.current?.endRatio ?? 1;
+                draftHighlightEditRef.current = {
+                  highlightId: drag.highlight.id,
+                  sourceStartMs: nextStartMs,
+                  sourceEndMs: nextEndMs,
+                  startRatio: projected.length > 0 ? projected[0].startRatio : fallbackStartRatio,
+                  endRatio:
+                    projected.length > 0
+                      ? projected[projected.length - 1].endRatio
+                      : fallbackEndRatio,
+                };
+                scheduleOverlayDraw();
+                return;
+              }
 
               if (outroTrimActiveRef.current) {
                 const dragSec = Math.max(0, Math.min(totalSec, effectiveRatio * totalSec));
@@ -6953,6 +7273,44 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               }
               const { ratio, localX, localY, rectWidth, rectHeight } = extractCanvasPos(e.clientX, e.clientY);
 
+              if (highlightDragRef.current) {
+                const drag = highlightDragRef.current;
+                const draft = draftHighlightEditRef.current;
+                highlightDragRef.current = null;
+                draftHighlightEditRef.current = null;
+                if (
+                  draft &&
+                  (draft.sourceStartMs !== drag.origStartMs || draft.sourceEndMs !== drag.origEndMs)
+                ) {
+                  const matchedText = state.blocks
+                    .flatMap((b) => b.tokens)
+                    .filter(
+                      (t) =>
+                        !t.deleted &&
+                        t.type !== 'silence' &&
+                        t.sourceEndMs > draft.sourceStartMs + 20 &&
+                        t.sourceStartMs < draft.sourceEndMs - 20
+                    )
+                    .map((t) => t.text)
+                    .join('')
+                    .trim();
+                  const updated: HighlightClip = {
+                    ...drag.highlight,
+                    sourceStartMs: draft.sourceStartMs,
+                    sourceEndMs: draft.sourceEndMs,
+                    durationSec: Math.max(
+                      0.1,
+                      Number(((draft.sourceEndMs - draft.sourceStartMs) / 1000).toFixed(2))
+                    ),
+                    text: matchedText || drag.highlight.text,
+                  };
+                  onUpdateHighlight?.(updated);
+                }
+                setHoverZoneFast(detectCanvasHoverZone(localX, localY, rectWidth, rectHeight));
+                scheduleOverlayDraw();
+                return;
+              }
+
               if (outroTrimActiveRef.current) {
                 outroTrimActiveRef.current = false;
                 setOutroTrimDragging(false);
@@ -6999,6 +7357,12 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               if (e.currentTarget.hasPointerCapture(e.pointerId)) {
                 e.currentTarget.releasePointerCapture(e.pointerId);
               }
+              if (highlightDragRef.current) {
+                highlightDragRef.current = null;
+                draftHighlightEditRef.current = null;
+                scheduleOverlayDraw();
+              }
+
               if (outroTrimActiveRef.current) {
                 outroTrimActiveRef.current = false;
                 setOutroTrimDragging(false);

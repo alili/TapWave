@@ -7,6 +7,7 @@ import {
 } from '../types/podcast';
 import { refineProjectBlocksWithWaveform } from '../engine/waveformAligner';
 import { repairMisalignedHighlights } from '../engine/timelineEngine';
+import { demoteSentenceFinalModalAFillers } from '../engine/fillerRules';
 
 let nativeAudioServerPort = 0;
 
@@ -437,10 +438,12 @@ export function parsePodcraftProjectJson(
   };
 
   const effectiveRecordingMode = rawProject.recordingMode ?? base.recordingMode;
-  const refinedBlocks = refineProjectBlocksWithWaveform(
-    rawProject.blocks,
-    rehydratedTracks,
-    effectiveRecordingMode
+  const refinedBlocks = demoteSentenceFinalModalAFillers(
+    refineProjectBlocksWithWaveform(
+      rawProject.blocks,
+      rehydratedTracks,
+      effectiveRecordingMode
+    )
   );
 
   return {

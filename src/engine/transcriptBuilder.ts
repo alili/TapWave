@@ -12,6 +12,7 @@ import {
   isLikelyCrossTrackBleedToken,
   refineProjectBlocksWithWaveform,
 } from './waveformAligner';
+import { demoteSentenceFinalModalAFillers } from './fillerRules';
 
 export interface SidecarRawToken {
   type?: 'word' | 'laughter';
@@ -447,7 +448,7 @@ export function buildTranscriptBlocksFromImportedTracks(
   // Snap every word/laughter token to its exact acoustic onset & offset in track waveform peaks!
   const refinedBlocks = refineProjectBlocksWithWaveform(blocks, speakerTracks, recordingMode);
   const emotionCurve = computeEmotionCurveFromTracks(speakerTracks, refinedBlocks);
-  return { blocks: refinedBlocks, emotionCurve };
+  return { blocks: demoteSentenceFinalModalAFillers(refinedBlocks), emotionCurve };
 }
 
 function sampleTrackWindowEnergy(peaks: number[], r0: number, r1: number): number {
