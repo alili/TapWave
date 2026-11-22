@@ -345,4 +345,104 @@ describe('Multi-Track Playback Continuity & Splice Resilience', () => {
     ).trackElements.get('t_race');
     expect(holder?.audio.paused).toBe(true);
   });
+
+  it('holds visual playhead while <audio> is seeking and locks back onto hardware currentTime immediately once settled', () => {
+    // @ts-expect-error test mock
+    globalThis.window = globalThis;
+
+    class SeekLagAudio {
+      currentTime = 0;
+      duration = 20;
+      paused = true;
+      readyState = 4;
+      ended = false;
+      seeking = false;
+      volume = 1;
+      src = '';
+      playbackRate = 1;
+      preservesPitch = true;
+
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      }
+      pause() {
+        this.paused = true;
+      }
+      load() {}
+      addEventListener() {}
+      removeEventListener() {}
+      removeAttribute() {}
+    }
+    // @ts-expect-error test mock
+    globalThis.Audio = SeekLagAudio;
+
+    const base = createEmptyProjectState();
+    const state = {
+      ...base,
+      tracks: [
+        {
+          id: 't_seek',
+          name: 'Host',
+          role: 'host' as const,
+          roleLabel: '主持人 Host',
+          color: '#3b82f6',
+          filePath: '/path/seek_host.wav',
+          sourceFilePath: '/orig/seek_host.wav',
+          durationMs: 20000,
+          rawLufs: -18,
+          autoGainDb: 0,
+          syncOffsetMs: 0,
+          roomToneStartMs: 0,
+          roomToneEndMs: 500,
+          peaks: [0.1, 0.2],
+          solo: false,
+          muted: false,
+        },
+      ],
+      blocks: [
+        {
+          blockId: 'b_seek',
+          speakerId: 't_seek',
+          chapterTitle: '第一段',
+          tokens: [
+            {
+              id: 'tok_s1',
+              type: 'word' as const,
+              text: 'ContinuousSpeech',
+              sourceStartMs: 0,
+              sourceEndMs: 4000,
+              durationSec: 4,
+              origDurationSec: 4,
+            },
+          ],
+        },
+      ],
+    };
+    const timeline = computeEditedTimeline(state);
+
+    audioPreview.stopAll();
+    audioPreview.startFromUserGesture(state, timeline, 0.5);
+
+    const holder = (
+      audioPreview as unknown as { trackElements: Map<string, { audio: SeekLagAudio }> }
+    ).trackElements.get('t_seek')!;
+    expect(holder).toBeDefined();
+
+    // Simulate browser still seeking across cut splice
+    holder.audio.seeking = true;
+    const held1 = audioPreview.advanceAndSyncPlayback(state, timeline, 0.5, 0.016);
+    expect(held1.nextPlayheadSec).toBe(0.5);
+
+    // Once seek finishes, audio is at 0.52s while playhead is at 0.65s -> should snap to hardware 0.52s
+    holder.audio.seeking = false;
+    holder.audio.currentTime = 0.52;
+    const snapped = audioPreview.advanceAndSyncPlayback(state, timeline, 0.65, 0.016);
+    expect(snapped.nextPlayheadSec).toBe(0.65);
+
+    // And when playhead is behind hardware clock (e.g. hardware at 0.72s while playhead at 0.52s), it catches up immediately
+    holder.audio.currentTime = 0.72;
+    const caughtUp = audioPreview.advanceAndSyncPlayback(state, timeline, 0.52, 0.016);
+    expect(caughtUp.nextPlayheadSec).toBeCloseTo(0.72, 2);
+  });
 });

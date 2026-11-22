@@ -10,12 +10,14 @@ import {
   applyTrackMuteSelectionToProject,
   applyWaveformSelectionToBlocks,
   buildEdlKeepSegments,
+  buildParagraphHintSegments,
   buildVisibleWordTimelineAnnotations,
   coalesceChronologicalBlocks,
   computeEditedTimeline,
   computeAutoScrollViewStartRatio,
   computeWaveformFocusViewport,
   computeWordGapSnapPointsSec,
+  findParagraphHintAtSec,
   isWordTimelineZoom,
   PAGE_SCROLL_LANDING_ANCHOR,
   PLAYHEAD_AUTO_SCROLL_ANCHOR,
@@ -3172,5 +3174,135 @@ describe('PodCraft Clean Workspace, Project Persistence & Timeline Engine', () =
     expect(gapNextTl.totalEditedDurationSec).toBeCloseTo(1.2, 2);
     expect(gapNextTl.playbackSpans[0].sourceStartSec).toBeCloseTo(1.3, 2);
     expect(gapNextTl.playbackSpans[0].sourceEndSec).toBeCloseTo(2.5, 2);
+  });
+
+  it('builds full-paragraph hint segments for <100x timeline band and resolves active/nearest segment by time', () => {
+    const state = createEmptyProjectState();
+    state.tracks = [
+      {
+        id: 'sp_host',
+        name: '主持',
+        role: 'host',
+        roleLabel: '主播',
+        color: '#38bdf8',
+        durationMs: 10000,
+        peaks: new Array(100).fill(0.5),
+        rawLufs: -16,
+        autoGainDb: 0,
+        syncOffsetMs: 0,
+        roomToneStartMs: 0,
+        roomToneEndMs: 0,
+        muted: false,
+        solo: false,
+      },
+      {
+        id: 'sp_guest',
+        name: '嘉宾',
+        role: 'guest',
+        roleLabel: '嘉宾',
+        color: '#a855f7',
+        durationMs: 10000,
+        peaks: new Array(100).fill(0.5),
+        rawLufs: -16,
+        autoGainDb: 0,
+        syncOffsetMs: 0,
+        roomToneStartMs: 0,
+        roomToneEndMs: 0,
+        muted: false,
+        solo: false,
+      },
+    ];
+    state.blocks = [
+      {
+        blockId: 'blk_1',
+        speakerId: 'sp_host',
+        chapterTitle: '开场',
+        tokens: [
+          {
+            id: 'h1',
+            type: 'word',
+            text: '欢迎来到',
+            durationSec: 1.0,
+            origDurationSec: 1.0,
+            sourceStartMs: 0,
+            sourceEndMs: 1000,
+          },
+          {
+            id: 'h2',
+            type: 'word',
+            text: '播客节目。',
+            durationSec: 1.0,
+            origDurationSec: 1.0,
+            sourceStartMs: 1000,
+            sourceEndMs: 2000,
+          },
+        ],
+      },
+      {
+        blockId: 'blk_deleted',
+        speakerId: 'sp_guest',
+        chapterTitle: '开场',
+        tokens: [
+          {
+            id: 'gd1',
+            type: 'word',
+            text: '被删掉的插话',
+            durationSec: 0.5,
+            origDurationSec: 0.5,
+            sourceStartMs: 2000,
+            sourceEndMs: 2500,
+            deleted: true,
+          },
+        ],
+      },
+      {
+        blockId: 'blk_2',
+        speakerId: 'sp_host',
+        chapterTitle: '开场',
+        tokens: [
+          {
+            id: 'h3',
+            type: 'word',
+            text: '今天聊聊AI。',
+            durationSec: 1.2,
+            origDurationSec: 1.2,
+            sourceStartMs: 2500,
+            sourceEndMs: 3700,
+          },
+        ],
+      },
+      {
+        blockId: 'blk_3',
+        speakerId: 'sp_guest',
+        chapterTitle: '正片',
+        tokens: [
+          {
+            id: 'g1',
+            type: 'word',
+            text: '大家好',
+            durationSec: 1.0,
+            origDurationSec: 1.0,
+            sourceStartMs: 4200,
+            sourceEndMs: 5200,
+            gapBeforeSec: 0.5,
+          },
+        ],
+      },
+    ];
+
+    const tl = computeEditedTimeline(state);
+    const segments = buildParagraphHintSegments(state.blocks, tl, state.tracks);
+    expect(segments).toHaveLength(2);
+    expect(segments[0].speakerName).toBe('主持');
+    expect(segments[0].text).toBe('欢迎来到播客节目。今天聊聊AI。');
+    expect(segments[0].startSec).toBeCloseTo(0, 2);
+    expect(segments[0].endSec).toBeCloseTo(3.2, 2);
+
+    expect(segments[1].speakerName).toBe('嘉宾');
+    expect(segments[1].text).toBe('大家好');
+
+    expect(findParagraphHintAtSec(segments, 1.5)?.segment.id).toBe(segments[0].id);
+    expect(findParagraphHintAtSec(segments, 4.0)?.segment.id).toBe(segments[1].id);
+    expect(findParagraphHintAtSec(segments, 12.0)).toBeNull();
   });
 });

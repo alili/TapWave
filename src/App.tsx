@@ -54,9 +54,9 @@ import {
 import {
   applyTrackMuteSelectionToProject,
   applyWaveformSelectionToBlocks,
-  computeEditedTimeline,
   findSourceRangeByHighlightText,
   formatMmSs,
+  getCachedEditedTimeline,
   mapEditedSecToSourceMs,
   remapPlayheadAfterTimelineEdit,
   TimelineComputation,
@@ -551,7 +551,7 @@ export const App: React.FC = () => {
     undoStackRef.current = stack.slice(0, -1);
     setUndoDepth(undoStackRef.current.length);
     const prevTl = timelineRef.current;
-    const nextTl = computeEditedTimeline(prevSnapshot);
+    const nextTl = getCachedEditedTimeline(prevSnapshot);
     const nextSec = remapPlayheadAfterTimelineEdit(prevTl, nextTl, playheadRef.current);
     playheadRef.current = nextSec;
     setPlayheadSec(nextSec);
@@ -565,7 +565,7 @@ export const App: React.FC = () => {
   }, [notify]);
 
   const timeline = useMemo(
-    () => computeEditedTimeline(state),
+    () => getCachedEditedTimeline(state),
     [
       state.coldOpenEnabled,
       state.highlights,
@@ -686,19 +686,22 @@ export const App: React.FC = () => {
   const handleHoverScrubStop = useCallback(() => {
     if (!hoverScrubActiveRef.current) return;
     hoverScrubActiveRef.current = false;
-    const shouldResumePlayback =
-      wasPlayingBeforeHoverScrubRef.current && isPlayingRef.current;
+    const wasPlayingBefore = wasPlayingBeforeHoverScrubRef.current;
     wasPlayingBeforeHoverScrubRef.current = false;
     audioPreview.stopSkim();
     const baseRate = stateRef.current.playbackRate || 1.0;
-    if (shouldResumePlayback) {
-      audioPreview.requestSeek();
-      audioPreview.syncMultiTrackPlayback(
-        stateRef.current,
-        timelineRef.current,
-        playheadRef.current,
-        true
-      );
+    // Note: if playback was started during/after hover scrub (e.g. post-cut preroll autoplay),
+    // never pause or pre-seek back to the old pre-scrub position.
+    if (isPlayingRef.current) {
+      if (wasPlayingBefore) {
+        audioPreview.requestSeek();
+        audioPreview.syncMultiTrackPlayback(
+          stateRef.current,
+          timelineRef.current,
+          playheadRef.current,
+          true
+        );
+      }
       audioPreview.setLivePlaybackRate(baseRate);
     } else {
       audioPreview.pauseMultiTrackPlayback();
@@ -713,7 +716,7 @@ export const App: React.FC = () => {
 
   const applyRemappedPlayhead = useCallback(
     (nextState: PodcastProjectState) => {
-      const nextTl = computeEditedTimeline(nextState);
+      const nextTl = getCachedEditedTimeline(nextState);
       const nextSec = remapPlayheadAfterTimelineEdit(
         timelineRef.current,
         nextTl,
@@ -849,6 +852,9 @@ export const App: React.FC = () => {
             ? nextState.cutPrerollSec
             : 3.0;
         const prerollSec = Math.max(0, Number((clampedSeam - backSec).toFixed(3)));
+        hoverScrubActiveRef.current = false;
+        wasPlayingBeforeHoverScrubRef.current = false;
+        audioPreview.stopSkim();
         playheadRef.current = prerollSec;
         setPlayheadSec(prerollSec);
         audioPreview.requestSeek();
@@ -861,6 +867,9 @@ export const App: React.FC = () => {
       }
 
       // 若当前正在播放中：
+      hoverScrubActiveRef.current = false;
+      wasPlayingBeforeHoverScrubRef.current = false;
+      audioPreview.stopSkim();
       const isPrerollEnabled = nextState.cutPrerollEnabled ?? true;
       if (!isPrerollEnabled) {
         playheadRef.current = clampedSeam;
@@ -926,6 +935,9 @@ export const App: React.FC = () => {
       setPlayheadSec(0);
       audioPreview.requestSeek();
     }
+    hoverScrubActiveRef.current = false;
+    wasPlayingBeforeHoverScrubRef.current = false;
+    audioPreview.stopSkim();
     isPlayingRef.current = true;
     audioPreview.startFromUserGesture(stateRef.current, timelineRef.current, startSec, notify);
     setIsPlaying(true);
@@ -1010,6 +1022,7 @@ export const App: React.FC = () => {
   }, [
     state.tracks,
     state.proxyEditingEnabled,
+    state.loudnessAligned,
     state.introBgm,
     state.outroBgm,
     state.introVoiceover,
@@ -1365,7 +1378,7 @@ export const App: React.FC = () => {
     (loaded: PodcastProjectState) => {
       audioPreview.stopAll();
       setIsPlaying(false);
-      const targetTl = computeEditedTimeline(loaded);
+      const targetTl = getCachedEditedTimeline(loaded);
       const maxDur = targetTl.totalEditedDurationSec;
       const rawSaved = loaded.savedPlayheadSec ?? 0;
       const targetSec = Math.max(
@@ -2183,7 +2196,7 @@ export const App: React.FC = () => {
         ),
       })),
     };
-    const nextTimeline = computeEditedTimeline(nextState);
+    const nextTimeline = getCachedEditedTimeline(nextState);
     const seamSec = Number.isFinite(earliestStartSec)
       ? earliestStartSec
       : remapPlayheadAfterTimelineEdit(timelineRef.current, nextTimeline, playheadRef.current);
@@ -2220,7 +2233,6 @@ export const App: React.FC = () => {
       }),
       true
     );
-    setSelectedIds(new Set());
     notify('🔇 已对选中片段执行单轨静音填充底噪，多轨总时长保持不变');
   };
 
@@ -3041,7 +3053,7 @@ export const App: React.FC = () => {
 
     const prevTotalSec = timeline.totalEditedDurationSec;
     const nextState: PodcastProjectState = { ...state, blocks: outcome.nextBlocks };
-    const nextTimeline = computeEditedTimeline(nextState);
+    const nextTimeline = getCachedEditedTimeline(nextState);
     const nextTotalSec = nextTimeline.totalEditedDurationSec;
     const removedSec = Math.max(0, Number((prevTotalSec - nextTotalSec).toFixed(3)));
 
@@ -3737,6 +3749,7 @@ export const App: React.FC = () => {
   const stableMuteTrackSelected = useLatestCallback(handleMuteTrackSelected);
   const stableBleepSelected = useLatestCallback(handleBleepSelected);
   const stableAddSelectedToHighlight = useLatestCallback(handleAddSelectedToHighlight);
+  const stableSaveHighlight = useLatestCallback(handleSaveHighlight);
   const stableCancelDuckingSelected = useLatestCallback(handleCancelDuckingSelected);
   const stableRestoreTokens = useLatestCallback((tokenIds: string[]) => {
     const restoreSet = new Set(tokenIds);
@@ -3971,7 +3984,7 @@ export const App: React.FC = () => {
         ),
       })),
     };
-    const nextTimeline = computeEditedTimeline(nextState);
+    const nextTimeline = getCachedEditedTimeline(nextState);
     const seamSec = Number.isFinite(earliestStartSec)
       ? earliestStartSec
       : remapPlayheadAfterTimelineEdit(timelineRef.current, nextTimeline, playheadRef.current);
@@ -4499,6 +4512,7 @@ export const App: React.FC = () => {
             onCancelDuckingSelected={stableCancelDuckingSelected}
             onSetWaveformSelectionMode={stableSetWaveformSelectionMode}
             onUpdateBgmAsset={handleUpdateBgmAsset}
+            onUpdateHighlight={stableSaveHighlight}
             onOpenIntroEditor={stableSwitchToIntroView}
             onNotify={notify}
             cutPoints={allCutPoints}
@@ -4615,6 +4629,7 @@ export const App: React.FC = () => {
           onRenameSpeakerTrack={stableRenameSpeakerTrack}
           onSetWaveformSelectionMode={stableSetWaveformSelectionMode}
           onUpdateBgmAsset={handleUpdateBgmAsset}
+          onUpdateHighlight={stableSaveHighlight}
           onNotify={notify}
           cutPoints={allCutPoints}
           onInspectCutPoint={handleInspectCutPoint}

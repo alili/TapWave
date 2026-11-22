@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { computeHoverScrubRate, HOVER_SCRUB_MAX_RATE, HOVER_SCRUB_MIN_RATE } from '../engine/timelineScrubSpeed';
-import { computePreviewTrackLoudnessScale } from '../engine/audioPreviewEngine';
+import { computePreviewTrackLoudnessScale, resolveProxyGainDb } from '../engine/audioPreviewEngine';
 
 describe('computeHoverScrubRate', () => {
   it('returns 1.0x and direction 0 on initial sample', () => {
@@ -54,5 +54,18 @@ describe('computePreviewTrackLoudnessScale', () => {
 
   it('returns uniform 0.92 when loudnessAligned is disabled', () => {
     expect(computePreviewTrackLoudnessScale(12, [0, 12], false)).toBe(0.92);
+  });
+});
+
+describe('resolveProxyGainDb', () => {
+  it('returns clamped 0.1dB-rounded autoGainDb for non-ref tracks when loudnessAligned is true', () => {
+    expect(resolveProxyGainDb({ autoGainDb: 8.34 }, true)).toBe(8.3);
+    expect(resolveProxyGainDb({ autoGainDb: 22 }, true)).toBe(16);
+    expect(resolveProxyGainDb({ autoGainDb: -20 }, true)).toBe(-12);
+  });
+
+  it('returns 0 for reference tracks or when loudnessAligned is disabled', () => {
+    expect(resolveProxyGainDb({ autoGainDb: 8.5, isRef: true }, true)).toBe(0);
+    expect(resolveProxyGainDb({ autoGainDb: 8.5 }, false)).toBe(0);
   });
 });

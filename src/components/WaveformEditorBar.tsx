@@ -45,21 +45,25 @@ import {
   usePlayheadSec,
 } from '../engine/playheadStore';
 import {
+  buildParagraphHintSegments,
   buildVisibleWordTimelineAnnotations,
   coalesceChronologicalBlocks,
   computeAutoScrollViewStartRatio,
   computeHorizontalDeckCardWidthPx,
   computeWaveformFocusViewport,
   computeWordGapSnapPointsSec,
+  findParagraphHintAtSec,
   formatMmSs,
   isWordTimelineZoom,
   MappedTokenTimeline,
   mergeCompactDeckTurnGroups,
   OverlapTimelineRegion,
+  ParagraphHintSegment,
   PLAYHEAD_AUTO_SCROLL_ANCHOR,
   PlaybackSpan,
   projectSourceRangesMsToEditedRatios,
   resolveColdOpenClipWindows,
+  resolveEditedPlayheadToSource,
   resolveEffectiveHighlightGapSec,
   snapRangeToWordGaps,
   TimelineComputation,
@@ -150,6 +154,7 @@ interface WaveformEditorBarProps {
   onMuteTrackSelected?: () => void;
   onBleepSelected?: () => void;
   onAddSelectedToHighlight?: () => void;
+  onUpdateHighlight?: (updated: HighlightClip) => void;
   onCancelDuckingSelected?: () => void;
   onShortenSilence?: (tokenId: string) => void;
   onDeleteTokenIds?: (tokenIds: string[]) => void;
@@ -638,6 +643,87 @@ const PlayheadTimeText: React.FC<{
     <span ref={spanRef} className={className}>
       {formatMmSs(initEff)}.{Math.floor((initEff % 1) * 10)}
     </span>
+  );
+});
+
+const TopParagraphHintBand: React.FC<{
+  segments: ParagraphHintSegment[];
+  bodyOffsetSec: number;
+  hoverSecListenersRef: React.MutableRefObject<Set<(sec: number | null) => void>>;
+}> = React.memo(({ segments, bodyOffsetSec, hoverSecListenersRef }) => {
+  const hoverSecRef = useRef<number | null>(null);
+  const [hintState, setHintState] = useState<{
+    segment: ParagraphHintSegment | null;
+    isHover: boolean;
+  }>(() => {
+    const init = findParagraphHintAtSec(segments, getPlayheadSec());
+    return { segment: init?.segment ?? null, isHover: false };
+  });
+
+  useEffect(() => {
+    const syncHint = () => {
+      const isHover = hoverSecRef.current !== null;
+      const targetSec = hoverSecRef.current ?? getPlayheadSec();
+      const matched = findParagraphHintAtSec(segments, targetSec);
+      const nextSeg = matched?.segment ?? null;
+      setHintState((prev) => {
+        if (prev.segment?.id === nextSeg?.id && prev.segment?.text === nextSeg?.text && prev.isHover === isHover) {
+          return prev;
+        }
+        return { segment: nextSeg, isHover };
+      });
+    };
+
+    syncHint();
+    const unsubPlayhead = subscribePlayhead(syncHint);
+    const onHoverSec = (sec: number | null) => {
+      hoverSecRef.current = sec;
+      syncHint();
+    };
+    const listeners = hoverSecListenersRef.current;
+    listeners.add(onHoverSec);
+
+    return () => {
+      unsubPlayhead();
+      listeners.delete(onHoverSec);
+    };
+  }, [segments, hoverSecListenersRef]);
+
+  const seg = hintState.segment;
+
+  return (
+    <div
+      style={{ top: '14px', height: '30px' }}
+      className="absolute left-0 right-0 z-10 pointer-events-none bg-[#0c0c11]/95 border-t border-b border-white/[0.08] px-2.5 flex items-center gap-2 overflow-hidden"
+    >
+      {seg ? (
+        <>
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ backgroundColor: seg.speakerColor }}
+          />
+          <span className="text-xs font-semibold text-zinc-300 shrink-0">
+            {seg.speakerName}
+          </span>
+          <span className="text-[11px] font-mono tabular-nums text-zinc-400 shrink-0">
+            {formatMmSs(Math.max(0, seg.startSec - bodyOffsetSec))}–
+            {formatMmSs(Math.max(0, seg.endSec - bodyOffsetSec))}
+          </span>
+          {hintState.isHover && (
+            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/25 text-[10px] text-sky-300 shrink-0 leading-none">
+              悬停
+            </span>
+          )}
+          <span className="text-sm text-zinc-100 truncate min-w-0 flex-1">
+            {seg.text}
+          </span>
+        </>
+      ) : (
+        <span className="text-xs text-zinc-400 truncate">
+          静音 / 空白片段（移动鼠标或播放以查看整段文字提示）
+        </span>
+      )}
+    </div>
   );
 });
 
@@ -1814,7 +1900,19 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   );
   const visibleWindowSec = totalSec / Math.max(1, zoom);
   const wordTimelineMode = isWordTimelineZoom(zoom);
-  const rulerHeightPx = wordTimelineMode ? 38 : 22;
+  const hasLoadedTimeline = timeline.totalEditedDurationSec > 0.01;
+  const paragraphHintSegments = useMemo<ParagraphHintSegment[]>(() => {
+    if (!hasLoadedTimeline) return [];
+    return buildParagraphHintSegments(state.blocks, timeline, speakerTracks);
+  }, [hasLoadedTimeline, state.blocks, timeline, speakerTracks]);
+  const showParagraphHintBand =
+    !wordTimelineMode && hasLoadedTimeline && paragraphHintSegments.length > 0;
+  const hasTwoBandRuler = wordTimelineMode || showParagraphHintBand;
+  const rulerHeightPx = showParagraphHintBand ? 44 : wordTimelineMode ? 38 : 22;
+  const hoverSecListenersRef = useRef<Set<(sec: number | null) => void>>(new Set());
+  const notifyHoverSec = useCallback((sec: number | null) => {
+    hoverSecListenersRef.current.forEach((fn) => fn(sec));
+  }, []);
 
   const visibleWordAnnotations = useMemo<TimelineWordAnnotation[]>(() => {
     if (!wordTimelineMode || canvasMetrics.width <= 0) return [];
@@ -1847,7 +1945,6 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     state.recordingMode,
     hiResEnvelopeRev,
   ]);
-  const hasLoadedTimeline = timeline.totalEditedDurationSec > 0.01;
   const coldOpenPct = hasLoadedTimeline
     ? Math.max(0, Math.min(100, (timeline.coldOpenDurationSec / timeline.totalEditedDurationSec) * 100))
     : 0;
@@ -1872,9 +1969,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       zoom: curZoom,
       viewStartRatio: curStart,
       maxZoom: curMaxZoom,
-      totalSec: curTotalSec,
     } = zoomViewRef.current;
-    const curPlaySec = getEffectivePlayheadSec();
 
     const clampedZoom = Math.max(
       1,
@@ -1888,22 +1983,22 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
     const prevSpan = 1 / curZoom;
     const nextSpan = 1 / clampedZoom;
+    const fallbackAnchor =
+      hoverRatioRef.current !== null ? hoverRatioRef.current : curStart + prevSpan * 0.5;
     const anchor =
       typeof customAnchorRatio === 'number'
         ? Math.max(0, Math.min(1, customAnchorRatio))
-        : Math.max(0, Math.min(1, curPlaySec / curTotalSec));
+        : Math.max(0, Math.min(1, fallbackAnchor));
 
     let nextStart: number;
     if (anchor >= curStart && anchor <= curStart + prevSpan) {
       const fracInView = (anchor - curStart) / prevSpan;
       nextStart = anchor - fracInView * nextSpan;
     } else {
-      nextStart = anchor - nextSpan * PLAYHEAD_AUTO_SCROLL_ANCHOR;
+      nextStart = anchor - nextSpan * 0.5;
     }
     const maxStart = Math.max(0, 1 - nextSpan);
-    if (typeof customAnchorRatio === 'number') {
-      waveformManualPanUntilRef.current = Date.now() + 900;
-    }
+    waveformManualPanUntilRef.current = Date.now() + 900;
     setZoom(clampedZoom);
     setViewStartRatio(Math.max(0, Math.min(maxStart, nextStart)));
   };
@@ -2553,10 +2648,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const RULER_H = rulerHeightPx;
-    const topRulerBandH = wordTimelineMode ? 14 : RULER_H;
-    const topBadgeY = wordTimelineMode ? 1.5 : 3;
-    const topBadgeH = wordTimelineMode ? 11 : RULER_H - 6;
-    const topBadgeCenterY = wordTimelineMode ? 7 : RULER_H / 2 + 0.5;
+    const topRulerBandH = hasTwoBandRuler ? 14 : RULER_H;
+    const topBadgeY = hasTwoBandRuler ? 1.5 : 3;
+    const topBadgeH = hasTwoBandRuler ? 11 : RULER_H - 6;
+    const topBadgeCenterY = hasTwoBandRuler ? 7 : RULER_H / 2 + 0.5;
     const BODY_H = Math.max(1, H - RULER_H);
     // BGM 轨高度紧凑化：不用那么高（固定约 34px），将充足的垂直空间留给人声音轨
     const bgmLaneH = hasBgmTrack ? Math.min(BGM_LANE_COMPACT_H, Math.max(26, Math.round(BODY_H * 0.2))) : 0;
@@ -2595,7 +2690,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     const lastTickIdx = Math.ceil((viewEndRatio * totalSec) / minor);
     const majorMultiple = Math.max(1, Math.round(major / minor));
 
-    ctx.font = wordTimelineMode
+    ctx.font = hasTwoBandRuler
       ? '500 9.5px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
       : '500 10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
     ctx.textBaseline = 'middle';
@@ -2619,14 +2714,14 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         // Major tick on clock ruler band
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.26)';
         ctx.beginPath();
-        ctx.moveTo(x, topRulerBandH - (wordTimelineMode ? 4 : 6));
+        ctx.moveTo(x, topRulerBandH - (hasTwoBandRuler ? 4 : 6));
         ctx.lineTo(x, topRulerBandH);
         ctx.stroke();
 
         const label = formatPrecisionSec(t, decimals);
         if (x + 44 < W) {
           ctx.fillStyle = 'rgba(161, 161, 170, 0.92)';
-          ctx.fillText(label, x + 4, wordTimelineMode ? 7.5 : topRulerBandH / 2 + 0.5);
+          ctx.fillText(label, x + 4, hasTwoBandRuler ? 7.5 : topRulerBandH / 2 + 0.5);
         }
       } else {
         // Fine sub-division gridline when zoomed deeply for millisecond boundary editing
@@ -2641,7 +2736,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(x, topRulerBandH - (wordTimelineMode ? 2.5 : 3.5));
+        ctx.moveTo(x, topRulerBandH - (hasTwoBandRuler ? 2.5 : 3.5));
         ctx.lineTo(x, topRulerBandH);
         ctx.stroke();
       }
@@ -2652,8 +2747,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       const cr = ch.timeSec / totalSec;
       if (cr < viewStartRatio || cr > viewEndRatio) return;
       const cx = ratioToX(cr);
-      const triH = wordTimelineMode ? 3.5 : 4;
-      const triW = wordTimelineMode ? 2.5 : 3;
+      const triH = hasTwoBandRuler ? 3.5 : 4;
+      const triW = hasTwoBandRuler ? 2.5 : 3;
       ctx.fillStyle = ch.isColdOpen ? '#a855f7' : '#3b82f6';
       ctx.beginPath();
       ctx.moveTo(cx, topRulerBandH - 1);
@@ -2663,8 +2758,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.fill();
     });
 
-    // 2b. >=100x Word/Character Annotated Timeline Band (y = 14.5 .. RULER_H)
-    if (wordTimelineMode) {
+    // 2b. >=100x Word/Character Annotated Timeline Band or <100x Paragraph Hint Band (y = 14.5 .. RULER_H)
+    if (hasTwoBandRuler) {
       ctx.fillStyle = '#0c0c11';
       ctx.fillRect(0, topRulerBandH, W, RULER_H - topRulerBandH);
 
@@ -2674,6 +2769,8 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.moveTo(0, topRulerBandH + 0.5);
       ctx.lineTo(W, topRulerBandH + 0.5);
       ctx.stroke();
+    }
+    if (wordTimelineMode) {
 
       const trackColorBySpeaker = new Map(speakerTracks.map((t) => [t.id, t.color]));
       const bandTop = topRulerBandH + 1;
@@ -4049,10 +4146,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
       ctx.fillStyle = 'rgba(180, 83, 9, 0.9)';
       ctx.beginPath();
-      ctx.roundRect(bx0, topBadgeY, Math.max(bw, 42), topBadgeH, wordTimelineMode ? 3 : 3.5);
+      ctx.roundRect(bx0, topBadgeY, Math.max(bw, 42), topBadgeH, hasTwoBandRuler ? 3 : 3.5);
       ctx.fill();
       ctx.fillStyle = '#fef3c7';
-      ctx.font = wordTimelineMode
+      ctx.font = hasTwoBandRuler
         ? '600 8.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif'
         : '600 9.5px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
       ctx.textBaseline = 'middle';
@@ -4077,6 +4174,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     zoom,
     viewStartRatio,
     wordTimelineMode,
+    hasTwoBandRuler,
     rulerHeightPx,
     visibleWordAnnotations,
     showCutMarkers,
@@ -4135,8 +4233,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
   ) => {
     if (!hasValidRange) return;
     onWaveformCutAction(rangeStartSec, rangeEndSec, op, trackIdOverride ?? targetTrack?.id);
-    setSelStartRatio(null);
-    setSelEndRatio(null);
+    if (op !== 'mute_lane') {
+      setSelStartRatio(null);
+      setSelEndRatio(null);
+    }
   };
 
   const isRangeAllFullVolume = useMemo(() => {
@@ -4534,10 +4634,10 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const RULER_H = rulerHeightPx;
-    const topRulerBandH = wordTimelineMode ? 14 : RULER_H;
-    const topBadgeY = wordTimelineMode ? 1 : 3;
-    const topBadgeH = wordTimelineMode ? 12 : RULER_H - 6;
-    const topBadgeCenterY = wordTimelineMode ? 7.2 : RULER_H / 2 + 0.5;
+    const topRulerBandH = hasTwoBandRuler ? 14 : RULER_H;
+    const topBadgeY = hasTwoBandRuler ? 1 : 3;
+    const topBadgeH = hasTwoBandRuler ? 12 : RULER_H - 6;
+    const topBadgeCenterY = hasTwoBandRuler ? 7.2 : RULER_H / 2 + 0.5;
     const BODY_H = Math.max(1, H - RULER_H);
     // BGM 轨高度紧凑化：不用那么高（固定约 34px），将充足的垂直空间留给人声音轨
     const bgmLaneH = hasBgmTrack ? Math.min(BGM_LANE_COMPACT_H, Math.max(26, Math.round(BODY_H * 0.2))) : 0;
@@ -4684,7 +4784,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         const badgeX = Math.max(2, Math.min(W - dtw - 12, sx0 + sw / 2 - (dtw + 10) / 2));
         ctx.fillStyle = '#2563eb';
         ctx.beginPath();
-        ctx.roundRect(badgeX, topBadgeY, dtw + 10, topBadgeH, wordTimelineMode ? 3 : 4);
+        ctx.roundRect(badgeX, topBadgeY, dtw + 10, topBadgeH, hasTwoBandRuler ? 3 : 4);
         ctx.fill();
         ctx.fillStyle = '#ffffff';
         ctx.fillText(durLabel, badgeX + 5, topBadgeCenterY);
@@ -4706,7 +4806,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
         ctx.strokeStyle = 'rgba(34, 211, 238, 0.32)';
         ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(hx, wordTimelineMode ? topRulerBandH - 0.5 : RULER_H);
+        ctx.moveTo(hx, hasTwoBandRuler ? topRulerBandH - 0.5 : RULER_H);
         ctx.lineTo(hx, H);
         ctx.stroke();
 
@@ -4738,7 +4838,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
             : selectionMode === 'free'
               ? `✂ ${baseLabel}`
               : `🧲 ${baseLabel}`;
-      ctx.font = wordTimelineMode
+      ctx.font = hasTwoBandRuler
         ? '500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace'
         : '500 10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textBaseline = 'middle';
@@ -4750,7 +4850,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           ? 'rgba(67, 20, 7, 0.92)'
           : 'rgba(23, 37, 84, 0.92)';
       ctx.beginPath();
-      ctx.roundRect(pillX, topBadgeY, htw + 8, topBadgeH, wordTimelineMode ? 3 : 3.5);
+      ctx.roundRect(pillX, topBadgeY, htw + 8, topBadgeH, hasTwoBandRuler ? 3 : 3.5);
       ctx.fill();
       ctx.strokeStyle = isSkimmingVisual
         ? 'rgba(34, 211, 238, 0.85)'
@@ -4772,7 +4872,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     if (playRatio >= viewStartRatio - 0.002 && playRatio <= viewEndRatio + 0.002) {
       const px = Math.max(0.5, Math.min(W - 0.5, ratioToX(playRatio)));
       const headHighlighted = playheadDragging || hoverZoneRef.current === 'playhead';
-      const lineStartY = wordTimelineMode ? topRulerBandH - 0.5 : RULER_H;
+      const lineStartY = hasTwoBandRuler ? topRulerBandH - 0.5 : RULER_H;
       const isFreeCursor = selectionMode === 'free';
 
       ctx.save();
@@ -4801,7 +4901,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
           : '#38bdf8';
       ctx.lineWidth = headHighlighted ? 2 : 1.5;
       ctx.beginPath();
-      ctx.moveTo(px, wordTimelineMode ? topRulerBandH - 0.5 : RULER_H - 2);
+      ctx.moveTo(px, hasTwoBandRuler ? topRulerBandH - 0.5 : RULER_H - 2);
       ctx.lineTo(px, H);
       ctx.stroke();
       ctx.setLineDash([]);
@@ -4816,18 +4916,18 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
       ctx.beginPath();
       if (isFreeCursor) {
         // Free mode: sharp inverted triangle cap
-        const capHalfW = wordTimelineMode
+        const capHalfW = hasTwoBandRuler
           ? headHighlighted
             ? 6
             : 5
           : headHighlighted
             ? 7
             : 6;
-        const capBottomY = wordTimelineMode ? 13.5 : 18.5;
-        ctx.moveTo(px - capHalfW, wordTimelineMode ? 1 : 2);
-        ctx.lineTo(px + capHalfW, wordTimelineMode ? 1 : 2);
+        const capBottomY = hasTwoBandRuler ? 13.5 : 18.5;
+        ctx.moveTo(px - capHalfW, hasTwoBandRuler ? 1 : 2);
+        ctx.lineTo(px + capHalfW, hasTwoBandRuler ? 1 : 2);
         ctx.lineTo(px, capBottomY);
-      } else if (wordTimelineMode) {
+      } else if (hasTwoBandRuler) {
         const capHalfW = headHighlighted ? 5.5 : 4.5;
         ctx.moveTo(px - capHalfW, 1);
         ctx.lineTo(px + capHalfW, 1);
@@ -4867,6 +4967,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
     zoom,
     viewStartRatio,
     wordTimelineMode,
+    hasTwoBandRuler,
     rulerHeightPx,
     visibleWordAnnotations,
     selectionMode,
@@ -6518,12 +6619,17 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               <span>TRACKS ({speakerTracks.length + (hasBgmTrack ? 1 : 0)})</span>
               <span>48kHz</span>
             </div>
-            {wordTimelineMode && (
+            {wordTimelineMode ? (
               <div className="mt-1 flex items-center justify-between text-[9px] text-sky-300/90 leading-none">
                 <span>字词时间轴</span>
                 <span>{Math.round(zoom)}x</span>
               </div>
-            )}
+            ) : showParagraphHintBand ? (
+              <div className="mt-1 flex items-center justify-between text-[9px] text-emerald-300/90 leading-none">
+                <span>段落提示</span>
+                <span>{zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)}x</span>
+              </div>
+            ) : null}
           </div>
 
           <div className="flex-1 flex flex-col divide-y divide-zinc-800/60 min-h-0">
@@ -6715,6 +6821,13 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
 
         {/* Right Retina HiDPI Canvas Viewport */}
         <div ref={containerRef} className="relative flex-1 h-full min-w-0">
+          {showParagraphHintBand && (
+            <TopParagraphHintBand
+              segments={paragraphHintSegments}
+              bodyOffsetSec={bodyOffsetSec}
+              hoverSecListenersRef={hoverSecListenersRef}
+            />
+          )}
           <canvas
             ref={canvasRef}
             onPointerDown={(e) => {
@@ -6727,6 +6840,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               manualScrollLockUntilRef.current = 0;
               waveformManualPanUntilRef.current = 0;
               hoverRatioRef.current = ratio;
+              notifyHoverSec(ratio * totalSec);
               setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
               setHoverZoneFast(zone);
               scheduleOverlayDraw();
@@ -6783,6 +6897,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
                   ? resolveDragRatioWithAutoPan(localX, rectWidth, ratio)
                   : ratio;
               hoverRatioRef.current = effectiveRatio;
+              notifyHoverSec(effectiveRatio * totalSec);
               setHoverLaneIdx((prev) => (prev === hoveredLaneIdx ? prev : hoveredLaneIdx));
               scheduleOverlayDraw();
 
@@ -6898,6 +7013,7 @@ export const WaveformEditorBar: React.FC<WaveformEditorBarProps> = React.memo(({
               stopHoverScrub();
               if (!playheadDragging && !dragging && !outroTrimActiveRef.current) {
                 hoverRatioRef.current = null;
+                notifyHoverSec(null);
                 scheduleOverlayDraw();
                 setHoverLaneIdx(null);
                 setHoverZoneFast('none');

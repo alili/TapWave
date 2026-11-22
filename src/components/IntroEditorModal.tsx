@@ -835,8 +835,18 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
     const onWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
+        const rect = vp.getBoundingClientRect();
+        const localX = Math.max(0, Math.min(vp.clientWidth, e.clientX - rect.left));
+        const anchorNorm = (vp.scrollLeft + localX) / Math.max(1, vp.scrollWidth);
         const factor = Math.exp(-e.deltaY * 0.008);
-        setZoom((z) => Math.max(1, Math.min(16, Number((z * factor).toFixed(2)))));
+        setZoom((z) => {
+          const nextZoom = Math.max(1, Math.min(MAX_INTRO_ZOOM, Number((z * factor).toFixed(2))));
+          requestAnimationFrame(() => {
+            const totalWidth = vp.clientWidth * nextZoom;
+            vp.scrollLeft = Math.max(0, anchorNorm * totalWidth - localX);
+          });
+          return nextZoom;
+        });
       }
     };
     vp.addEventListener('wheel', onWheel, { passive: false });
@@ -1166,13 +1176,17 @@ export const IntroEditorModal: React.FC<IntroEditorModalProps> = ({
 
   const applyIntroZoom = (nextZoomRaw: number) => {
     const nextZoom = Math.max(1, Math.min(MAX_INTRO_ZOOM, Number(nextZoomRaw.toFixed(2))));
+    const vp = scrollViewportRef.current;
+    const centerNorm = vp
+      ? (vp.scrollLeft + vp.clientWidth * 0.5) / Math.max(1, vp.scrollWidth)
+      : 0.5;
     setZoom(nextZoom);
     requestAnimationFrame(() => {
-      const vp = scrollViewportRef.current;
-      if (!vp) return;
-      const totalWidth = vp.clientWidth * nextZoom;
-      const anchorX = (playheadRef.current / timelineSpanSec) * totalWidth;
-      vp.scrollLeft = Math.max(0, anchorX - vp.clientWidth * 0.5);
+      const curVp = scrollViewportRef.current;
+      if (!curVp) return;
+      const totalWidth = curVp.clientWidth * nextZoom;
+      const anchorX = centerNorm * totalWidth;
+      curVp.scrollLeft = Math.max(0, anchorX - curVp.clientWidth * 0.5);
     });
   };
 

@@ -9,11 +9,13 @@ import {
   HighlightMuteInterval,
   PodcastProjectState,
   SpeakerTrack,
+  TrackMuteRange,
 } from '../types/podcast';
 import {
   computeIntroBgmDuckMultiplier,
   IntroBgmVoiceWindow,
   MappedTokenTimeline,
+  OverlapTimelineRegion,
   PlaybackSpan,
   resolveColdOpenClipWindows,
   resolveEffectiveHighlightGapSec,
@@ -48,30 +50,63 @@ export function computePreviewTrackLoudnessScale(
   return Math.max(0.05, Math.min(1.0, 0.94 * linear));
 }
 
-function appendProxyParamIfEnabled(resolvedUrl: string | undefined, useProxy: boolean): string | undefined {
+function isProxyStreamUrl(resolvedUrl: string | undefined): boolean {
+  return Boolean(
+    resolvedUrl &&
+      (resolvedUrl.startsWith('/api/audio-stream') || resolvedUrl.startsWith('http://127.0.0.1:'))
+  );
+}
+
+export function resolveProxyGainDb(
+  track: Pick<SpeakerTrack, 'autoGainDb' | 'isRef'>,
+  loudnessAligned: boolean
+): number {
+  if (!loudnessAligned || track.isRef) return 0;
+  const clamped = Math.max(-12, Math.min(16, track.autoGainDb || 0));
+  return Number(clamped.toFixed(1));
+}
+
+function appendProxyParamIfEnabled(
+  resolvedUrl: string | undefined,
+  useProxy: boolean,
+  gainDb = 0
+): string | undefined {
   if (!resolvedUrl || !useProxy) return resolvedUrl;
-  if (
-    resolvedUrl.startsWith('/api/audio-stream') ||
-    resolvedUrl.startsWith('http://127.0.0.1:')
-  ) {
-    if (resolvedUrl.includes('proxy=')) return resolvedUrl;
-    return `${resolvedUrl}${resolvedUrl.includes('?') ? '&' : '?'}proxy=1`;
+  if (isProxyStreamUrl(resolvedUrl)) {
+    let out = resolvedUrl;
+    if (!out.includes('proxy=')) {
+      out = `${out}${out.includes('?') ? '&' : '?'}proxy=1`;
+    }
+    if (Math.abs(gainDb) >= 0.05 && !out.includes('gainDb=')) {
+      const safeGain = Math.max(-12, Math.min(16, gainDb)).toFixed(1);
+      out = `${out}&gainDb=${safeGain}`;
+    }
+    return out;
   }
   return resolvedUrl;
 }
 
 const SKIM_CHUNK_DURATION_SEC = 30;
 
-function appendProxyChunkUrl(baseUrl: string | undefined, chunkIdx: number): string | undefined {
+function appendProxyChunkUrl(
+  baseUrl: string | undefined,
+  chunkIdx: number,
+  gainDb = 0
+): string | undefined {
   if (!baseUrl) return undefined;
-  if (
-    baseUrl.startsWith('/api/audio-stream') ||
-    baseUrl.startsWith('http://127.0.0.1:')
-  ) {
-    const withProxy = appendProxyParamIfEnabled(baseUrl, true)!;
+  if (isProxyStreamUrl(baseUrl)) {
+    const withProxy = appendProxyParamIfEnabled(baseUrl, true, gainDb)!;
     return `${withProxy}&chunk=${chunkIdx}`;
   }
   return baseUrl;
+}
+
+function hasServerBakedProxyGain(
+  baseUrl: string | undefined,
+  useProxy: boolean,
+  loudnessAligned: boolean
+): boolean {
+  return Boolean(useProxy && loudnessAligned && isProxyStreamUrl(baseUrl));
 }
 
 function hashSpeakerPitch(speakerId: string): number {
@@ -535,6 +570,185 @@ function selectPlayableTracks(state: PodcastProjectState): SpeakerTrack[] {
   return result;
 }
 
+const muteIndexCache = new WeakMap<
+  TrackMuteRange[],
+  Map<string, { starts: number[]; ends: number[]; maxEndPrefix: number[] }>
+>();
+
+function getMuteIndexMap(
+  ranges: TrackMuteRange[]
+): Map<string, { starts: number[]; ends: number[]; maxEndPrefix: number[] }> {
+  const cached = muteIndexCache.get(ranges);
+  if (cached) return cached;
+  const grouped = new Map<string, TrackMuteRange[]>();
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
+    let list = grouped.get(r.trackId);
+    if (!list) {
+      list = [];
+      grouped.set(r.trackId, list);
+    }
+    list.push(r);
+  }
+  const indexMap = new Map<
+    string,
+    { starts: number[]; ends: number[]; maxEndPrefix: number[] }
+  >();
+  grouped.forEach((list, tid) => {
+    list.sort((a, b) => a.sourceStartMs - b.sourceStartMs);
+    const n = list.length;
+    const starts = new Array<number>(n);
+    const ends = new Array<number>(n);
+    const maxEndPrefix = new Array<number>(n);
+    let runMax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      starts[i] = list[i].sourceStartMs;
+      ends[i] = list[i].sourceEndMs;
+      if (ends[i] > runMax) runMax = ends[i];
+      maxEndPrefix[i] = runMax;
+    }
+    indexMap.set(tid, { starts, ends, maxEndPrefix });
+  });
+  muteIndexCache.set(ranges, indexMap);
+  return indexMap;
+}
+
+/**
+ * Checks whether `ms` falls within any explicit TrackMuteRange for `trackId`
+ * in O(log M) using a WeakMap-cached interval index.
+ */
+export function isSourceMsInTrackMuteRange(
+  ranges: TrackMuteRange[] | undefined,
+  trackId: string,
+  ms: number
+): boolean {
+  if (!ranges || ranges.length === 0) return false;
+  const bucket = getMuteIndexMap(ranges).get(trackId);
+  if (!bucket || bucket.starts.length === 0) return false;
+  const { starts, ends, maxEndPrefix } = bucket;
+  let lo = 0;
+  let hi = starts.length - 1;
+  let startIdx = starts.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (maxEndPrefix[mid] >= ms - 1e-9) {
+      startIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  for (let i = startIdx; i < starts.length; i++) {
+    if (starts[i] > ms + 1e-9) break;
+    if (ms >= starts[i] && ms <= ends[i]) return true;
+  }
+  return false;
+}
+
+const overlapIndexCache = new WeakMap<
+  OverlapTimelineRegion[],
+  Map<
+    string,
+    {
+      entries: Array<{ region: OverlapTimelineRegion; origIdx: number }>;
+      maxEndPrefix: number[];
+    }
+  >
+>();
+
+function getOverlapIndexMap(
+  regions: OverlapTimelineRegion[]
+): Map<
+  string,
+  {
+    entries: Array<{ region: OverlapTimelineRegion; origIdx: number }>;
+    maxEndPrefix: number[];
+  }
+> {
+  const cached = overlapIndexCache.get(regions);
+  if (cached) return cached;
+  const grouped = new Map<
+    string,
+    Array<{ region: OverlapTimelineRegion; origIdx: number }>
+  >();
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    let list = grouped.get(r.secondarySpeakerId);
+    if (!list) {
+      list = [];
+      grouped.set(r.secondarySpeakerId, list);
+    }
+    list.push({ region: r, origIdx: i });
+  }
+  const indexMap = new Map<
+    string,
+    {
+      entries: Array<{ region: OverlapTimelineRegion; origIdx: number }>;
+      maxEndPrefix: number[];
+    }
+  >();
+  grouped.forEach((entries, spId) => {
+    entries.sort(
+      (a, b) => a.region.editedStartSec - b.region.editedStartSec || a.origIdx - b.origIdx
+    );
+    const maxEndPrefix = new Array<number>(entries.length);
+    let runMax = -Infinity;
+    for (let i = 0; i < entries.length; i++) {
+      const end = entries[i].region.editedEndSec;
+      if (end > runMax) runMax = end;
+      maxEndPrefix[i] = runMax;
+    }
+    indexMap.set(spId, { entries, maxEndPrefix });
+  });
+  overlapIndexCache.set(regions, indexMap);
+  return indexMap;
+}
+
+/**
+ * Finds the first OverlapTimelineRegion (in original array order) active for `trackId`
+ * around `playheadSec` in O(log R) via a WeakMap-cached interval index.
+ */
+export function findActiveOverlapForTrack(
+  regions: OverlapTimelineRegion[],
+  trackId: string,
+  playheadSec: number,
+  lead = 0.04,
+  tail = 0.08
+): OverlapTimelineRegion | undefined {
+  if (!regions || regions.length === 0) return undefined;
+  const bucket = getOverlapIndexMap(regions).get(trackId);
+  if (!bucket || bucket.entries.length === 0) return undefined;
+  const { entries, maxEndPrefix } = bucket;
+
+  let lo = 0;
+  let hi = entries.length - 1;
+  let startIdx = entries.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (maxEndPrefix[mid] >= playheadSec - tail - 1e-9) {
+      startIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  let best: { region: OverlapTimelineRegion; origIdx: number } | undefined;
+  for (let i = startIdx; i < entries.length; i++) {
+    const item = entries[i];
+    if (item.region.editedStartSec > playheadSec + lead + 1e-9) break;
+    if (
+      playheadSec >= item.region.editedStartSec - lead &&
+      playheadSec <= item.region.editedEndSec + tail
+    ) {
+      if (!best || item.origIdx < best.origIdx) {
+        best = item;
+      }
+    }
+  }
+  return best?.region;
+}
+
 function pickPrimarySyncTrack(playableTracks: SpeakerTrack[]): SpeakerTrack | undefined {
   let best: SpeakerTrack | undefined;
   for (let i = 0; i < playableTracks.length; i++) {
@@ -652,6 +866,7 @@ class AudioPreviewEngine {
   private wasPlaying = false;
   private playbackGeneration = 0;
   private playStartPerfMs = 0;
+  private seekStallStartPerfMs = 0;
   private lastSpanIndex: number | null = null;
   private lastHeldSpeakerId: string | null = null;
   private speakerHoldUntilPerfMs: Map<string, number> = new Map();
@@ -1640,10 +1855,11 @@ class AudioPreviewEngine {
     }
 
     const useProxy = state.proxyEditingEnabled !== false;
-    this.warmupTrackBuffersForSkim(playable, useProxy);
+    this.warmupTrackBuffersForSkim(playable, useProxy, 0, state.loudnessAligned);
     const rate = state.playbackRate || 1.0;
     for (const tr of playable) {
-      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}`;
+      const proxyGainDb = useProxy ? resolveProxyGainDb(tr, state.loudnessAligned) : 0;
+      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}|gain=${proxyGainDb.toFixed(1)}`;
       const existing = this.trackElements.get(tr.id);
       if (!existing || existing.sourceKey !== sourceKey || existing.failedFatal) {
         if (existing) {
@@ -1652,7 +1868,8 @@ class AudioPreviewEngine {
         }
         const previewAudioUrl = appendProxyParamIfEnabled(
           normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false),
-          useProxy
+          useProxy,
+          proxyGainDb
         );
         const created = this.createManagedHolder(
           previewAudioUrl ?? tr.audioUrl,
@@ -1778,7 +1995,8 @@ class AudioPreviewEngine {
     this.warmupTrackBuffersForSkim(
       playable,
       state.proxyEditingEnabled !== false,
-      mapped.sourceSec ?? 0
+      mapped.sourceSec ?? 0,
+      state.loudnessAligned
     );
     if (mapped.sourceSec !== null && !mapped.inIntroOrGapSilence) {
       for (const tr of playable) {
@@ -1834,6 +2052,7 @@ class AudioPreviewEngine {
     }
     this.forceSeekPending = true;
     this.playStartPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    this.seekStallStartPerfMs = 0;
     this.lastSpanIndex = null;
     this.lastHeldSpeakerId = null;
     this.speakerHoldUntilPerfMs.clear();
@@ -1864,7 +2083,11 @@ class AudioPreviewEngine {
         const trAbsSec = Math.max(0, mapped.sourceSec - effOffset);
         const chunkIdx = Math.max(0, Math.floor(trAbsSec / SKIM_CHUNK_DURATION_SEC));
         const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
-        const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+        const chunkUrl = appendProxyChunkUrl(
+          baseUrl,
+          chunkIdx,
+          resolveProxyGainDb(tr, state.loudnessAligned)
+        );
         if (!chunkUrl || !this.decodedAuxBuffers.has(chunkUrl)) {
           webAudioMainReady = false;
           break;
@@ -2177,6 +2400,7 @@ class AudioPreviewEngine {
     this.playbackGeneration += 1;
     this.wasPlaying = false;
     this.forceSeekPending = true;
+    this.seekStallStartPerfMs = 0;
     this.lastSpanIndex = null;
     this.stopSkim(true);
     this.stopWebAudioMainTracks(true);
@@ -2237,6 +2461,36 @@ class AudioPreviewEngine {
   }
 
   /**
+   * Returns the AudioContext time corresponding to the audio frame currently audible at
+   * the hardware output (compensating for outputLatency + baseLatency so the visual
+   * playhead stays tightly locked to what the listener actually hears).
+   */
+  private getAudibleCtxTime(ctx: AudioContext): number {
+    const rawNow = ctx.currentTime;
+    if (typeof ctx.getOutputTimestamp === 'function') {
+      const ts = ctx.getOutputTimestamp();
+      if (
+        ts &&
+        typeof ts.contextTime === 'number' &&
+        Number.isFinite(ts.contextTime) &&
+        ts.contextTime > 0 &&
+        ts.contextTime <= rawNow &&
+        rawNow - ts.contextTime <= 0.45
+      ) {
+        return ts.contextTime;
+      }
+    }
+    const baseLat =
+      typeof ctx.baseLatency === 'number' && Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
+    const outLat =
+      typeof ctx.outputLatency === 'number' && Number.isFinite(ctx.outputLatency)
+        ? ctx.outputLatency
+        : 0;
+    const clampedLatency = Math.max(0, Math.min(0.45, baseLat + outLat));
+    return Math.max(0, rawNow - clampedLatency);
+  }
+
+  /**
    * Pure Audio-Master Timeline Progression:
    * - In Unified Server Mix mode (all local WAV/MP3/M4A sessions), drives playhead 1:1 from ONE single
    *   sample-accurate 48kHz WAV mix stream (`mixHolder`), eliminating inter-track phase skew, cut seeks, and volume pumping!
@@ -2272,7 +2526,8 @@ class AudioPreviewEngine {
           const preMapped = resolveEditedPlayheadToSource(state, timeline, currentPlayheadSec);
           const webAudioVo = this.activeWebAudioAux.get('intro_vo');
           const webAudioBgm = this.activeWebAudioAux.get('intro_bgm');
-          const ctxNow = this.ctx && this.ctx.state === 'running' ? this.ctx.currentTime : null;
+          const ctxNow =
+            this.ctx && this.ctx.state === 'running' ? this.getAudibleCtxTime(this.ctx) : null;
 
           if (
             state.introVoiceover?.enabled &&
@@ -2287,8 +2542,8 @@ class AudioPreviewEngine {
                 Math.max(0, ctxNow - webAudioVo.startedCtxTime) * webAudioVo.playbackRate;
               if (hwEditedSec >= voStartSec && hwEditedSec <= voEndSec) {
                 const drift = hwEditedSec - nextPlayheadSec;
-                if (Math.abs(drift) > 0.01 && Math.abs(drift) < 0.8) {
-                  nextPlayheadSec = Math.max(currentPlayheadSec, nextPlayheadSec + drift * 0.65);
+                if (Math.abs(drift) > 0.002 && Math.abs(drift) < 0.8) {
+                  nextPlayheadSec = Math.max(currentPlayheadSec, hwEditedSec);
                 }
               }
             } else {
@@ -2318,8 +2573,8 @@ class AudioPreviewEngine {
               Math.max(0, ctxNow - webAudioBgm.startedCtxTime) * webAudioBgm.playbackRate;
             if (hwBgmSec < bufDur - 0.05) {
               const drift = hwBgmSec - nextPlayheadSec;
-              if (Math.abs(drift) > 0.01 && Math.abs(drift) < 0.8) {
-                nextPlayheadSec = Math.max(currentPlayheadSec, nextPlayheadSec + drift * 0.65);
+              if (Math.abs(drift) > 0.002 && Math.abs(drift) < 0.8) {
+                nextPlayheadSec = Math.max(currentPlayheadSec, hwBgmSec);
               }
             }
           } else if (
@@ -2393,7 +2648,7 @@ class AudioPreviewEngine {
           nextPlayheadSec > currentPlayheadSec &&
           this.ctx?.state === 'running'
         ) {
-          const ctxNow = this.ctx.currentTime;
+          const ctxNow = this.getAudibleCtxTime(this.ctx);
           const { span } = spanHit;
           for (const tr of playable) {
             const entry = this.activeWebAudioMainTracks.get(tr.id);
@@ -2406,7 +2661,7 @@ class AudioPreviewEngine {
             const hwSourceSec = entry.chunkIdx * SKIM_CHUNK_DURATION_SEC + hwInChunkSec + effOffset;
             const hwEditedSec = span.editedStartSec + (hwSourceSec - span.sourceStartSec);
             if (
-              hwEditedSec >= span.editedStartSec &&
+              hwEditedSec >= span.editedStartSec - 0.02 &&
               hwEditedSec <= span.editedEndSec &&
               Math.abs(hwEditedSec - nextPlayheadSec) < 0.8
             ) {
@@ -2421,10 +2676,41 @@ class AudioPreviewEngine {
           nextPlayheadSec > currentPlayheadSec
         ) {
           const { span } = spanHit;
+          const anyTrackSeekingOrBuffering = playable.some((t) => {
+            if (t.muted) return false;
+            const h = this.trackElements.get(t.id);
+            return h && !h.failedFatal && !h.audio.paused && (h.audio.seeking || h.audio.readyState < 2);
+          });
+          const hasAnyReadyPlayingTrack = playable.some((t) => {
+            if (t.muted) return false;
+            const h = this.trackElements.get(t.id);
+            return (
+              h &&
+              !h.failedFatal &&
+              !h.audio.paused &&
+              !h.audio.ended &&
+              !h.audio.seeking &&
+              h.audio.readyState >= 2
+            );
+          });
+
+          // If <audio> is actively seeking across a cut splice and no unmuted track is ready yet,
+          // briefly hold the visual playhead (up to 360ms) so cuts never accumulate lead drift.
+          if (!hasAnyReadyPlayingTrack && anyTrackSeekingOrBuffering) {
+            if (this.seekStallStartPerfMs === 0) {
+              this.seekStallStartPerfMs = nowPerf;
+            }
+            if (nowPerf - this.seekStallStartPerfMs < 360) {
+              nextPlayheadSec = currentPlayheadSec;
+            }
+          } else {
+            this.seekStallStartPerfMs = 0;
+          }
+
           const insideSafeBody =
-            currentPlayheadSec >= span.editedStartSec + 0.06 &&
-            currentPlayheadSec <= span.editedEndSec - 0.08;
-          if (insideSafeBody) {
+            currentPlayheadSec >= span.editedStartSec + 0.02 &&
+            currentPlayheadSec <= span.editedEndSec - 0.03;
+          if (insideSafeBody && nextPlayheadSec > currentPlayheadSec) {
             const activeClockTrack = playable
               .filter((t) => {
                 const h = this.trackElements.get(t.id);
@@ -2457,21 +2743,17 @@ class AudioPreviewEngine {
                   const hwEditedSec = span.editedStartSec + sourceOffset;
                   const drift = hwEditedSec - nextPlayheadSec;
                   const rateScale = Math.max(1, playbackRate);
-                  const inStartSettlingWindow = nowPerf - this.playStartPerfMs < 500;
-                  if (Math.abs(drift) > 0.08 * rateScale && Math.abs(drift) < 0.5 * rateScale) {
-                    nextPlayheadSec = Math.max(
-                      currentPlayheadSec + stepSec * 0.8,
-                      Math.min(currentPlayheadSec + stepSec * 1.2, nextPlayheadSec + drift * 0.12)
-                    );
-                  } else if (
-                    !inStartSettlingWindow &&
-                    Math.abs(drift) >= 0.5 * rateScale &&
-                    Math.abs(drift) < 2.0 * rateScale
-                  ) {
-                    nextPlayheadSec =
-                      drift > 0
-                        ? Math.min(span.editedEndSec, nextPlayheadSec + drift * 0.25)
-                        : currentPlayheadSec + stepSec * 0.75;
+                  if (Math.abs(drift) > 0.012 * rateScale && Math.abs(drift) < 1.8 * rateScale) {
+                    if (drift < -0.06 * rateScale) {
+                      nextPlayheadSec = Math.max(currentPlayheadSec, hwEditedSec);
+                    } else if (drift > 0.06 * rateScale) {
+                      nextPlayheadSec = Math.min(span.editedEndSec, hwEditedSec);
+                    } else {
+                      nextPlayheadSec =
+                        drift < 0
+                          ? Math.max(currentPlayheadSec, nextPlayheadSec + drift * 0.75)
+                          : Math.min(span.editedEndSec, nextPlayheadSec + drift * 0.75);
+                    }
                   }
                 }
               }
@@ -2669,11 +2951,12 @@ class AudioPreviewEngine {
           const dominantColdSpeakerId = mapped.activeSpeakerId ?? activeColdHighlight.speakerId;
           const trackRecentlyOrSoonSpeaking =
             (this.speakerHoldUntilPerfMs.get(trackId) ?? 0) > nowPerf;
-          const activeOvForTrack = timeline.overlapRegions.find(
-            (ov) =>
-              ov.secondarySpeakerId === trackId &&
-              playheadSec >= ov.editedStartSec - 0.04 &&
-              playheadSec <= ov.editedEndSec + 0.08
+          const activeOvForTrack = findActiveOverlapForTrack(
+            timeline.overlapRegions,
+            trackId,
+            playheadSec,
+            0.04,
+            0.08
           );
           if (activeOvForTrack?.muted) {
             clipGain = 0.0;
@@ -2776,13 +3059,16 @@ class AudioPreviewEngine {
     this.stopWebAudioMainTracks();
 
     for (const tr of playableTracks) {
-      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}`;
+      const proxyGainDb = useProxy ? resolveProxyGainDb(tr, state.loudnessAligned) : 0;
+      const rawBaseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
+      const sourceKey = `${tr.audioUrl ?? ''}|${tr.filePath ?? ''}|${tr.sourceFilePath ?? ''}|proxy=${useProxy ? 1 : 0}|gain=${proxyGainDb.toFixed(1)}`;
       let holder = this.trackElements.get(tr.id);
       if (!holder || holder.sourceKey !== sourceKey) {
         if (holder) this.disposeHolder(holder);
         const previewAudioUrl = appendProxyParamIfEnabled(
-          normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false),
-          useProxy
+          rawBaseUrl,
+          useProxy,
+          proxyGainDb
         );
         const created = this.createManagedHolder(
           previewAudioUrl ?? tr.audioUrl,
@@ -2842,11 +3128,10 @@ class AudioPreviewEngine {
       }
 
       const masterSrcMs = mapped.sourceSec * 1000;
-      const inExplicitMuteRange = (state.trackMuteRanges ?? []).some(
-        (tm) =>
-          tm.trackId === tr.id &&
-          masterSrcMs >= tm.sourceStartMs &&
-          masterSrcMs <= tm.sourceEndMs
+      const inExplicitMuteRange = isSourceMsInTrackMuteRange(
+        state.trackMuteRanges,
+        tr.id,
+        masterSrcMs
       );
 
       // 金句区间音轨整轨静音与部分静音处理
@@ -2874,21 +3159,24 @@ class AudioPreviewEngine {
         // Explicit manual single-track mute by user
         gain = 0.0;
       } else {
-        gain *= computePreviewTrackLoudnessScale(
-          tr.autoGainDb,
-          playableAutoGainDbs,
-          state.loudnessAligned
-        );
+        gain *= hasServerBakedProxyGain(rawBaseUrl, useProxy, state.loudnessAligned)
+          ? 0.94
+          : computePreviewTrackLoudnessScale(
+              tr.autoGainDb,
+              playableAutoGainDbs,
+              state.loudnessAligned
+            );
 
         // Primary-Speaker Priority Auto-Ducking fallback (only ducks low-level floor noise/bleed; genuine speech on other tracks is left to the editor)
         const trackRecentlyOrSoonSpeaking =
           (this.speakerHoldUntilPerfMs.get(tr.id) ?? 0) > nowPerf;
 
-        const activeOvForTrack = timeline.overlapRegions.find(
-          (ov) =>
-            ov.secondarySpeakerId === tr.id &&
-            playheadSec >= ov.editedStartSec - 0.04 &&
-            playheadSec <= ov.editedEndSec + 0.08
+        const activeOvForTrack = findActiveOverlapForTrack(
+          timeline.overlapRegions,
+          tr.id,
+          playheadSec,
+          0.04,
+          0.08
         );
 
         if (activeOvForTrack?.muted) {
@@ -3067,12 +3355,13 @@ class AudioPreviewEngine {
       const trAbsSec = Math.max(0, sourceSec - effOffset);
       const chunkIdx = Math.max(0, Math.floor(trAbsSec / SKIM_CHUNK_DURATION_SEC));
       const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
-      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+      const proxyGainDb = resolveProxyGainDb(tr, state.loudnessAligned);
+      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx, proxyGainDb);
       if (!chunkUrl || !this.decodedAuxBuffers.has(chunkUrl)) {
         this.preloadDecodedUrl(chunkUrl);
         allReady = false;
       } else if (trAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > preloadTriggerInChunkSec) {
-        this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1));
+        this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1, proxyGainDb));
       }
     }
     if (!allReady) return false;
@@ -3097,7 +3386,8 @@ class AudioPreviewEngine {
       const inChunkSec = targetAbsSec - chunkIdx * SKIM_CHUNK_DURATION_SEC;
 
       const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
-      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+      const proxyGainDb = resolveProxyGainDb(tr, state.loudnessAligned);
+      const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx, proxyGainDb);
       const buf = chunkUrl ? this.decodedAuxBuffers.get(chunkUrl) : undefined;
       if (!buf || inChunkSec < 0 || inChunkSec >= buf.duration - 0.02) {
         const old = this.activeWebAudioMainTracks.get(tr.id);
@@ -3109,28 +3399,30 @@ class AudioPreviewEngine {
       }
 
       // Compute exact track gain (loudness alignment + mute ranges + Auto-Solo ducking)
-      const inExplicitMuteRange = (state.trackMuteRanges ?? []).some(
-        (tm) =>
-          tm.trackId === tr.id &&
-          masterSrcMs >= tm.sourceStartMs &&
-          masterSrcMs <= tm.sourceEndMs
+      const inExplicitMuteRange = isSourceMsInTrackMuteRange(
+        state.trackMuteRanges,
+        tr.id,
+        masterSrcMs
       );
       let gain = 1.0;
       if (inExplicitMuteRange) {
         gain = 0.0;
       } else {
-        gain *= computePreviewTrackLoudnessScale(
-          tr.autoGainDb,
-          playableAutoGainDbs,
-          state.loudnessAligned
-        );
+        gain *= hasServerBakedProxyGain(baseUrl, true, state.loudnessAligned)
+          ? 0.94
+          : computePreviewTrackLoudnessScale(
+              tr.autoGainDb,
+              playableAutoGainDbs,
+              state.loudnessAligned
+            );
         const trackRecentlyOrSoonSpeaking =
           (this.speakerHoldUntilPerfMs.get(tr.id) ?? 0) > nowPerf;
-        const activeOvForTrack = timeline.overlapRegions.find(
-          (ov) =>
-            ov.secondarySpeakerId === tr.id &&
-            playheadSec >= ov.editedStartSec - 0.04 &&
-            playheadSec <= ov.editedEndSec + 0.08
+        const activeOvForTrack = findActiveOverlapForTrack(
+          timeline.overlapRegions,
+          tr.id,
+          playheadSec,
+          0.04,
+          0.08
         );
         if (activeOvForTrack?.muted) {
           gain = 0.0;
@@ -3171,15 +3463,17 @@ class AudioPreviewEngine {
 
       const existing = this.activeWebAudioMainTracks.get(tr.id);
       if (existing) {
+        const audibleNow = this.getAudibleCtxTime(ctx);
+        const inOutputWarmup = audibleNow < existing.startedCtxTime;
         const expectedInChunk =
           existing.startedInChunkSec +
-          Math.max(0, now - existing.startedCtxTime) * existing.playbackRate;
+          Math.max(0, audibleNow - existing.startedCtxTime) * existing.playbackRate;
         const drift = Math.abs(inChunkSec - expectedInChunk);
         const needsResync =
           crossedCutOrScrub ||
           existing.chunkIdx !== chunkIdx ||
           Math.abs(existing.playbackRate - effectiveRate) > 0.015 ||
-          drift > 0.15 * effectiveRate ||
+          (!inOutputWarmup && drift > 0.28 * effectiveRate) ||
           expectedInChunk >= buf.duration - 0.04 * effectiveRate;
         if (!needsResync) {
           existing.gainNode.gain.setTargetAtTime(Math.max(0.0001, gain), now, 0.015);
@@ -3681,13 +3975,22 @@ class AudioPreviewEngine {
   }
 
   /** Pre-decodes the first 30s proxy chunk of each track in the background for instant skimming */
-  public warmupTrackBuffersForSkim(tracks: SpeakerTrack[], useProxy = true, aroundSec = 0): void {
+  public warmupTrackBuffersForSkim(
+    tracks: SpeakerTrack[],
+    useProxy = true,
+    aroundSec = 0,
+    loudnessAligned = true
+  ): void {
     const chunkIdx = Math.max(0, Math.floor(Math.max(0, aroundSec) / SKIM_CHUNK_DURATION_SEC));
     for (const tr of tracks) {
       if (tr.isRef) continue;
       const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
       if (useProxy) {
-        const chunkUrl = appendProxyChunkUrl(baseUrl, chunkIdx);
+        const chunkUrl = appendProxyChunkUrl(
+          baseUrl,
+          chunkIdx,
+          resolveProxyGainDb(tr, loudnessAligned)
+        );
         this.preloadDecodedUrl(chunkUrl);
       } else {
         this.preloadDecodedAuxBuffer(tr.audioUrl, tr.filePath, false);
@@ -3740,13 +4043,14 @@ class AudioPreviewEngine {
       const baseUrl = normalizePlayableAudioUrl(tr.audioUrl, tr.filePath, false);
       const trSec = Math.max(0, mapped.sourceSec - (tr.syncOffsetMs || 0) / 1000);
       const chunkIdx = Math.max(0, Math.floor(trSec / SKIM_CHUNK_DURATION_SEC));
+      const proxyGainDb = resolveProxyGainDb(tr, state.loudnessAligned);
       const url = useProxy
-        ? appendProxyChunkUrl(baseUrl, chunkIdx)
+        ? appendProxyChunkUrl(baseUrl, chunkIdx, proxyGainDb)
         : appendProxyParamIfEnabled(baseUrl, false);
       if (url && this.decodedAuxBuffers.has(url)) {
         anyDecoded = true;
         if (useProxy && trSec - chunkIdx * SKIM_CHUNK_DURATION_SEC > 20) {
-          this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1));
+          this.preloadDecodedUrl(appendProxyChunkUrl(baseUrl, chunkIdx + 1, proxyGainDb));
         }
       } else {
         this.preloadDecodedUrl(url);
@@ -3776,8 +4080,9 @@ class AudioPreviewEngine {
       const targetAbsSec = mapped.sourceSec - (tr.syncOffsetMs || 0) / 1000;
       if (targetAbsSec < 0) continue;
       const chunkIdx = useProxy ? Math.max(0, Math.floor(targetAbsSec / SKIM_CHUNK_DURATION_SEC)) : 0;
+      const proxyGainDb = resolveProxyGainDb(tr, state.loudnessAligned);
       const url = useProxy
-        ? appendProxyChunkUrl(baseUrl, chunkIdx)
+        ? appendProxyChunkUrl(baseUrl, chunkIdx, proxyGainDb)
         : appendProxyParamIfEnabled(baseUrl, false);
       if (!url) continue;
       const buf = this.decodedAuxBuffers.get(url);
@@ -3793,11 +4098,13 @@ class AudioPreviewEngine {
         continue;
       }
 
-      let gain = computePreviewTrackLoudnessScale(
-        tr.autoGainDb,
-        playableAutoGainDbs,
-        state.loudnessAligned
-      );
+      let gain = hasServerBakedProxyGain(baseUrl, useProxy, state.loudnessAligned)
+        ? 0.94
+        : computePreviewTrackLoudnessScale(
+            tr.autoGainDb,
+            playableAutoGainDbs,
+            state.loudnessAligned
+          );
       const skimVocalActivity = sampleNormalizedVocalActivity(
         tr,
         acousticProfiles.get(tr.id),

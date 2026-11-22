@@ -1,12 +1,12 @@
 <div align="center">
   <img src="public/icon.png" alt="点波 TapWave Logo" width="88" height="88" />
-  <h1>点波 TapWave · PodCraft Studio Pro (v2.2.1)</h1>
+  <h1>点波 TapWave · PodCraft Studio Pro (v2.2.2)</h1>
   <p><strong>专为 macOS 打造的多轨 AI 播客精剪、表达教练与全渠道内容衍生桌面工作站</strong></p>
   <p>
     <img src="https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon-09090b?style=flat-square&logo=apple" alt="macOS" />
     <img src="https://img.shields.io/badge/Frontend-React%2019%20%2B%20TypeScript-2563eb?style=flat-square" alt="React 19" />
     <img src="https://img.shields.io/badge/Core-Tauri%20v2%20%2B%20Rust%20DSP-f97316?style=flat-square" alt="Tauri v2" />
-    <img src="https://img.shields.io/badge/Version-v2.2.1-10b981?style=flat-square" alt="v2.2.1" />
+    <img src="https://img.shields.io/badge/Version-v2.2.2-10b981?style=flat-square" alt="v2.2.2" />
   </p>
   <p>
     <a href="#核心能力">核心能力</a> ·

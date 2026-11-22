@@ -702,13 +702,17 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
     Number(Math.exp((Math.max(0, Math.min(1000, val)) / 1000) * Math.log(MAX_OUTRO_ZOOM)).toFixed(2));
   const applyOutroZoom = (nextZoomRaw: number) => {
     const nextZoom = Math.max(1, Math.min(MAX_OUTRO_ZOOM, Number(nextZoomRaw.toFixed(2))));
+    const vp = scrollViewportRef.current;
+    const centerNorm = vp
+      ? (vp.scrollLeft + vp.clientWidth * 0.5) / Math.max(1, vp.scrollWidth)
+      : 0.5;
     setZoom(nextZoom);
     requestAnimationFrame(() => {
-      const vp = scrollViewportRef.current;
-      if (!vp) return;
-      const totalWidth = vp.clientWidth * nextZoom;
-      const anchorX = ((playheadRef.current - viewStartSec) / viewSpanSec) * totalWidth;
-      vp.scrollLeft = Math.max(0, anchorX - vp.clientWidth * 0.5);
+      const curVp = scrollViewportRef.current;
+      if (!curVp) return;
+      const totalWidth = curVp.clientWidth * nextZoom;
+      const anchorX = centerNorm * totalWidth;
+      curVp.scrollLeft = Math.max(0, anchorX - curVp.clientWidth * 0.5);
     });
   };
 

@@ -160,6 +160,22 @@ export function computeIntroBgmDurationSec(state: PodcastProjectState): number {
   return 10;
 }
 
+const r3 = (x: number): number => Math.round(x * 1000) / 1000;
+
+const editedTimelineCache = new WeakMap<PodcastProjectState, TimelineComputation>();
+
+/**
+ * Returns a memoized TimelineComputation keyed by the immutable PodcastProjectState reference.
+ * Callers that mutate state objects in-place (such as unit tests) should call computeEditedTimeline directly.
+ */
+export function getCachedEditedTimeline(state: PodcastProjectState): TimelineComputation {
+  const hit = editedTimelineCache.get(state);
+  if (hit) return hit;
+  const tl = computeEditedTimeline(state);
+  editedTimelineCache.set(state, tl);
+  return tl;
+}
+
 export function computeEditedTimeline(state: PodcastProjectState): TimelineComputation {
   const coldOpenDurationSec = computeColdOpenDurationSec(state);
   const introVoiceoverDurationSec = state.introVoiceover?.enabled
@@ -210,16 +226,16 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
         sawCutSinceLastKept = true;
         const startSec = prefixDurationSec + editedBodyDurationSec;
         if (!recordedBlockStart) {
-          blockEditedStartsSec[block.blockId] = Number(startSec.toFixed(3));
+          blockEditedStartsSec[block.blockId] = r3(startSec);
           recordedBlockStart = true;
         }
         mappedTokens.push({
           tokenId: tok.id,
           blockId: block.blockId,
           speakerId: block.speakerId,
-          editedStartSec: Number(startSec.toFixed(3)),
-          editedEndSec: Number(startSec.toFixed(3)),
-          effectiveSourceStartSec: Number((tok.sourceStartMs / 1000).toFixed(3)),
+          editedStartSec: r3(startSec),
+          editedEndSec: r3(startSec),
+          effectiveSourceStartSec: r3(tok.sourceStartMs / 1000),
           spanIndex: currentSpanIndex,
           token: tok,
         });
@@ -239,9 +255,9 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
           tokenId: tok.id,
           blockId: block.blockId,
           speakerId: block.speakerId,
-          editedStartSec: Number(silStartSec.toFixed(3)),
-          editedEndSec: Number((silStartSec + silDur).toFixed(3)),
-          effectiveSourceStartSec: Number((tok.sourceStartMs / 1000).toFixed(3)),
+          editedStartSec: r3(silStartSec),
+          editedEndSec: r3(silStartSec + silDur),
+          effectiveSourceStartSec: r3(tok.sourceStartMs / 1000),
           spanIndex: -1,
           token: tok,
         });
@@ -309,7 +325,7 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
 
       const startSec = prefixDurationSec + editedBodyDurationSec;
       if (!recordedBlockStart) {
-        blockEditedStartsSec[block.blockId] = Number(startSec.toFixed(3));
+        blockEditedStartsSec[block.blockId] = r3(startSec);
         recordedBlockStart = true;
       }
       const endSec = startSec + effDur;
@@ -339,9 +355,9 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
         tokenId: tok.id,
         blockId: block.blockId,
         speakerId: block.speakerId,
-        editedStartSec: Number(startSec.toFixed(3)),
-        editedEndSec: Number(endSec.toFixed(3)),
-        effectiveSourceStartSec: Number(effectiveSrcStartSec.toFixed(3)),
+        editedStartSec: r3(startSec),
+        editedEndSec: r3(endSec),
+        effectiveSourceStartSec: r3(effectiveSrcStartSec),
         spanIndex: currentSpanIndex,
         token: tok,
       });
@@ -350,9 +366,7 @@ export function computeEditedTimeline(state: PodcastProjectState): TimelineCompu
     }
 
     if (!recordedBlockStart) {
-      blockEditedStartsSec[block.blockId] = Number(
-        (prefixDurationSec + editedBodyDurationSec).toFixed(3)
-      );
+      blockEditedStartsSec[block.blockId] = r3(prefixDurationSec + editedBodyDurationSec);
     }
   }
 
@@ -533,22 +547,28 @@ function computeOverlapTimelineRegions(
 
   const sameRoom = state.recordingMode === 'same_room_sync';
   const regions: OverlapTimelineRegion[] = [];
+  const regionsByKey = new Map<string, OverlapTimelineRegion[]>();
 
   const pushOrMergeRegion = (cand: OverlapTimelineRegion) => {
-    const existing = regions.find(
-      (r) =>
-        r.blockId === cand.blockId &&
-        r.secondarySpeakerId === cand.secondarySpeakerId &&
-        cand.sourceStartMs <= r.sourceEndMs + 250 &&
-        cand.sourceEndMs >= r.sourceStartMs - 250
-    );
-    if (existing) {
-      existing.editedStartSec = Math.min(existing.editedStartSec, cand.editedStartSec);
-      existing.editedEndSec = Math.max(existing.editedEndSec, cand.editedEndSec);
-      existing.sourceStartMs = Math.min(existing.sourceStartMs, cand.sourceStartMs);
-      existing.sourceEndMs = Math.max(existing.sourceEndMs, cand.sourceEndMs);
-      if (!existing.text && cand.text) existing.text = cand.text;
-      return;
+    const key = `${cand.blockId}|${cand.secondarySpeakerId}`;
+    const bucket = regionsByKey.get(key);
+    if (bucket) {
+      const existing = bucket.find(
+        (r) =>
+          cand.sourceStartMs <= r.sourceEndMs + 250 &&
+          cand.sourceEndMs >= r.sourceStartMs - 250
+      );
+      if (existing) {
+        existing.editedStartSec = Math.min(existing.editedStartSec, cand.editedStartSec);
+        existing.editedEndSec = Math.max(existing.editedEndSec, cand.editedEndSec);
+        existing.sourceStartMs = Math.min(existing.sourceStartMs, cand.sourceStartMs);
+        existing.sourceEndMs = Math.max(existing.sourceEndMs, cand.sourceEndMs);
+        if (!existing.text && cand.text) existing.text = cand.text;
+        return;
+      }
+      bucket.push(cand);
+    } else {
+      regionsByKey.set(key, [cand]);
     }
     regions.push(cand);
   };
@@ -1794,6 +1814,154 @@ export const WORD_TIMELINE_MIN_ZOOM = 101;
 
 export function isWordTimelineZoom(zoom: number): boolean {
   return Number.isFinite(zoom) && Math.round(zoom) >= WORD_TIMELINE_MIN_ZOOM;
+}
+
+export interface ParagraphHintSegment {
+  id: string;
+  speakerId: string;
+  speakerName: string;
+  speakerColor: string;
+  startSec: number;
+  endSec: number;
+  text: string;
+}
+
+/**
+ * Builds full-paragraph hint segments ordered chronologically for macro/medium zoom (<100x)
+ * top-band display, coalescing adjacent turns of the same speaker across deleted blocks.
+ */
+export function buildParagraphHintSegments(
+  blocks: TranscriptBlock[],
+  timeline: TimelineComputation,
+  tracks: SpeakerTrack[]
+): ParagraphHintSegment[] {
+  if (!blocks.length || !timeline.mappedTokens.length) return [];
+
+  const mappedByTokenId = new Map<string, MappedTokenTimeline>();
+  for (const m of timeline.mappedTokens) {
+    mappedByTokenId.set(m.token.id, m);
+  }
+  const trackById = new Map<string, SpeakerTrack>();
+  for (const tr of tracks) {
+    trackById.set(tr.id, tr);
+  }
+
+  const coalesced = coalesceChronologicalBlocks(blocks);
+  const segments: ParagraphHintSegment[] = [];
+
+  for (const grp of coalesced) {
+    let minStartSec = Infinity;
+    let maxEndSec = -Infinity;
+    const parts: string[] = [];
+    let prevAscii = false;
+
+    for (const blk of grp.blocks) {
+      let blockAddedVisible = false;
+      for (const tok of blk.tokens) {
+        if (tok.deleted || tok.trackMuted) continue;
+        const mapped = mappedByTokenId.get(tok.id);
+        if (mapped) {
+          minStartSec = Math.min(minStartSec, mapped.editedStartSec);
+          maxEndSec = Math.max(maxEndSec, mapped.editedEndSec);
+        }
+        if (tok.bleeped) {
+          parts.push(' 🚨消音');
+          prevAscii = false;
+          blockAddedVisible = true;
+        } else if (tok.type !== 'silence') {
+          if (
+            !blockAddedVisible &&
+            parts.length > 0 &&
+            !/[，。？！、；：,.?!;:）》」』\]\)”’…—\s]$/.test(parts[parts.length - 1])
+          ) {
+            parts.push(' ');
+          } else if (prevAscii && /^[A-Za-z0-9]/.test(tok.text)) {
+            parts.push(' ');
+          }
+          parts.push(tok.text);
+          prevAscii = /[A-Za-z0-9]$/.test(tok.text);
+          blockAddedVisible = true;
+        }
+      }
+    }
+
+    const text = parts.join('').replace(/\s+/g, ' ').trim();
+    if (
+      !text ||
+      !Number.isFinite(minStartSec) ||
+      !Number.isFinite(maxEndSec) ||
+      maxEndSec <= minStartSec
+    ) {
+      continue;
+    }
+
+    const tr = trackById.get(grp.speakerId);
+    segments.push({
+      id: grp.groupKey,
+      speakerId: grp.speakerId,
+      speakerName: tr?.name ?? grp.speakerId,
+      speakerColor: tr?.color ?? '#38bdf8',
+      startSec: minStartSec,
+      endSec: maxEndSec,
+      text,
+    });
+  }
+
+  segments.sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+  return segments;
+}
+
+/**
+ * Finds the best-matching paragraph hint segment at `sec`, preferring strictly containing
+ * segments and falling back to the nearest segment within `maxGapSec` (default 2.0s).
+ */
+export function findParagraphHintAtSec(
+  segments: ParagraphHintSegment[],
+  sec: number,
+  maxGapSec = 2.0
+): { segment: ParagraphHintSegment; index: number } | null {
+  if (!segments.length || !Number.isFinite(sec)) return null;
+
+  // Binary search for the first segment whose startSec > sec + 0.15
+  let lo = 0;
+  let hi = segments.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segments[mid].startSec <= sec + 0.15) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  // Scan backwards from hi for any overlapping/containing segment
+  let bestMatch: { segment: ParagraphHintSegment; index: number; dist: number } | null = null;
+  for (let i = Math.min(segments.length - 1, lo); i >= 0; i--) {
+    const seg = segments[i];
+    if (sec >= seg.startSec - 0.15 && sec <= seg.endSec + 0.15) {
+      const midSec = (seg.startSec + seg.endSec) * 0.5;
+      const dist = Math.abs(sec - midSec);
+      if (!bestMatch || dist < bestMatch.dist) {
+        bestMatch = { segment: seg, index: i, dist };
+      }
+    }
+    if (seg.endSec < sec - maxGapSec && bestMatch) break;
+  }
+  if (bestMatch) {
+    return { segment: bestMatch.segment, index: bestMatch.index };
+  }
+
+  // Fallback to nearest segment within maxGapSec
+  let nearest: { segment: ParagraphHintSegment; index: number; gap: number } | null = null;
+  for (const idx of [hi, hi + 1]) {
+    if (idx < 0 || idx >= segments.length) continue;
+    const seg = segments[idx];
+    const gap = sec < seg.startSec ? seg.startSec - sec : sec > seg.endSec ? sec - seg.endSec : 0;
+    if (gap <= maxGapSec && (!nearest || gap < nearest.gap)) {
+      nearest = { segment: seg, index: idx, gap };
+    }
+  }
+  return nearest ? { segment: nearest.segment, index: nearest.index } : null;
 }
 
 export interface TimelineWordAnnotation {

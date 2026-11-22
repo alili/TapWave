@@ -660,7 +660,7 @@ pub(crate) fn needs_wav_transcode(file_path: &str) -> bool {
         || lower.ends_with(".wma")
 }
 
-pub(crate) fn transcode_to_cached_proxy_wav(input_path: &str) -> Result<String, String> {
+pub(crate) fn transcode_to_cached_proxy_wav(input_path: &str, gain_db: f64) -> Result<String, String> {
     let meta = fs::metadata(input_path).map_err(|e| e.to_string())?;
     let mtime = meta
         .modified()
@@ -668,11 +668,19 @@ pub(crate) fn transcode_to_cached_proxy_wav(input_path: &str) -> Result<String, 
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let clamped_gain_db = if gain_db.is_finite() {
+        gain_db.clamp(-12.0, 16.0)
+    } else {
+        0.0
+    };
+    let gain_tenths = (clamped_gain_db * 10.0).round() as i64;
 
     let mut hasher = DefaultHasher::new();
+    "px_v2".hash(&mut hasher);
     input_path.hash(&mut hasher);
     meta.len().hash(&mut hasher);
     mtime.hash(&mut hasher);
+    gain_tenths.hash(&mut hasher);
     let cache_dir = PathBuf::from("/tmp/podcraft_playback_cache");
     fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
     let out_wav = cache_dir.join(format!("px_{:016x}.wav", hasher.finish()));
@@ -685,28 +693,39 @@ pub(crate) fn transcode_to_cached_proxy_wav(input_path: &str) -> Result<String, 
     let tmp_wav = cache_dir.join(format!("px_{:016x}_{}.tmp.wav", hasher.finish(), std::process::id()));
     let tmp_str = tmp_wav.to_string_lossy().to_string();
 
+    let mut args: Vec<String> = vec![
+        "-nostdin".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-threads".into(),
+        "0".into(),
+        "-i".into(),
+        input_path.into(),
+        "-vn".into(),
+    ];
+    if clamped_gain_db.abs() >= 0.05 {
+        args.push("-af".into());
+        args.push(format!(
+            "aresample=16000,highpass=f=70,volume={:.2}dB,alimiter=limit=0.89:attack=7:release=100:level=disabled",
+            clamped_gain_db
+        ));
+    }
+    args.extend([
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        "16000".into(),
+        "-sample_fmt".into(),
+        "s16".into(),
+        tmp_str.clone(),
+    ]);
+
     let status = Command::new(find_ffmpeg_bin())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .args([
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-y",
-            "-threads",
-            "0",
-            "-i",
-            input_path,
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-sample_fmt",
-            "s16",
-            &tmp_str,
-        ])
+        .args(&args)
         .status()
         .map_err(|e| e.to_string())?;
 
@@ -1280,6 +1299,7 @@ fn handle_audio_http_client(mut stream: TcpStream) {
     let mut force_transcode_wav = false;
     let mut use_proxy = false;
     let mut proxy_chunk_idx: Option<u64> = None;
+    let mut proxy_gain_db: f64 = 0.0;
     for pair in query_str.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             if k == "path" {
@@ -1291,6 +1311,12 @@ fn handle_audio_http_client(mut stream: TcpStream) {
             } else if k == "chunk" {
                 if let Ok(idx) = v.parse::<u64>() {
                     proxy_chunk_idx = Some(idx);
+                }
+            } else if k == "gainDb" {
+                if let Ok(db) = v.parse::<f64>() {
+                    if db.is_finite() {
+                        proxy_gain_db = db.clamp(-12.0, 16.0);
+                    }
                 }
             }
         }
@@ -1312,7 +1338,8 @@ fn handle_audio_http_client(mut stream: TcpStream) {
     }
 
     let serve_path = if use_proxy {
-        transcode_to_cached_proxy_wav(&decoded_path).unwrap_or_else(|_| decoded_path.clone())
+        transcode_to_cached_proxy_wav(&decoded_path, proxy_gain_db)
+            .unwrap_or_else(|_| decoded_path.clone())
     } else if force_transcode_wav || needs_wav_transcode(&decoded_path) {
         transcode_to_cached_wav(&decoded_path).unwrap_or_else(|_| decoded_path.clone())
     } else {

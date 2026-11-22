@@ -41,11 +41,13 @@ function needsPlaybackWavTranscode(filePath: string): boolean {
   );
 }
 
-function transcodeToCachedProxyWav(inputPath: string): string {
+function transcodeToCachedProxyWav(inputPath: string, gainDb = 0): string {
   const stat = fs.statSync(inputPath);
+  const clampedGainDb = Number.isFinite(gainDb) ? Math.max(-12, Math.min(16, gainDb)) : 0;
+  const gainTenths = Math.round(clampedGainDb * 10);
   const hash = crypto
     .createHash('sha1')
-    .update(`${inputPath}|${stat.size}|${stat.mtimeMs}`)
+    .update(`px_v2|${inputPath}|${stat.size}|${stat.mtimeMs}|g=${gainTenths}`)
     .digest('hex')
     .slice(0, 16);
   const cacheDir = '/tmp/podcraft_playback_cache';
@@ -55,28 +57,25 @@ function transcodeToCachedProxyWav(inputPath: string): string {
     return outWav;
   }
   const tmpWav = path.join(cacheDir, `px_${hash}_${process.pid}.tmp.wav`);
-  const res = spawnSync(
-    resolveFfmpegBin(),
-    [
-      '-nostdin',
-      '-loglevel',
-      'error',
-      '-y',
-      '-threads',
-      '0',
-      '-i',
-      inputPath,
-      '-vn',
-      '-ac',
-      '1',
-      '-ar',
-      '16000',
-      '-sample_fmt',
-      's16',
-      tmpWav,
-    ],
-    { stdio: 'ignore' }
-  );
+  const ffmpegArgs = [
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-y',
+    '-threads',
+    '0',
+    '-i',
+    inputPath,
+    '-vn',
+  ];
+  if (Math.abs(clampedGainDb) >= 0.05) {
+    ffmpegArgs.push(
+      '-af',
+      `aresample=16000,highpass=f=70,volume=${clampedGainDb.toFixed(2)}dB,alimiter=limit=0.89:attack=7:release=100:level=disabled`
+    );
+  }
+  ffmpegArgs.push('-ac', '1', '-ar', '16000', '-sample_fmt', 's16', tmpWav);
+  const res = spawnSync(resolveFfmpegBin(), ffmpegArgs, { stdio: 'ignore' });
   if (res.status === 0 && fs.existsSync(tmpWav)) {
     fs.renameSync(tmpWav, outWav);
     return outWav;
@@ -723,6 +722,8 @@ function podcraftLocalSidecarPlugin(): Plugin {
       const forceTranscode = reqUrl.searchParams.get('transcode') === 'wav';
       const useProxy = reqUrl.searchParams.get('proxy') === '1' || reqUrl.searchParams.get('proxy') === 'true';
       const chunkParam = reqUrl.searchParams.get('chunk');
+      const rawGainDb = Number(reqUrl.searchParams.get('gainDb') || '0');
+      const proxyGainDb = Number.isFinite(rawGainDb) ? Math.max(-12, Math.min(16, rawGainDb)) : 0;
       if (!rawPath || !fs.existsSync(rawPath)) {
         res.statusCode = 404;
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -731,7 +732,7 @@ function podcraftLocalSidecarPlugin(): Plugin {
       }
 
       const servePath = useProxy
-        ? transcodeToCachedProxyWav(rawPath)
+        ? transcodeToCachedProxyWav(rawPath, proxyGainDb)
         : forceTranscode || needsPlaybackWavTranscode(rawPath)
           ? transcodeToCachedPlaybackWav(rawPath)
           : rawPath;
