@@ -1,12 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowLeftRight,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardCopy,
   Download,
+  FileText,
+  FolderOpen,
+  GitMerge,
+  History,
   Loader2,
   Mic,
   Pause,
@@ -15,11 +23,13 @@ import {
   Settings2,
   Sparkles,
   Square,
+  Trash2,
   UserCheck,
   UserPlus,
   Volume2,
   X,
 } from 'lucide-react';
+import { buildPodAudioUrl } from '../data/emptyProject';
 import { PodcastProjectState } from '../types/podcast';
 import {
   LiveAsrEngineMode,
@@ -29,8 +39,10 @@ import {
   LiveScenario,
   LiveSessionPrep,
   LiveSpeaker,
+  LiveSpeakerAnalysisMode,
   LiveSpeakerRole,
   LiveUtterance,
+  RecentLiveSessionItem,
 } from '../types/liveSession';
 import {
   buildAsrConfigFromPlatform,
@@ -46,20 +58,31 @@ import { buildLiveSessionMarkdown, formatLiveMmSs } from '../engine/liveMinutesE
 import {
   addAndAssignLivePartialSpeaker,
   addAndAssignLiveSpeaker,
+  applyInferredSpeakerName,
   assignLivePartialSpeaker,
   assignLiveSpeaker,
   batchAssignLiveSpeaker,
   computeUtteranceUploadStates,
+  dismissInferredSpeakerName,
   dismissLiveEngineNotice,
   findSpeakerReassignSuggestions,
+  findSuspectedDuplicateSpeakers,
+  loadRecentLiveSessions,
+  mergeLiveSpeakers,
+  openLiveSessionFromJsonText,
+  openLiveSessionFromPath,
   overrideLiveOutline,
   pauseLiveSession,
+  removeRecentLiveSession,
   renameLiveSpeaker,
   requestLiveInsight,
+  requestLiveSpeakerContentAnalysis,
   resetLiveSession,
   resumeLiveSession,
   revertLiveUtteranceCorrection,
+  saveLiveReportAndMinutes,
   setLiveQuestionStatus,
+  setLiveSpeakerAnalysisMode,
   startLiveSession,
   stopLiveSession,
   useLiveMicLevel,
@@ -73,6 +96,12 @@ import {
 } from '../engine/tauriBridge';
 import { LiveAnalyticsCenterPane } from './LiveAnalyticsCenterPane';
 import { computeLiveSpeechAnalytics } from '../engine/liveSpeechAnalytics';
+import {
+  aggregateLiveUtterances,
+  AggregatedUtteranceBlock,
+  buildSingleUtteranceBlock,
+  separatorBetweenUtterances,
+} from '../engine/liveTranscriptAggregator';
 
 const PREP_STORAGE_KEY = 'tapwave_live_prep_v1';
 
@@ -96,6 +125,7 @@ interface StoredPrepForm {
   captureAudience: boolean;
   asrEngine: LiveAsrEngineMode;
   enableStreamCorrection: boolean;
+  speakerAnalysisMode: LiveSpeakerAnalysisMode;
   outlineText: string;
   targetFieldsText: string;
   volcStreamResourceId: string;
@@ -114,6 +144,7 @@ const DEFAULT_PREP_FORM: StoredPrepForm = {
   captureAudience: true,
   asrEngine: 'auto',
   enableStreamCorrection: true,
+  speakerAnalysisMode: 'hybrid',
   outlineText: '',
   targetFieldsText: '',
   volcStreamResourceId: '',
@@ -135,6 +166,10 @@ function loadStoredPrep(): StoredPrepForm {
       captureAudience: typeof obj.captureAudience === 'boolean' ? obj.captureAudience : true,
       asrEngine:
         obj.asrEngine === 'volcengine' || obj.asrEngine === 'local' ? obj.asrEngine : 'auto',
+      speakerAnalysisMode:
+        obj.speakerAnalysisMode === 'voiceprint' || obj.speakerAnalysisMode === 'content'
+          ? obj.speakerAnalysisMode
+          : 'hybrid',
       speakerCount: scenario === 'listen' ? 1 : Math.max(2, rawCount),
     };
   } catch {
@@ -204,6 +239,51 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
   const [localModelsReady, setLocalModelsReady] = useState<boolean | null>(null);
   const [volcEnvConfigured, setVolcEnvConfigured] = useState(false);
 
+  // Recent live sessions & reopen state
+  const [recentSessions, setRecentSessions] = useState<RecentLiveSessionItem[]>(() =>
+    loadRecentLiveSessions()
+  );
+  const reportFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Speaker profile switching & merge state
+  const [selectedProfileSpeakerId, setSelectedProfileSpeakerId] = useState<string | null>(null);
+  const [showManualMerge, setShowManualMerge] = useState(false);
+  const [manualMergeSourceId, setManualMergeSourceId] = useState<string>('');
+  const [manualMergeTargetId, setManualMergeTargetId] = useState<string>('');
+  const [swappedDupPairs, setSwappedDupPairs] = useState<Record<string, boolean>>({});
+
+  // Audio playback state (for stopped / review mode)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [audioCurrentMs, setAudioCurrentMs] = useState(0);
+  const [audioDurationMs, setAudioDurationMs] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState<number>(1);
+
+  useEffect(() => {
+    if (snap.phase === 'idle' || snap.phase === 'stopped') {
+      setRecentSessions(loadRecentLiveSessions());
+    }
+    if (snap.phase !== 'stopped') {
+      setIsPlayingAudio(false);
+      setAudioCurrentMs(0);
+    }
+  }, [snap.phase, snap.reportPath]);
+
+  useEffect(() => {
+    if (snap.speakers.length === 0) {
+      setSelectedProfileSpeakerId(null);
+      return;
+    }
+    const stillExists =
+      selectedProfileSpeakerId &&
+      snap.speakers.some((s) => s.id === selectedProfileSpeakerId);
+    if (!stillExists) {
+      const def =
+        snap.speakers.find((s) => s.role === 'counterpart') ?? snap.speakers[0];
+      setSelectedProfileSpeakerId(def.id);
+    }
+  }, [snap.speakers, selectedProfileSpeakerId]);
+
   // Transcript scroll & speaker popover state
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -228,7 +308,8 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
     const candidates = findSpeakerReassignSuggestions(
       snap.utterances,
       utteranceId,
-      targetSpeakerId
+      targetSpeakerId,
+      snap.speakers
     );
     if (candidates.length > 0) {
       setSpeakerSuggestion({
@@ -243,6 +324,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
     }
   };
   const [showAdoptedDrawer, setShowAdoptedDrawer] = useState(false);
+  const [showHistoryQuestionsDrawer, setShowHistoryQuestionsDrawer] = useState(true);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const [aggregateTranscript, setAggregateTranscript] = useState(true);
+
+  useEffect(() => {
+    setSelectedTopicId(null);
+  }, [snap.sessionId]);
   const [speakerCtxMenu, setSpeakerCtxMenu] = useState<
     | { kind: 'utterance'; utteranceId: string; x: number; y: number }
     | { kind: 'partial'; startMs: number; x: number; y: number }
@@ -528,6 +616,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       captureAudience: form.scenario === 'listen' ? form.captureAudience : undefined,
       asrEngine: form.asrEngine,
       enableStreamCorrection: form.enableStreamCorrection,
+      speakerAnalysisMode: form.speakerAnalysisMode,
       outline,
       targetFields: targetFields && targetFields.length > 0 ? targetFields : undefined,
     };
@@ -551,6 +640,11 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
   };
 
   const scrollToUtteranceMs = (ms: number) => {
+    if (snap.phase === 'stopped' && audioRef.current) {
+      const sec = Math.max(0, ms / 1000);
+      audioRef.current.currentTime = sec;
+      setAudioCurrentMs(ms);
+    }
     const hit = snap.utterances.find((u) => u.endMs >= ms) ?? snap.utterances[0];
     if (!hit) return;
     setAutoScroll(false);
@@ -561,6 +655,65 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       setHighlightedUttId((cur) => (cur === hit.id ? null : cur));
     }, 1600);
   };
+
+  const handleOpenReportFile = async () => {
+    if (isTauriRuntime()) {
+      try {
+        const selected = await openFileDialog({
+          multiple: false,
+          title: '打开录制分析报告 (analysis-report.json / session.json)',
+          filters: [{ name: '录制报告 JSON', extensions: ['json'] }],
+        });
+        if (typeof selected === 'string' && selected.trim()) {
+          const restored = await openLiveSessionFromPath(selected.trim());
+          onNotify(`已打开录制报告：${restored.title}`);
+        }
+      } catch (err) {
+        onNotify(`打开报告失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      reportFileInputRef.current?.click();
+    }
+  };
+
+  const handleWebReportFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const restored = await openLiveSessionFromJsonText(text, file.name);
+      onNotify(`已打开录制报告：${restored.title}`);
+    } catch (err) {
+      onNotify(`解析报告失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleTogglePlayAudio = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play().catch((err) => {
+        onNotify(`音频播放失败：${err instanceof Error ? err.message : String(err)}`);
+      });
+    } else {
+      audio.pause();
+    }
+  };
+
+  const handleCyclePlaybackRate = () => {
+    const rates = [1, 1.25, 1.5, 2];
+    const next = rates[(rates.indexOf(playbackRate) + 1) % rates.length];
+    setPlaybackRate(next);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = next;
+    }
+  };
+
+  const suspectedDuplicates = useMemo(
+    () => findSuspectedDuplicateSpeakers(snap),
+    [snap.speakers, snap.utterances]
+  );
 
   const handleExportMarkdown = async () => {
     const md = buildLiveSessionMarkdown(snap);
@@ -623,6 +776,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
     }
     return { count, chars };
   }, [snap.utterances, uploadStates]);
+
+  const displayBlocks = useMemo<AggregatedUtteranceBlock[]>(() => {
+    if (!aggregateTranscript) {
+      return snap.utterances.map((u) => buildSingleUtteranceBlock(u));
+    }
+    return aggregateLiveUtterances(snap.utterances);
+  }, [snap.utterances, aggregateTranscript]);
 
   // ---------------- 1. IDLE (PREP FORM) ----------------
   if (snap.phase === 'idle') {
@@ -740,6 +900,37 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                   </span>
                 </span>
               </label>
+            </div>
+
+            <div className="space-y-1.5 pt-1.5 border-t border-zinc-800/80">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium text-zinc-300">发言人分析方式</span>
+                <div className="flex items-center bg-zinc-900 p-0.5 rounded-lg border border-zinc-800">
+                  {(
+                    [
+                      { id: 'hybrid', label: '声纹 + 内容（推荐）' },
+                      { id: 'voiceprint', label: '仅声纹' },
+                      { id: 'content', label: '内容优先' },
+                    ] as const
+                  ).map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, speakerAnalysisMode: m.id }))}
+                      className={`px-2.5 py-1 rounded text-xs font-medium transition cursor-pointer ${
+                        form.speakerAnalysisMode === m.id
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-400">
+                结合声纹特征与对话上下文（问答逻辑、称呼点名、角色视角）辨别与纠偏发言人，并推断身份姓名
+              </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -1063,29 +1254,131 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
             )}
           </div>
 
-          <div className="flex items-center justify-end gap-3 pt-2 border-t border-zinc-800">
-            {!canStart && (
-              <span className="text-xs text-amber-400">
-                当前所选识别引擎缺少凭证或本地模型，请先配置后再开始
-              </span>
-            )}
-            <button
-              type="button"
-              disabled={!canStart}
-              onClick={() => void handleStartRecording()}
-              className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-45 disabled:cursor-not-allowed text-white text-sm font-semibold inline-flex items-center gap-2 shadow-lg cursor-pointer transition"
-            >
-              <Mic className="w-4 h-4" />
-              <span>开始录制</span>
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-zinc-800">
+            <div className="flex items-center gap-2">
+              <input
+                ref={reportFileInputRef}
+                type="file"
+                accept=".json"
+                onChange={(e) => void handleWebReportFileChange(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => void handleOpenReportFile()}
+                className="px-3.5 py-2 rounded-xl border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-xs font-medium text-zinc-200 inline-flex items-center gap-1.5 cursor-pointer transition"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-blue-400" />
+                <span>打开已有录音/报告</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3">
+              {!canStart && (
+                <span className="text-xs text-amber-400">
+                  当前所选识别引擎缺少凭证或本地模型，请先配置后再开始
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={!canStart}
+                onClick={() => void handleStartRecording()}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-45 disabled:cursor-not-allowed text-white text-sm font-semibold inline-flex items-center gap-2 shadow-lg cursor-pointer transition"
+              >
+                <Mic className="w-4 h-4" />
+                <span>开始录制</span>
+              </button>
+            </div>
           </div>
+
+          {recentSessions.length > 0 && (
+            <div className="pt-4 border-t border-zinc-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                  <History className="w-3.5 h-3.5 text-blue-400" />
+                  <span>最近录制与分析报告</span>
+                </h3>
+                <span className="text-[11px] text-zinc-500">
+                  点击可直接重新打开录音与分析报告
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-0.5">
+                {recentSessions.map((item) => {
+                  const scLabel =
+                    item.scenario === 'listen'
+                      ? '演讲'
+                      : item.scenario === 'dialogue'
+                        ? '对谈'
+                        : item.scenario === 'chat'
+                          ? '聊天'
+                          : '采访';
+                  return (
+                    <div
+                      key={item.reportPath}
+                      className="group rounded-xl border border-zinc-800 bg-zinc-950/70 hover:border-blue-500/45 hover:bg-zinc-900/90 p-2.5 flex items-start justify-between gap-2 transition"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!isTauriRuntime()) {
+                            onNotify('浏览器预览模式请通过「打开已有录音/报告」选择本地 JSON 文件');
+                            return;
+                          }
+                          void openLiveSessionFromPath(item.reportPath)
+                            .then((restored) => {
+                              onNotify(`已打开录制报告：${restored.title}`);
+                            })
+                            .catch((err) => {
+                              onNotify(
+                                `打开失败（文件可能已移动）：${err instanceof Error ? err.message : String(err)}`
+                              );
+                            });
+                        }}
+                        className="min-w-0 flex-1 text-left space-y-1 cursor-pointer"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="px-1.5 py-0.5 rounded bg-blue-500/15 border border-blue-500/30 text-[10px] text-blue-300 shrink-0">
+                            {scLabel}
+                          </span>
+                          <span className="text-xs font-semibold text-zinc-100 truncate">
+                            {item.title}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-zinc-400 flex flex-wrap items-center gap-2 font-mono">
+                          <span>{formatLiveMmSs(item.durationMs)}</span>
+                          <span>·</span>
+                          <span>{item.utteranceCount} 段</span>
+                          <span>·</span>
+                          <span>{item.speakerCount} 人</span>
+                          <span>·</span>
+                          <span className="text-zinc-500">
+                            {new Date(item.updatedAt).toLocaleDateString('zh-CN')}
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        title="从最近列表移除"
+                        onClick={() => {
+                          setRecentSessions(removeRecentLiveSession(item.reportPath));
+                        }}
+                        className="p-1 rounded text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 opacity-0 group-hover:opacity-100 transition cursor-pointer shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
-  // ---------------- 2. STOPPED / ERROR SUMMARY ----------------
-  if (snap.phase === 'stopped' || snap.phase === 'error') {
+  // ---------------- 2. FATAL ERROR (NO UTTERANCES) ----------------
+  if (snap.phase === 'error' && snap.utterances.length === 0) {
     const isListenSummary = snap.scenario === 'listen';
     return (
       <div className="flex-1 min-w-0 h-full overflow-y-auto bg-zinc-950 p-6 flex items-start justify-center">
@@ -1209,6 +1502,8 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
   // ---------------- 3. RECORDING / PAUSED / STARTING / STOPPING ----------------
   const isListenMode = snap.scenario === 'listen';
   const activeQuestions = snap.questions.filter((q) => q.status === 'new');
+  const latestQuestions = activeQuestions.filter((q) => q.isLatest !== false);
+  const historyPendingQuestions = activeQuestions.filter((q) => q.isLatest === false);
   const adoptedQuestions = snap.questions.filter((q) => q.status === 'adopted');
   const engineLabel =
     snap.asrEngine === 'local_sensevoice'
@@ -1242,117 +1537,267 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       )}
 
       {/* 顶部控制条 */}
-      <div className="shrink-0 h-12 px-4 border-b border-zinc-800 bg-zinc-900/90 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <span
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
-              snap.phase === 'starting'
-                ? 'bg-blue-500/15 text-blue-300 border-blue-500/35'
-                : snap.phase === 'paused'
-                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
-                  : 'bg-rose-500/15 text-rose-300 border-rose-500/35'
-            }`}
-          >
-            {snap.phase === 'starting' ? (
-              <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
-            ) : (
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  snap.phase === 'paused' ? 'bg-amber-400' : 'bg-rose-500 animate-pulse'
-                }`}
-              />
-            )}
-            <span>
-              {snap.phase === 'starting'
-                ? '正在启动麦克风…'
-                : snap.phase === 'paused'
-                  ? '已暂停'
-                  : 'REC'}
-            </span>
-            {snap.phase !== 'starting' && (
-              <span className="font-mono">{formatLiveMmSs(snap.elapsedMs)}</span>
-            )}
-          </span>
+      {(() => {
+        const isReviewMode = snap.phase === 'stopped' || snap.phase === 'error';
+        const wavUrl = snap.wavPath
+          ? buildPodAudioUrl(snap.wavPath, isTauriRuntime())
+          : undefined;
+        const effectiveDurationMs =
+          audioDurationMs > 0 ? audioDurationMs : snap.elapsedMs;
 
-          {/* 音量条 */}
-          <div className="w-20 h-2 rounded-full bg-zinc-800 overflow-hidden" title="麦克风输入电平">
-            <div
-              className="h-full bg-emerald-400 transition-all duration-75"
-              style={{ width: `${Math.min(100, Math.round(micLevel * 450))}%` }}
-            />
+        return (
+          <div className="shrink-0 min-h-12 px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/90 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-3 min-w-0">
+              {isReviewMode ? (
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border shrink-0 ${
+                    snap.phase === 'error'
+                      ? 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                      : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                  }`}
+                >
+                  {snap.phase === 'error' ? (
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>{snap.phase === 'error' ? '异常中断 · 回看' : '已保存 · 回看报告'}</span>
+                  <span className="font-mono">{formatLiveMmSs(snap.elapsedMs)}</span>
+                </span>
+              ) : (
+                <>
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border shrink-0 ${
+                      snap.phase === 'starting'
+                        ? 'bg-blue-500/15 text-blue-300 border-blue-500/35'
+                        : snap.phase === 'paused'
+                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                          : 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                    }`}
+                  >
+                    {snap.phase === 'starting' ? (
+                      <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+                    ) : (
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          snap.phase === 'paused' ? 'bg-amber-400' : 'bg-rose-500 animate-pulse'
+                        }`}
+                      />
+                    )}
+                    <span>
+                      {snap.phase === 'starting'
+                        ? '正在启动麦克风…'
+                        : snap.phase === 'paused'
+                          ? '已暂停'
+                          : 'REC'}
+                    </span>
+                    {snap.phase !== 'starting' && (
+                      <span className="font-mono">{formatLiveMmSs(snap.elapsedMs)}</span>
+                    )}
+                  </span>
+
+                  {/* 音量条 */}
+                  <div className="w-20 h-2 rounded-full bg-zinc-800 overflow-hidden shrink-0" title="麦克风输入电平">
+                    <div
+                      className="h-full bg-emerald-400 transition-all duration-75"
+                      style={{ width: `${Math.min(100, Math.round(micLevel * 450))}%` }}
+                    />
+                  </div>
+                </>
+              )}
+
+              <span className="text-xs font-medium text-zinc-200 truncate max-w-[220px]" title={snap.title}>
+                {snap.title}
+              </span>
+            </div>
+
+            {/* 回看模式音频播放器 */}
+            {isReviewMode && wavUrl && (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-xl border border-zinc-800 bg-zinc-950/80">
+                <audio
+                  ref={audioRef}
+                  src={wavUrl}
+                  onPlay={() => setIsPlayingAudio(true)}
+                  onPause={() => setIsPlayingAudio(false)}
+                  onEnded={() => setIsPlayingAudio(false)}
+                  onTimeUpdate={(e) => {
+                    setAudioCurrentMs(Math.round(e.currentTarget.currentTime * 1000));
+                  }}
+                  onLoadedMetadata={(e) => {
+                    const dur = e.currentTarget.duration;
+                    if (Number.isFinite(dur) && dur > 0) {
+                      setAudioDurationMs(Math.round(dur * 1000));
+                    }
+                    e.currentTarget.playbackRate = playbackRate;
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleTogglePlayAudio}
+                  className="w-7 h-7 rounded-lg bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center cursor-pointer shrink-0"
+                  title={isPlayingAudio ? '暂停录音' : '播放录音'}
+                >
+                  {isPlayingAudio ? (
+                    <Pause className="w-3.5 h-3.5" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 ml-0.5" />
+                  )}
+                </button>
+                <span className="text-[11px] font-mono text-zinc-300 shrink-0">
+                  {formatLiveMmSs(audioCurrentMs)} / {formatLiveMmSs(effectiveDurationMs)}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1000, effectiveDurationMs)}
+                  value={Math.min(audioCurrentMs, Math.max(1000, effectiveDurationMs))}
+                  onChange={(e) => {
+                    const ms = Number(e.target.value);
+                    setAudioCurrentMs(ms);
+                    if (audioRef.current) {
+                      audioRef.current.currentTime = ms / 1000;
+                    }
+                  }}
+                  className="w-28 sm:w-36 accent-blue-500 cursor-pointer"
+                />
+                <button
+                  type="button"
+                  onClick={handleCyclePlaybackRate}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] font-mono text-zinc-300 cursor-pointer"
+                  title="切换播放倍速"
+                >
+                  {playbackRate}x
+                </button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="px-2 py-0.5 rounded-md bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
+                {modeBadge}
+              </span>
+
+              {!isReviewMode ? (
+                <>
+                  <span className="px-2 py-0.5 rounded-md bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300">
+                    引擎：{engineLabel}
+                  </span>
+
+                  <span
+                    title={snap.asrMessage ?? undefined}
+                    className={`px-2 py-0.5 rounded-md border text-[11px] ${
+                      snap.asrStatus === 'connected'
+                        ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                        : snap.asrStatus === 'error'
+                          ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                          : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                    }`}
+                  >
+                    ASR: {snap.asrStatus}
+                  </span>
+
+                  <span
+                    title={snap.llmMessage ?? undefined}
+                    className="px-2 py-0.5 rounded-md bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300 inline-flex items-center gap-1"
+                  >
+                    {snap.llmStatus === 'thinking' && (
+                      <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+                    )}
+                    <span>
+                      AI:{' '}
+                      {snap.llmStatus === 'thinking'
+                        ? '分析中'
+                        : snap.llmStatus === 'disabled'
+                          ? '未启用'
+                          : snap.llmStatus === 'error'
+                            ? '异常'
+                            : '就绪'}
+                    </span>
+                  </span>
+
+                  {snap.phase === 'recording' ? (
+                    <button
+                      type="button"
+                      onClick={pauseLiveSession}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-100 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Pause className="w-3.5 h-3.5" />
+                      <span>暂停</span>
+                    </button>
+                  ) : snap.phase === 'paused' ? (
+                    <button
+                      type="button"
+                      onClick={resumeLiveSession}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>继续</span>
+                    </button>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => void stopLiveSession()}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    <span>结束</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  {isTauriRuntime() && snap.outputDir && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void saveLiveReportAndMinutes(snap)
+                          .then((res) => {
+                            onNotify(
+                              `已保存报告与纪要：${res.reportPath || res.minutesPath || snap.outputDir}`
+                            );
+                          })
+                          .catch((err) => {
+                            onNotify(
+                              `保存失败：${err instanceof Error ? err.message : String(err)}`
+                            );
+                          });
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-xs font-medium text-emerald-200 inline-flex items-center gap-1 cursor-pointer"
+                      title={snap.reportPath ?? snap.outputDir ?? undefined}
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>保存报告</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyMarkdown()}
+                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-200 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <ClipboardCopy className="w-3.5 h-3.5" />
+                    <span>复制纪要</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleExportMarkdown()}
+                    className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>导出纪要</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void resetLiveSession()}
+                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-200 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>新建录制</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-
-          <span className="text-xs font-medium text-zinc-200 truncate">{snap.title}</span>
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="px-2 py-0.5 rounded-md bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
-            {modeBadge}
-          </span>
-          <span className="px-2 py-0.5 rounded-md bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300">
-            引擎：{engineLabel}
-          </span>
-
-          <span
-            title={snap.asrMessage ?? undefined}
-            className={`px-2 py-0.5 rounded-md border text-[11px] ${
-              snap.asrStatus === 'connected'
-                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-                : snap.asrStatus === 'error'
-                  ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
-                  : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-            }`}
-          >
-            ASR: {snap.asrStatus}
-          </span>
-
-          <span
-            title={snap.llmMessage ?? undefined}
-            className="px-2 py-0.5 rounded-md bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-300 inline-flex items-center gap-1"
-          >
-            {snap.llmStatus === 'thinking' && <Loader2 className="w-3 h-3 animate-spin text-blue-400" />}
-            <span>
-              AI:{' '}
-              {snap.llmStatus === 'thinking'
-                ? '分析中'
-                : snap.llmStatus === 'disabled'
-                  ? '未启用'
-                  : snap.llmStatus === 'error'
-                    ? '异常'
-                    : '就绪'}
-            </span>
-          </span>
-
-          {snap.phase === 'recording' ? (
-            <button
-              type="button"
-              onClick={pauseLiveSession}
-              className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-100 inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <Pause className="w-3.5 h-3.5" />
-              <span>暂停</span>
-            </button>
-          ) : snap.phase === 'paused' ? (
-            <button
-              type="button"
-              onClick={resumeLiveSession}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>继续</span>
-            </button>
-          ) : null}
-
-          <button
-            type="button"
-            onClick={() => void stopLiveSession()}
-            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
-          >
-            <Square className="w-3 h-3 fill-current" />
-            <span>结束</span>
-          </button>
-        </div>
-      </div>
+        );
+      })()}
 
       {/* 回退/非致命通知横幅 */}
       {snap.engineNotice && (
@@ -1372,23 +1817,69 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* 左栏：上边是讲者基本情况（随收听分析动态扩展字段），下面还是原提问区 */}
         <aside className="w-[330px] xl:w-[350px] shrink-0 border-r border-zinc-800 bg-zinc-900/40 flex flex-col overflow-hidden">
-          {/* 左上：讲者基本情况（随收听分析动态增加字段） */}
-          <div className="max-h-[45%] min-h-[180px] overflow-y-auto border-b border-zinc-800 p-3.5 space-y-2.5">
+          {/* 左上：讲者/发言人基本情况（支持切换不同人 & 合并疑似相同发言人） */}
+          <div className="max-h-[48%] min-h-[190px] overflow-y-auto border-b border-zinc-800 p-3.5 space-y-2.5">
             {(() => {
               const primaryCounterpart =
                 snap.speakers.find((s) => s.role === 'counterpart') ?? snap.speakers[0];
+              const activeSpeaker =
+                snap.speakers.find((s) => s.id === selectedProfileSpeakerId) ??
+                primaryCounterpart ??
+                snap.speakers[0] ??
+                null;
+              const activeSpeakerIdx = activeSpeaker
+                ? Math.max(0, snap.speakers.findIndex((s) => s.id === activeSpeaker.id))
+                : 0;
               const speakerDisplayName =
+                activeSpeaker?.name ||
                 snap.prep?.counterpartName?.trim() ||
-                primaryCounterpart?.name ||
                 '待识别';
+              const speakerKindLabel =
+                activeSpeaker?.speakerKind === 'host'
+                  ? '主持人'
+                  : activeSpeaker?.speakerKind === 'guest'
+                    ? '嘉宾'
+                    : activeSpeaker?.speakerKind === 'keynote'
+                      ? '主讲人'
+                      : activeSpeaker?.speakerKind === 'audience'
+                        ? '现场提问'
+                        : activeSpeaker?.role === 'self'
+                          ? '我方视角'
+                          : '对方发言人';
               const roleBackground =
-                snap.prep?.counterpartBackground?.trim() ||
-                snap.profile.background[0]?.text ||
-                '';
-              const topicLabel = snap.prep?.topic?.trim() || snap.title?.trim() || '未设定';
+                activeSpeaker?.inferredIdentity?.trim() ||
+                (activeSpeaker?.role === 'self'
+                  ? `${speakerKindLabel}${snap.prep?.selfName ? ` · ${snap.prep.selfName}` : ''}`
+                  : activeSpeaker?.id === primaryCounterpart?.id
+                    ? snap.prep?.counterpartBackground?.trim() ||
+                      snap.profile.background[0]?.text ||
+                      speakerKindLabel
+                    : speakerKindLabel);
+              const flow = snap.topicFlow ?? [];
+              const activeTopicIdx = (() => {
+                const idx = flow.findIndex((f) => f.status === 'active');
+                return idx !== -1 ? idx : flow.length - 1;
+              })();
+              const viewedTopicIdx = (() => {
+                if (flow.length === 0) return -1;
+                if (selectedTopicId) {
+                  const matched = flow.findIndex(
+                    (f, idx) => (f.id || `${f.topic}-${idx}`) === selectedTopicId
+                  );
+                  if (matched !== -1) return matched;
+                }
+                return activeTopicIdx;
+              })();
+              const viewedTopic = viewedTopicIdx >= 0 ? flow[viewedTopicIdx] : undefined;
+              const topicLabel =
+                viewedTopic?.topic ||
+                snap.currentTopic?.trim() ||
+                snap.prep?.topic?.trim() ||
+                snap.title?.trim() ||
+                '未设定';
 
-              // 随收听分析动态计算讲者画像字段
-              const targetSpeakerId = primaryCounterpart?.id ?? null;
+              // 随收听分析动态计算当前选中发言人画像字段
+              const targetSpeakerId = activeSpeaker?.id ?? null;
               const speakerAnalytics = computeLiveSpeechAnalytics(snap, targetSpeakerId);
               const speakerShare = speakerAnalytics.speakers.find(
                 (s) => s.speakerId === targetSpeakerId
@@ -1406,7 +1897,8 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                   label: '发言占比',
                   value: (
                     <span className="text-zinc-200 font-mono">
-                      {speakerShare.sharePct}% · {speakerShare.charCount} 字
+                      {speakerShare.sharePct}% · {speakerShare.charCount} 字 ·{' '}
+                      {speakerShare.utteranceCount} 段
                     </span>
                   ),
                 });
@@ -1476,6 +1968,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 });
               }
 
+              const handleSwitchSpeakerStep = (delta: number) => {
+                if (snap.speakers.length <= 1) return;
+                const nextIdx =
+                  (activeSpeakerIdx + delta + snap.speakers.length) % snap.speakers.length;
+                setSelectedProfileSpeakerId(snap.speakers[nextIdx].id);
+              };
+
               return (
                 <>
                   <div className="flex items-center justify-between gap-2">
@@ -1483,47 +1982,348 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                       <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
                       <span>{isListenMode ? '讲者基本情况' : '发言人基本情况'}</span>
                     </h3>
-                    <span className="text-[10px] text-zinc-500">
-                      {dynamicFields.length > 0
-                        ? `${snap.speakers.length} 位 · 已扩展 +${dynamicFields.length} 项`
-                        : `${snap.speakers.length} 位 · 随收听扩展`}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      {snap.speakers.length > 1 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchSpeakerStep(-1)}
+                            title="上一位发言人"
+                            className="p-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
+                          >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                          </button>
+                          <span className="text-[10px] font-mono text-zinc-400 px-1">
+                            {activeSpeakerIdx + 1}/{snap.speakers.length}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchSpeakerStep(1)}
+                            title="下一位发言人"
+                            className="p-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
+                          >
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+                      {snap.speakers.length >= 2 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowManualMerge((v) => {
+                              const next = !v;
+                              if (next && snap.speakers.length >= 2) {
+                                const defTarget = activeSpeaker?.id ?? snap.speakers[0].id;
+                                const defSrc =
+                                  snap.speakers.find((s) => s.id !== defTarget)?.id ?? '';
+                                setManualMergeTargetId(defTarget);
+                                setManualMergeSourceId(defSrc);
+                              }
+                              return next;
+                            });
+                          }}
+                          title="手动合并发言人"
+                          className={`ml-1 px-1.5 py-0.5 rounded border text-[10px] inline-flex items-center gap-1 cursor-pointer ${
+                            showManualMerge
+                              ? 'bg-amber-500/20 border-amber-500/40 text-amber-200'
+                              : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-300'
+                          }`}
+                        >
+                          <GitMerge className="w-3 h-3" />
+                          <span>合并</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {/* 疑似相同发言人自动合并提示 */}
+                  {suspectedDuplicates.length > 0 && (
+                    <div className="rounded-lg border border-amber-500/45 bg-amber-950/25 p-2 space-y-1.5 text-[11px]">
+                      <div className="flex items-center justify-between gap-1 text-amber-200 font-semibold">
+                        <span className="inline-flex items-center gap-1">
+                          <GitMerge className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          <span>检测到疑似相同发言人 ({suspectedDuplicates.length})</span>
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        {suspectedDuplicates.slice(0, 3).map((pair) => {
+                          const pairKey = `${pair.sourceSpeakerId}->${pair.targetSpeakerId}`;
+                          const swapped = Boolean(swappedDupPairs[pairKey]);
+                          const srcId = swapped ? pair.targetSpeakerId : pair.sourceSpeakerId;
+                          const tgtId = swapped ? pair.sourceSpeakerId : pair.targetSpeakerId;
+                          const srcSpk = snap.speakers.find((s) => s.id === srcId);
+                          const tgtSpk = snap.speakers.find((s) => s.id === tgtId);
+                          if (!srcSpk || !tgtSpk) return null;
+                          return (
+                            <div
+                              key={pairKey}
+                              className="rounded border border-zinc-800 bg-zinc-950/75 px-2 py-1.5 flex items-center justify-between gap-1.5"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-zinc-100 truncate flex items-center gap-1">
+                                  <span className="font-medium text-amber-200">{srcSpk.name}</span>
+                                  <span className="text-zinc-500">→</span>
+                                  <span className="font-medium text-emerald-300">{tgtSpk.name}</span>
+                                  {pair.source && (
+                                    <span className="px-1 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-[9px] text-zinc-300 shrink-0">
+                                      {pair.source === 'hybrid'
+                                        ? '声纹+内容'
+                                        : pair.source === 'content'
+                                          ? '内容'
+                                          : pair.source === 'name'
+                                            ? '同名'
+                                            : '声纹'}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-zinc-400 truncate">
+                                  {pair.reason}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  title="交换保留的发言人名称"
+                                  onClick={() =>
+                                    setSwappedDupPairs((prev) => ({
+                                      ...prev,
+                                      [pairKey]: !prev[pairKey],
+                                    }))
+                                  }
+                                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
+                                >
+                                  <ArrowLeftRight className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (mergeLiveSpeakers(srcId, tgtId)) {
+                                      setSelectedProfileSpeakerId(tgtId);
+                                      onNotify(
+                                        `已将「${srcSpk.name}」合并至「${tgtSpk.name}」`
+                                      );
+                                    }
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-[10px] cursor-pointer"
+                                >
+                                  合并
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 手动合并面板 */}
+                  {showManualMerge && snap.speakers.length >= 2 && (
+                    <div className="rounded-lg border border-zinc-700 bg-zinc-950/85 p-2.5 space-y-2 text-[11px]">
+                      <div className="flex items-center justify-between text-zinc-300 font-medium">
+                        <span>手动合并发言人</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowManualMerge(false)}
+                          className="text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
+                        <select
+                          value={manualMergeSourceId}
+                          onChange={(e) => setManualMergeSourceId(e.target.value)}
+                          className="h-7 px-1.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-200 text-[11px] min-w-0"
+                        >
+                          {snap.speakers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              移出: {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="text-zinc-500">→</span>
+                        <select
+                          value={manualMergeTargetId}
+                          onChange={(e) => setManualMergeTargetId(e.target.value)}
+                          className="h-7 px-1.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-200 text-[11px] min-w-0"
+                        >
+                          {snap.speakers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              保留: {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={
+                            !manualMergeSourceId ||
+                            !manualMergeTargetId ||
+                            manualMergeSourceId === manualMergeTargetId
+                          }
+                          onClick={() => {
+                            const srcName =
+                              snap.speakers.find((s) => s.id === manualMergeSourceId)?.name ?? '';
+                            const tgtName =
+                              snap.speakers.find((s) => s.id === manualMergeTargetId)?.name ?? '';
+                            if (mergeLiveSpeakers(manualMergeSourceId, manualMergeTargetId)) {
+                              setSelectedProfileSpeakerId(manualMergeTargetId);
+                              setShowManualMerge(false);
+                              onNotify(`已将「${srcName}」合并至「${tgtName}」`);
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-45 text-white font-medium text-[11px] cursor-pointer"
+                        >
+                          确认合并
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80 text-[11px]">
                     <div className="grid grid-cols-[76px_1fr] items-center gap-2 px-2.5 py-1.5">
                       <span className="text-zinc-500 font-medium shrink-0">
-                        {isListenMode ? '讲者姓名' : '核心对象'}
+                        {isListenMode ? '当前讲者' : '当前查看'}
                       </span>
-                      <span className="text-zinc-100 font-semibold truncate">
-                        {speakerDisplayName}
-                      </span>
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-zinc-100 font-semibold truncate">
+                            {speakerDisplayName}
+                          </span>
+                          {activeSpeaker && (
+                            <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 text-[10px] shrink-0">
+                              {activeSpeaker.role === 'self' ? '我方' : '对方'}
+                            </span>
+                          )}
+                        </div>
+                        {activeSpeaker?.inferredName &&
+                          activeSpeaker.inferredName !== activeSpeaker.name && (
+                            <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-cyan-300">
+                              <span>内容识别可能是「{activeSpeaker.inferredName}」</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  applyInferredSpeakerName(activeSpeaker.id);
+                                  onNotify(`已采纳改名为「${activeSpeaker.inferredName}」`);
+                                }}
+                                className="px-1.5 py-0.2 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 cursor-pointer"
+                              >
+                                采纳改名
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => dismissInferredSpeakerName(activeSpeaker.id)}
+                                className="px-1 py-0.2 rounded text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                              >
+                                忽略
+                              </button>
+                            </div>
+                          )}
+                      </div>
                     </div>
                     <div className="grid grid-cols-[76px_1fr] items-start gap-2 px-2.5 py-1.5">
                       <span className="text-zinc-500 font-medium shrink-0">身份定位</span>
-                      <span className={roleBackground ? 'text-zinc-200 leading-snug' : 'text-zinc-500'}>
-                        {roleBackground || '待从发言中自动识别…'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-[76px_1fr] items-center gap-2 px-2.5 py-1.5">
-                      <span className="text-zinc-500 font-medium shrink-0">当前议题</span>
-                      <span className="text-zinc-200 truncate">{topicLabel}</span>
+                      <div className="min-w-0 space-y-0.5">
+                        <span className={roleBackground ? 'text-zinc-200 leading-snug block' : 'text-zinc-500 block'}>
+                          {roleBackground || '待从发言中自动识别…'}
+                        </span>
+                        {activeSpeaker?.inferredIdentity && activeSpeaker.identityEvidence && (
+                          <span className="text-[10px] text-zinc-400 block truncate" title={activeSpeaker.identityEvidence}>
+                            依据：{activeSpeaker.identityEvidence}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div className="grid grid-cols-[76px_1fr] items-start gap-2 px-2.5 py-1.5">
-                      <span className="text-zinc-500 font-medium shrink-0 pt-0.5">发言席位</span>
+                      <span className="text-zinc-500 font-medium shrink-0 pt-0.5">当前议题</span>
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-zinc-200 truncate font-medium" title={topicLabel}>
+                            {topicLabel}
+                          </span>
+                          {flow.length > 1 && (
+                            <div className="inline-flex items-center rounded border border-zinc-700 bg-zinc-900 overflow-hidden shrink-0">
+                              <button
+                                type="button"
+                                disabled={viewedTopicIdx <= 0}
+                                onClick={() => {
+                                  const nextIdx = Math.max(0, viewedTopicIdx - 1);
+                                  const t = flow[nextIdx];
+                                  setSelectedTopicId(t.id || `${t.topic}-${nextIdx}`);
+                                }}
+                                className="px-1 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
+                                title="上一个议题"
+                              >
+                                <ChevronLeft className="w-2.5 h-2.5" />
+                              </button>
+                              <span className="px-1 text-[9.5px] font-mono text-zinc-400">
+                                {viewedTopicIdx + 1}/{flow.length}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={viewedTopicIdx >= flow.length - 1}
+                                onClick={() => {
+                                  const nextIdx = Math.min(flow.length - 1, viewedTopicIdx + 1);
+                                  const t = flow[nextIdx];
+                                  setSelectedTopicId(t.id || `${t.topic}-${nextIdx}`);
+                                }}
+                                className="px-1 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
+                                title="下一个议题"
+                              >
+                                <ChevronRight className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {flow.length > 1 && (
+                          <div className="flex flex-wrap gap-1">
+                            {flow.map((tf, tIdx) => {
+                              const tKey = tf.id || `${tf.topic}-${tIdx}`;
+                              const isSelectedTopic = tIdx === viewedTopicIdx;
+                              return (
+                                <button
+                                  key={tKey}
+                                  type="button"
+                                  onClick={() => setSelectedTopicId(tKey)}
+                                  title={`切换查看议题：${tf.topic}`}
+                                  className={`px-1.5 py-0.2 rounded border text-[9.5px] truncate max-w-[120px] cursor-pointer transition ${
+                                    isSelectedTopic
+                                      ? 'border-cyan-400/75 bg-cyan-500/20 text-cyan-200 font-semibold'
+                                      : 'border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                                  }`}
+                                >
+                                  {tf.topic}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[76px_1fr] items-start gap-2 px-2.5 py-1.5">
+                      <span className="text-zinc-500 font-medium shrink-0 pt-0.5">切换席位</span>
                       <div className="flex flex-wrap gap-1">
                         {snap.speakers.map((sp, sIdx) => {
                           const c = SPEAKER_COLORS[sIdx % SPEAKER_COLORS.length];
+                          const isSelected = sp.id === activeSpeaker?.id;
                           return (
-                            <span
+                            <button
                               key={sp.id}
-                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] ${c.badge}`}
+                              type="button"
+                              onClick={() => setSelectedProfileSpeakerId(sp.id)}
+                              title={`点击切换查看「${sp.name}」的基本情况`}
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] cursor-pointer transition ${
+                                isSelected
+                                  ? `${c.badge} ring-1 ring-white/50 shadow-sm`
+                                  : 'border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                              }`}
                             >
                               <span className="font-semibold">{sp.name}</span>
                               <span className="opacity-75">
                                 ({sp.role === 'self' ? '我方' : '对方'})
                               </span>
-                            </span>
+                            </button>
                           );
                         })}
                       </div>
@@ -1607,6 +2407,11 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                 <h3 className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                   <span>{isListenMode ? 'Q&A 提问建议' : '推动提问建议'}</span>
+                  {historyPendingQuestions.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded bg-zinc-800 border border-zinc-700 text-[9.5px] font-mono text-zinc-300">
+                      最新 {latestQuestions.length} · 历史 {historyPendingQuestions.length}
+                    </span>
+                  )}
                 </h3>
                 {snap.lastInsightAt && (
                   <p className="text-[10px] text-zinc-500">
@@ -1624,75 +2429,125 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               </button>
             </div>
 
-            {activeQuestions.length === 0 ? (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-500">
-                {snap.llmStatus === 'disabled'
-                  ? '未配置大模型 API Key，仅保留实时转写。'
-                  : isListenMode
-                    ? '讲座内容积累到一定程度后，AI 会自动提炼总结并给出 Q&A 提问建议…'
-                    : '对话积累到一定内容后，AI 会自动给出追问/深挖建议…'}
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {activeQuestions.map((q: LiveQuestion) => {
-                  const meta = questionTypeMeta(q.type, isListenMode);
-                  return (
-                    <div
-                      key={q.id}
-                      className="rounded-xl border border-zinc-800 bg-zinc-900/85 p-3 space-y-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className={`px-1.5 py-0.5 rounded border text-[10px] shrink-0 ${meta.cls}`}>
-                            {meta.label}
+            {(() => {
+              const renderQuestionCard = (q: LiveQuestion, isHistory: boolean) => {
+                const meta = questionTypeMeta(q.type, isListenMode);
+                return (
+                  <div
+                    key={q.id}
+                    className={`rounded-xl border p-3 space-y-2 ${
+                      isHistory
+                        ? 'border-zinc-800/80 bg-zinc-900/50'
+                        : 'border-zinc-800 bg-zinc-900/85'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`px-1.5 py-0.5 rounded border text-[10px] shrink-0 ${meta.cls}`}>
+                          {meta.label}
+                        </span>
+                        {isHistory && (
+                          <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[9.5px] text-zinc-400 shrink-0">
+                            {q.insightSeq ? `第${q.insightSeq}轮` : '历史保留'}
                           </span>
-                          {q.targetField && (
-                            <span
-                              className="px-1.5 py-0.5 rounded border bg-cyan-500/15 text-cyan-300 border-cyan-500/35 text-[10px] font-medium truncate"
-                              title={`该提问可获取「${q.targetField}」信息`}
-                            >
-                              可获取：{q.targetField}
-                            </span>
-                          )}
-                        </div>
-                        {q.relatedTo && (
-                          <span className="text-[10px] text-zinc-500 truncate">{q.relatedTo}</span>
+                        )}
+                        {q.targetField && (
+                          <span
+                            className="px-1.5 py-0.5 rounded border bg-cyan-500/15 text-cyan-300 border-cyan-500/35 text-[10px] font-medium truncate"
+                            title={`该提问可获取「${q.targetField}」信息`}
+                          >
+                            可获取：{q.targetField}
+                          </span>
                         )}
                       </div>
-                      <p className="text-sm font-medium text-zinc-100 leading-snug">{q.text}</p>
-                      {q.why && <p className="text-[11px] text-zinc-400">{q.why}</p>}
-                      <div className="flex items-center justify-end gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(q.text);
-                            onNotify('已复制提问到剪贴板');
-                          }}
-                          className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] text-zinc-300 cursor-pointer"
-                        >
-                          复制
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setLiveQuestionStatus(q.id, 'dismissed')}
-                          className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] text-zinc-400 cursor-pointer"
-                        >
-                          ✕ 忽略
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setLiveQuestionStatus(q.id, 'adopted')}
-                          className="px-2 py-1 rounded bg-emerald-600/80 hover:bg-emerald-500 text-[11px] text-white inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <Check className="w-3 h-3" />
-                          <span>已问</span>
-                        </button>
-                      </div>
+                      {q.relatedTo && (
+                        <span className="text-[10px] text-zinc-500 truncate">{q.relatedTo}</span>
+                      )}
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                    <p
+                      className={`text-sm font-medium leading-snug ${
+                        isHistory ? 'text-zinc-200' : 'text-zinc-100'
+                      }`}
+                    >
+                      {q.text}
+                    </p>
+                    {q.why && <p className="text-[11px] text-zinc-400">{q.why}</p>}
+                    <div className="flex items-center justify-end gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(q.text);
+                          onNotify('已复制提问到剪贴板');
+                        }}
+                        className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] text-zinc-300 cursor-pointer"
+                      >
+                        复制
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLiveQuestionStatus(q.id, 'dismissed')}
+                        className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[11px] text-zinc-400 cursor-pointer"
+                      >
+                        ✕ 忽略
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLiveQuestionStatus(q.id, 'adopted')}
+                        className="px-2 py-1 rounded bg-emerald-600/80 hover:bg-emerald-500 text-[11px] text-white inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Check className="w-3 h-3" />
+                        <span>已问</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              };
+
+              if (activeQuestions.length === 0) {
+                return (
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-500">
+                    {snap.llmStatus === 'disabled'
+                      ? '未配置大模型 API Key，仅保留实时转写。'
+                      : isListenMode
+                        ? '讲座内容积累到一定程度后，AI 会自动提炼总结并给出 Q&A 提问建议…'
+                        : '对话积累到一定内容后，AI 会自动给出追问/深挖建议…'}
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  {latestQuestions.length > 0 ? (
+                    <div className="space-y-2.5">
+                      {latestQuestions.map((q) => renderQuestionCard(q, false))}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/40 px-3 py-2 text-[11px] text-zinc-400">
+                      本轮建议已全部处理，下方保留历史待问问题
+                    </div>
+                  )}
+
+                  {historyPendingQuestions.length > 0 && (
+                    <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowHistoryQuestionsDrawer((v) => !v)}
+                        className="text-xs font-medium text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                      >
+                        {showHistoryQuestionsDrawer
+                          ? `▾ 历史保留问题 (${historyPendingQuestions.length})`
+                          : `▸ 历史保留问题 (${historyPendingQuestions.length})`}
+                      </button>
+                      {showHistoryQuestionsDrawer && (
+                        <div className="space-y-2">
+                          {historyPendingQuestions.map((q) => renderQuestionCard(q, true))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* 已问过的问题 */}
             {adoptedQuestions.length > 0 && (
@@ -1729,6 +2584,9 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
           isListenMode={isListenMode}
           onJumpToMs={scrollToUtteranceMs}
           onOverrideOutline={overrideLiveOutline}
+          onQuestionAction={setLiveQuestionStatus}
+          selectedTopicId={selectedTopicId}
+          onSelectTopicId={setSelectedTopicId}
         />
 
         {/* 右栏：流式文本原文 */}
@@ -1752,7 +2610,72 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               <span>已上传</span>
             </span>
 
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex items-center gap-1.5">
+              {(() => {
+                const curMode = snap.speakerAnalysisMode ?? 'hybrid';
+                const nextMode: LiveSpeakerAnalysisMode =
+                  curMode === 'hybrid'
+                    ? 'content'
+                    : curMode === 'content'
+                      ? 'voiceprint'
+                      : 'hybrid';
+                const modeLabel =
+                  curMode === 'hybrid'
+                    ? '声纹+内容'
+                    : curMode === 'content'
+                      ? '内容优先'
+                      : '仅声纹';
+                const isAnalyzingSpeakers = snap.speakerAnalysisStatus === 'analyzing';
+                return (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setLiveSpeakerAnalysisMode(nextMode)}
+                      className="px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-[10px] text-zinc-300 cursor-pointer transition"
+                      title="点击切换发言人分析方式（声纹+内容 / 内容优先 / 仅声纹）"
+                    >
+                      {modeLabel}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={snap.utterances.length === 0 || isAnalyzingSpeakers}
+                      onClick={() => {
+                        void requestLiveSpeakerContentAnalysis(state).then((res) => {
+                          if (!res.ok) {
+                            onNotify(res.error || '内容辨人失败');
+                            return;
+                          }
+                          if (res.mode === 'live') {
+                            onNotify('已触发实时内容辨人分析…');
+                          } else {
+                            onNotify(
+                              res.summary ||
+                                `内容辨人完成（优化 ${res.reassignedCount ?? 0} 段）`
+                            );
+                          }
+                        });
+                      }}
+                      className="px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-45 text-[10px] text-emerald-200 font-medium inline-flex items-center gap-1 cursor-pointer transition"
+                      title="结合对话内容、问答逻辑与自我介绍重新辨别发言人并推断身份姓名"
+                    >
+                      {isAnalyzingSpeakers && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
+                      <span>内容辨人</span>
+                    </button>
+                  </>
+                );
+              })()}
+              <button
+                type="button"
+                onClick={() => setAggregateTranscript((v) => !v)}
+                className={`px-1.5 py-0.5 rounded border text-[10px] cursor-pointer transition ${
+                  aggregateTranscript
+                    ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-200 font-medium'
+                    : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                }`}
+                title="在确认发言人后自动聚合连续同发言人短句，避免过短内容独占区块"
+              >
+                {aggregateTranscript ? '已聚合' : '逐句'}
+              </button>
               {snap.llmStatus === 'disabled' ? (
                 <span className="text-zinc-500">仅实时转写</span>
               ) : (
@@ -1786,7 +2709,7 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                     </span>
                   </div>
                   <p className="text-[11px] text-amber-200/75">
-                    检测到 {speakerSuggestion.candidates.length} 段声纹匹配或关联的历史语音：
+                    检测到 {speakerSuggestion.candidates.length} 段声纹或内容关联的历史语音：
                   </p>
                 </div>
                 <button
@@ -1890,14 +2813,32 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
               </div>
             )}
 
-            {snap.utterances.map((u) => {
-              const spkInfo = speakerMap.get(u.speakerId);
+            {displayBlocks.map((block) => {
+              const spkInfo = speakerMap.get(block.speakerId);
               const color = SPEAKER_COLORS[(spkInfo?.idx ?? 0) % SPEAKER_COLORS.length];
               const spkName = spkInfo?.speaker.name ?? '发言人';
-              const uncertain = u.speakerSource === 'voiceprint' || u.speakerSource === 'fallback';
-              const summaries = summariesAfterUtt.get(u.id);
-              const uploadState = uploadStates.get(u.id) ?? 'none';
-              const isHighlighted = highlightedUttId === u.id;
+              const uncertain = block.isUncertain;
+              const blockSummaries = block.utteranceIds.flatMap(
+                (id) => summariesAfterUtt.get(id) ?? []
+              );
+              const blockStates = block.utteranceIds.map(
+                (id) => uploadStates.get(id) ?? 'none'
+              );
+              const uploadState = blockStates.includes('uploading')
+                ? 'uploading'
+                : blockStates.includes('pending')
+                  ? 'pending'
+                  : blockStates.includes('uploaded')
+                    ? 'uploaded'
+                    : 'none';
+              const isHighlighted = block.utteranceIds.includes(highlightedUttId ?? '');
+              const firstUtt = block.utterances[0];
+              const correctedUtts = block.utterances.filter(
+                (u) => u.correctionStatus === 'done' && u.rawText && u.rawText !== u.text
+              );
+              const streamingUtt = block.utterances.find(
+                (u) => u.correctionStatus === 'streaming'
+              );
 
               const cardStyle =
                 uploadState === 'uploading'
@@ -1907,68 +2848,124 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                     : `border ${color.border} bg-zinc-900/60`;
 
               return (
-                <React.Fragment key={u.id}>
+                <React.Fragment key={block.id}>
                   <div
-                    id={`live-utt-${u.id}`}
                     onContextMenu={(e) =>
-                      openSpeakerCtxMenu(e, { kind: 'utterance', utteranceId: u.id })
+                      openSpeakerCtxMenu(e, { kind: 'utterance', utteranceId: firstUtt.id })
                     }
-                    title="右键可切换或新建发言人"
+                    title={
+                      block.utterances.length > 1
+                        ? '已聚合连续同发言人段落（点击发言人改全段，右键单句可单独拆分修改）'
+                        : '右键可切换或新建发言人'
+                    }
                     className={`relative rounded-xl ${cardStyle} ${
                       isHighlighted ? 'ring-2 ring-cyan-400/80 transition-shadow' : ''
                     } p-2.5 space-y-1.5`}
                   >
-                    <div className="flex items-center gap-2 text-xs">
+                    <div className="flex items-center gap-1.5 text-xs flex-wrap">
                       <button
                         type="button"
-                        onClick={() => setEditingUttId(editingUttId === u.id ? null : u.id)}
+                        onClick={() =>
+                          setEditingUttId(editingUttId === block.id ? null : block.id)
+                        }
                         className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold cursor-pointer ${color.badge}`}
                         title="点击纠正发言人"
                       >
                         {spkName}
                         {uncertain ? ' ?' : ''}
                       </button>
+                      {uncertain && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            batchAssignLiveSpeaker(
+                              block.utteranceIds,
+                              block.speakerId,
+                              applyToLabel
+                            );
+                            triggerSpeakerSuggestion(
+                              firstUtt.id,
+                              block.speakerId,
+                              spkName
+                            );
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-[10px] text-emerald-300 cursor-pointer transition"
+                          title="确认该发言人归属，并自动聚合相邻同发言人段落"
+                        >
+                          确认
+                        </button>
+                      )}
                       <span className="text-[10px] font-mono text-zinc-500">
-                        {formatLiveMmSs(u.startMs)}
+                        {block.utterances.length > 1
+                          ? `${formatLiveMmSs(block.startMs)} - ${formatLiveMmSs(block.endMs)}`
+                          : formatLiveMmSs(block.startMs)}
                       </span>
-                      {(u.voiceprintCluster || u.speakerLabel) && (
+                      {block.utterances.length > 1 && (
+                        <span className="px-1.5 py-0.2 rounded bg-zinc-800/90 border border-zinc-700/80 text-[9.5px] font-mono text-zinc-400">
+                          合 {block.utterances.length} 段
+                        </span>
+                      )}
+                      {block.voiceprintCluster && (
                         <span
                           title={
-                            u.voiceprintConfidence
-                              ? `声纹标识：${u.voiceprintCluster || u.speakerLabel} · 匹配度 ${Math.round(
-                                  u.voiceprintConfidence * 100
+                            block.voiceprintConfidence
+                              ? `声纹标识：${block.voiceprintCluster} · 匹配度 ${Math.round(
+                                  block.voiceprintConfidence * 100
                                 )}%`
-                              : `声纹标识：${u.voiceprintCluster || u.speakerLabel}`
+                              : `声纹标识：${block.voiceprintCluster}`
                           }
                           className="px-1.5 py-0.5 rounded border border-zinc-700/80 bg-zinc-950/70 text-[10px] font-mono text-zinc-400"
                         >
-                          声纹 {u.voiceprintCluster || u.speakerLabel}
-                          {typeof u.voiceprintConfidence === 'number'
-                            ? ` · ${Math.round(u.voiceprintConfidence * 100)}%`
+                          声纹 {block.voiceprintCluster}
+                          {typeof block.voiceprintConfidence === 'number'
+                            ? ` · ${Math.round(block.voiceprintConfidence * 100)}%`
+                            : ''}
+                        </span>
+                      )}
+                      {block.speakerSource === 'hybrid' && (
+                        <span
+                          title={block.speakerReason || '声纹特征与对话内容交叉印证'}
+                          className="px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/10 text-[10px] text-emerald-300"
+                        >
+                          声纹+内容
+                        </span>
+                      )}
+                      {block.speakerSource === 'content' && (
+                        <span
+                          title={block.speakerReason || '基于对话内容与上下文分析'}
+                          className="px-1.5 py-0.5 rounded border border-cyan-500/35 bg-cyan-500/10 text-[10px] text-cyan-300"
+                        >
+                          内容分析
+                          {typeof block.contentConfidence === 'number'
+                            ? ` · ${Math.round(block.contentConfidence * 100)}%`
                             : ''}
                         </span>
                       )}
 
                       <div className="ml-auto flex items-center gap-1.5">
-                        {u.correctionStatus === 'streaming' && (
+                        {streamingUtt && (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[10px]">
                             <Sparkles className="w-2.5 h-2.5 animate-pulse" />
                             <span>纠错中…</span>
                           </span>
                         )}
-                        {u.correctionStatus === 'done' &&
-                          u.rawText &&
-                          u.rawText !== u.text && (
-                            <button
-                              type="button"
-                              onClick={() => revertLiveUtteranceCorrection(u.id)}
-                              title={`原识别文本：${u.rawText}\n点击还原为原始识别文本`}
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] cursor-pointer transition"
-                            >
-                              <Sparkles className="w-2.5 h-2.5" />
-                              <span>已纠错 · 还原</span>
-                            </button>
-                          )}
+                        {correctedUtts.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              correctedUtts.forEach((u) =>
+                                revertLiveUtteranceCorrection(u.id)
+                              );
+                            }}
+                            title={`原识别文本：${correctedUtts
+                              .map((u) => u.rawText)
+                              .join(' ')}\n点击还原为原始识别文本`}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] cursor-pointer transition"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>已纠错 · 还原</span>
+                          </button>
+                        )}
                         {uploadState === 'uploaded' && (
                           <span className="text-[10px] text-emerald-400/90">✓ 已上传</span>
                         )}
@@ -1986,8 +2983,13 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    {editingUttId === u.id && (
+                    {editingUttId === block.id && (
                       <div className="mt-1 p-2.5 rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl space-y-2">
+                        {block.utterances.length > 1 && (
+                          <div className="text-[10.5px] text-cyan-300/90">
+                            将同步修改本聚合块内 {block.utterances.length} 段发言（右键单句可单独拆分修改）
+                          </div>
+                        )}
                         <div className="flex flex-wrap gap-1.5">
                           {snap.speakers.map((sp) => (
                             <div key={sp.id} className="inline-flex items-center gap-1">
@@ -1998,10 +3000,26 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                                     const nextName = renameDraft.trim();
                                     if (nextName) {
                                       renameLiveSpeaker(sp.id, nextName);
-                                      if (u.speakerId !== sp.id) {
-                                        assignLiveSpeaker(u.id, sp.id, applyToLabel);
+                                      if (block.speakerId !== sp.id) {
+                                        if (block.utterances.length > 1) {
+                                          batchAssignLiveSpeaker(
+                                            block.utteranceIds,
+                                            sp.id,
+                                            applyToLabel
+                                          );
+                                        } else {
+                                          assignLiveSpeaker(
+                                            firstUtt.id,
+                                            sp.id,
+                                            applyToLabel
+                                          );
+                                        }
                                       }
-                                      triggerSpeakerSuggestion(u.id, sp.id, nextName);
+                                      triggerSpeakerSuggestion(
+                                        firstUtt.id,
+                                        sp.id,
+                                        nextName
+                                      );
                                       onNotify(`已将发言人更名为「${nextName}」`);
                                     }
                                     setRenamingSpeakerId(null);
@@ -2029,12 +3047,28 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      assignLiveSpeaker(u.id, sp.id, applyToLabel);
-                                      triggerSpeakerSuggestion(u.id, sp.id, sp.name);
+                                      if (block.utterances.length > 1) {
+                                        batchAssignLiveSpeaker(
+                                          block.utteranceIds,
+                                          sp.id,
+                                          applyToLabel
+                                        );
+                                      } else {
+                                        assignLiveSpeaker(
+                                          firstUtt.id,
+                                          sp.id,
+                                          applyToLabel
+                                        );
+                                      }
+                                      triggerSpeakerSuggestion(
+                                        firstUtt.id,
+                                        sp.id,
+                                        sp.name
+                                      );
                                       setEditingUttId(null);
                                     }}
                                     className={`px-2 py-1 rounded text-xs cursor-pointer border ${
-                                      sp.id === u.speakerId
+                                      sp.id === block.speakerId
                                         ? 'bg-blue-600 text-white border-blue-500'
                                         : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
                                     }`}
@@ -2073,34 +3107,65 @@ export const RecordingWorkspace: React.FC<RecordingWorkspaceProps> = ({
                         uploadState === 'pending' ? 'text-zinc-200' : 'text-zinc-100'
                       }`}
                     >
-                      {u.text}
+                      {block.utterances.map((u, uIdx) => {
+                        const prevU = uIdx > 0 ? block.utterances[uIdx - 1] : null;
+                        const sep = prevU
+                          ? separatorBetweenUtterances(prevU.text, u.text)
+                          : '';
+                        const isUttHighlighted = highlightedUttId === u.id;
+                        return (
+                          <React.Fragment key={u.id}>
+                            {sep}
+                            <span
+                              id={`live-utt-${u.id}`}
+                              onContextMenu={(e) =>
+                                openSpeakerCtxMenu(e, {
+                                  kind: 'utterance',
+                                  utteranceId: u.id,
+                                })
+                              }
+                              title={
+                                block.utterances.length > 1
+                                  ? `右键可单独拆分修改此句发言人 [${formatLiveMmSs(u.startMs)}]`
+                                  : '右键可切换或新建发言人'
+                              }
+                              className={
+                                isUttHighlighted
+                                  ? 'bg-cyan-500/25 text-cyan-50 rounded px-0.5'
+                                  : undefined
+                              }
+                            >
+                              {u.text}
+                            </span>
+                          </React.Fragment>
+                        );
+                      })}
                     </p>
-                    {u.correctionStatus === 'streaming' && u.streamingCorrectedText && (
+                    {streamingUtt && streamingUtt.streamingCorrectedText && (
                       <div className="mt-1 px-2.5 py-1.5 rounded-lg bg-cyan-950/35 border border-cyan-500/25 text-xs text-cyan-200 leading-relaxed flex items-start gap-1.5">
                         <Sparkles className="w-3 h-3 text-cyan-400 shrink-0 mt-0.5 animate-pulse" />
                         <span>
-                          {u.streamingCorrectedText}
+                          {streamingUtt.streamingCorrectedText}
                           <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle bg-cyan-400/80 animate-pulse" />
                         </span>
                       </div>
                     )}
                   </div>
 
-                  {summaries &&
-                    summaries.map((ts, idx) => (
-                      <div
-                        key={`${u.id}-sum-${idx}`}
-                        className="mx-1 px-2.5 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2"
-                      >
-                        <Sparkles className="w-3 h-3 text-blue-400 shrink-0" />
-                        <span>
-                          <strong className="text-zinc-300">
-                            {speakerMap.get(ts.speakerId)?.speaker.name ?? '发言'}小结：
-                          </strong>
-                          {ts.summary}
-                        </span>
-                      </div>
-                    ))}
+                  {blockSummaries.map((ts, idx) => (
+                    <div
+                      key={`${block.id}-sum-${idx}`}
+                      className="mx-1 px-2.5 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2"
+                    >
+                      <Sparkles className="w-3 h-3 text-blue-400 shrink-0" />
+                      <span>
+                        <strong className="text-zinc-300">
+                          {speakerMap.get(ts.speakerId)?.speaker.name ?? '发言'}小结：
+                        </strong>
+                        {ts.summary}
+                      </span>
+                    </div>
+                  ))}
                 </React.Fragment>
               );
             })}

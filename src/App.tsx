@@ -1218,6 +1218,13 @@ export const App: React.FC = () => {
       void handleOpenProjectFile();
       return;
     }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'e') {
+      e.preventDefault();
+      if (!loadingProgress.active) {
+        void handleExportMasterAudio(e.shiftKey ? 'wav' : 'mp3');
+      }
+      return;
+    }
     if (!inInput && (e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
       if (undoStackRef.current.length > 0) {
         e.preventDefault();

@@ -1003,16 +1003,10 @@ fn render_cold_open_block(full_aligned_mix: &[f32], spec: &ColdOpenRenderSpec) -
     voice_track
 }
 
-/// Measures ITU-R BS.1770-4 / EBU R128 integrated loudness of audio samples,
-/// and applies mastering normalization gain towards target_lufs (e.g. -16.0 LUFS)
-/// with broadcast-grade soft-knee peak limiting to guarantee <= ceiling_db (e.g. -1.0 dBTP).
-pub fn normalize_master_mix_loudness(
-    samples: &mut [f32],
-    target_lufs: f64,
-    ceiling_db: f64,
-) -> Result<(f64, f64), String> {
+/// Measures ITU-R BS.1770-4 / EBU R128 integrated loudness (LUFS) of 48kHz mono samples.
+pub fn measure_integrated_lufs(samples: &[f32]) -> f64 {
     if samples.is_empty() {
-        return Ok((-70.0, 0.0));
+        return -70.0;
     }
 
     // 1. Two-stage K-weighting IIR filter (calibrated for 48kHz sample rate)
@@ -1033,7 +1027,6 @@ pub fn normalize_master_mix_loudness(
     let n = samples.len();
     let mut filtered = Vec::with_capacity(n);
 
-    // Filter in a single pass
     let mut x1_s1 = 0.0_f64;
     let mut x2_s1 = 0.0_f64;
     let mut y1_s1 = 0.0_f64;
@@ -1046,14 +1039,12 @@ pub fn normalize_master_mix_loudness(
 
     for &s in samples.iter() {
         let x = s as f64;
-        // Stage 1
         let y_s1 = b0_s1 * x + b1_s1 * x1_s1 + b2_s1 * x2_s1 - a1_s1 * y1_s1 - a2_s1 * y2_s1;
         x2_s1 = x1_s1;
         x1_s1 = x;
         y2_s1 = y1_s1;
         y1_s1 = y_s1;
 
-        // Stage 2
         let y_s2 = b0_s2 * y_s1 + b1_s2 * x1_s2 + b2_s2 * x2_s2 - a1_s2 * y1_s2 - a2_s2 * y2_s2;
         x2_s2 = x1_s2;
         x1_s2 = y_s1;
@@ -1065,7 +1056,7 @@ pub fn normalize_master_mix_loudness(
 
     // 2. Gated block measurement (400ms window, 100ms hop)
     let block_size = (SAMPLE_RATE as usize * 400) / 1000; // 19200 samples @ 48kHz
-    let hop_size = (SAMPLE_RATE as usize * 100) / 1000;   // 4800 samples @ 48kHz
+    let hop_size = (SAMPLE_RATE as usize * 100) / 1000; // 4800 samples @ 48kHz
 
     let mut block_energies = Vec::new();
     if n >= block_size {
@@ -1098,7 +1089,7 @@ pub fn normalize_master_mix_loudness(
     };
 
     if initial_lufs <= -68.0 {
-        return Ok((initial_lufs, 0.0));
+        return initial_lufs;
     }
 
     // Relative threshold gating: Gamma_r = initial_lufs - 10.0 dB
@@ -1109,43 +1100,143 @@ pub fn normalize_master_mix_loudness(
         .map(|&(msq, _)| msq)
         .collect();
 
-    let integrated_lufs = if rel_blocks.is_empty() {
+    if rel_blocks.is_empty() {
         initial_lufs
     } else {
         let avg_rel = rel_blocks.iter().sum::<f64>() / (rel_blocks.len() as f64);
         -0.691 + 10.0 * avg_rel.max(1e-12).log10()
-    };
+    }
+}
 
-    // 3. Compute delta gain needed to align to target_lufs
-    let delta_db = (target_lufs - integrated_lufs).clamp(-14.0, 14.0);
-    let mut linear_gain = 10.0_f64.powf(delta_db / 20.0) as f32;
-
-    // 4. True-peak ceiling headroom protection (-1.0 dBTP ≈ 0.89125 linear)
-    let ceiling_linear = db_to_linear(ceiling_db);
-    let max_peak = samples.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
-    let est_peak = max_peak * linear_gain;
-
-    // If excessive peak overshoot would trigger harsh distortion, dial back global gain smoothly
-    if est_peak > ceiling_linear * 1.12 {
-        linear_gain *= (ceiling_linear * 1.12) / est_peak;
+/// Broadcast-grade lookahead peak limiter: tames transient spikes smoothly to <= ceiling_linear
+/// without pulling down the global loudness of surrounding speech.
+fn apply_lookahead_peak_limiter(samples: &mut [f32], ceiling_linear: f32) {
+    let n = samples.len();
+    if n == 0 || ceiling_linear <= 0.0 {
+        return;
     }
 
-    // 5. Apply gain with smooth mastering soft-knee limiter
-    let knee = ceiling_linear * 0.84;
-    for s in samples.iter_mut() {
-        let boosted = *s * linear_gain;
-        let abs_val = boosted.abs();
-        if abs_val > knee {
-            let over = abs_val - knee;
-            let headroom = (ceiling_linear - knee).max(0.005);
-            let soft = knee + headroom * (over / headroom).tanh();
-            *s = boosted.signum() * soft.min(ceiling_linear);
-        } else {
-            *s = boosted;
+    // Quick check: if no sample exceeds ceiling, no limiting needed
+    let max_abs = samples.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
+    if max_abs <= ceiling_linear {
+        return;
+    }
+
+    // 2ms lookahead @ 48kHz = 96 samples, ~35ms release
+    let lookahead = ((SAMPLE_RATE as usize) * 2) / 1000;
+    let release_coeff = (-1.0_f32 / (0.035_f32 * SAMPLE_RATE as f32)).exp();
+
+    // Compute per-sample target gain over sliding lookahead window using monotonic deque O(n)
+    let mut target_gains = vec![1.0_f32; n];
+    let mut deque: std::collections::VecDeque<(usize, f32)> = std::collections::VecDeque::new();
+    let init_end = lookahead.min(n);
+    for (idx, &s) in samples.iter().enumerate().take(init_end) {
+        let a = s.abs();
+        while let Some(&(_, back_val)) = deque.back() {
+            if back_val <= a {
+                deque.pop_back();
+            } else {
+                break;
+            }
+        }
+        deque.push_back((idx, a));
+    }
+
+    for i in 0..n {
+        let add_idx = i + lookahead;
+        if add_idx < n {
+            let a = samples[add_idx].abs();
+            while let Some(&(_, back_val)) = deque.back() {
+                if back_val <= a {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            deque.push_back((add_idx, a));
+        }
+        while let Some(&(front_idx, _)) = deque.front() {
+            if front_idx < i {
+                deque.pop_front();
+            } else {
+                break;
+            }
+        }
+        let window_peak = deque.front().map(|&(_, v)| v).unwrap_or(0.0);
+        if window_peak > ceiling_linear {
+            target_gains[i] = ceiling_linear / window_peak;
         }
     }
 
-    Ok((integrated_lufs, delta_db))
+    // Smooth gain envelope: instant attack (already ahead by 2ms), smooth release
+    let mut env = 1.0_f32;
+    let mut env_gains = vec![1.0_f32; n];
+    for i in 0..n {
+        let tg = target_gains[i];
+        if tg < env {
+            env = tg;
+        } else {
+            env = tg + (env - tg) * release_coeff;
+        }
+        env_gains[i] = env;
+    }
+
+    // Apply envelope + soft-knee safety guard so output strictly respects ceiling_linear
+    for (s, g) in samples.iter_mut().zip(env_gains.iter()) {
+        let limited = *s * *g;
+        *s = limited.clamp(-ceiling_linear, ceiling_linear);
+    }
+}
+
+/// Measures ITU-R BS.1770-4 / EBU R128 integrated loudness of audio samples,
+/// and applies closed-loop mastering normalization gain towards target_lufs (e.g. -16.0 LUFS)
+/// with broadcast-grade lookahead peak limiting to guarantee <= ceiling_db (e.g. -1.0 dBTP).
+pub fn normalize_master_mix_loudness(
+    samples: &mut [f32],
+    target_lufs: f64,
+    ceiling_db: f64,
+) -> Result<(f64, f64), String> {
+    if samples.is_empty() {
+        return Ok((-70.0, 0.0));
+    }
+
+    let initial_lufs = measure_integrated_lufs(samples);
+    if initial_lufs <= -68.0 {
+        return Ok((initial_lufs, 0.0));
+    }
+
+    let ceiling_linear = db_to_linear(ceiling_db);
+
+    // Closed-loop iterative gain + lookahead peak limiting (up to 4 passes)
+    // so transient limiting never leaves the integrated loudness below target_lufs.
+    let mut total_delta_db = 0.0_f64;
+    for pass in 0..4 {
+        let current_lufs = if pass == 0 {
+            initial_lufs
+        } else {
+            measure_integrated_lufs(samples)
+        };
+        if current_lufs <= -68.0 {
+            break;
+        }
+        let residual_db = target_lufs - current_lufs;
+        if pass > 0 && residual_db.abs() <= 0.2 {
+            break;
+        }
+        let step_db = if pass == 0 {
+            residual_db.clamp(-24.0, 24.0)
+        } else {
+            residual_db.clamp(-12.0, 12.0)
+        };
+        let gain = 10.0_f64.powf(step_db / 20.0) as f32;
+        for s in samples.iter_mut() {
+            *s *= gain;
+        }
+        apply_lookahead_peak_limiter(samples, ceiling_linear);
+        total_delta_db += step_db;
+    }
+
+    Ok((initial_lufs, total_delta_db))
 }
 
 pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResponse, String> {
@@ -1588,6 +1679,52 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
         }
     }
 
+    // 若开启去口水音/高通降噪，先在响度标准化之前执行，避免滤波改变最终响度与真峰值
+    if req.de_click_enabled {
+        let tmp_in = format!("{}.declick_in.wav", req.output_path);
+        let tmp_out = format!("{}.declick_out.wav", req.output_path);
+        if write_wav_f32(&tmp_in, &final_mix).is_ok() {
+            let af = if req.de_click_strength == "strong" {
+                "highpass=f=85,adeclick=w=55:o=75:a=2:t=1.6:b=2,equalizer=f=6200:t=q:w=2.4:g=-3.5"
+            } else {
+                "highpass=f=80,adeclick=w=45:o=75:a=2:t=2.2:b=2"
+            };
+            let status = Command::new(find_ffmpeg_bin())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .args([
+                    "-nostdin",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    &tmp_in,
+                    "-af",
+                    af,
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_f32le",
+                    &tmp_out,
+                ])
+                .output();
+            if let Ok(out) = status {
+                if out.status.success() {
+                    if let Ok(cleaned) = read_wav_f32(&tmp_out) {
+                        if !cleaned.is_empty() {
+                            final_mix = cleaned;
+                        }
+                    }
+                }
+            }
+            let _ = fs::remove_file(&tmp_in);
+            let _ = fs::remove_file(&tmp_out);
+        }
+    }
+
     // =========================================================================
     // 全局母带级音量二次标准化 (Mastering Loudness Normalization to Target LUFS)
     // 多轨合并叠加、气口剪辑及垫乐融合后，再次全音频对齐至 -16.0 LUFS 广播母带标准，
@@ -1596,9 +1733,10 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
     if req.loudness_align_enabled {
         match normalize_master_mix_loudness(&mut final_mix, req.target_lufs, -1.0) {
             Ok((meas_lufs, delta_db)) => {
+                let final_lufs = measure_integrated_lufs(&final_mix);
                 eprintln!(
-                    "[render_master_podcast_mix] 最终合并成片二次音量标准化完成: 测量响度 {:.1} LUFS -> 目标 {:.1} LUFS (调整 {:+.1} dB)",
-                    meas_lufs, req.target_lufs, delta_db
+                    "[render_master_podcast_mix] 最终合并成片二次音量标准化完成: 测量响度 {:.1} LUFS -> 目标 {:.1} LUFS (调整 {:+.1} dB, 实测成片 {:.1} LUFS)",
+                    meas_lufs, req.target_lufs, delta_db, final_lufs
                 );
             }
             Err(e) => {
@@ -1623,16 +1761,12 @@ pub fn render_master_podcast_mix(req: &RenderMixRequest) -> Result<RenderMixResp
                 "-y",
                 "-i",
                 &tmp_wav,
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "192k",
+                &req.output_path,
             ]);
-        if req.de_click_enabled {
-            let af = if req.de_click_strength == "strong" {
-                "highpass=f=85,adeclick=w=55:o=75:a=2:t=1.6:b=2,equalizer=f=6200:t=q:w=2.4:g=-3.5"
-            } else {
-                "highpass=f=80,adeclick=w=45:o=75:a=2:t=2.2:b=2"
-            };
-            cmd.args(["-af", af]);
-        }
-        cmd.args(["-codec:a", "libmp3lame", "-b:a", "192k", &req.output_path]);
         let output = cmd.output().map_err(|e| e.to_string())?;
         let _ = fs::remove_file(&tmp_wav);
         if !output.status.success() {
@@ -1760,6 +1894,49 @@ mod tests {
             "Max peak ({}) must not exceed ceiling ({})",
             max_val,
             ceiling_linear
+        );
+
+        let final_lufs = measure_integrated_lufs(&pcm);
+        assert!(
+            (final_lufs - (-16.0)).abs() <= 0.4,
+            "Final LUFS ({}) should match -16.0 LUFS",
+            final_lufs
+        );
+    }
+
+    #[test]
+    fn test_high_crest_factor_speech_reaches_minus_16_lufs() {
+        // 模拟真实人声播客：整体响度偏轻 (~-26 LUFS)，但中间有 -2 dBFS (0.78) 的瞬态尖峰
+        let len = (SAMPLE_RATE as usize) * 3;
+        let mut pcm = vec![0.0_f32; len];
+        for i in 0..len {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            pcm[i] = (2.0 * PI * 320.0 * t).sin() * 0.06;
+        }
+        // 在 1.0s 和 2.0s 处加入 20ms 瞬态尖峰 (0.78)
+        for offset in [SAMPLE_RATE as usize, (SAMPLE_RATE as usize) * 2] {
+            for k in 0..960 {
+                let t = k as f32 / SAMPLE_RATE as f32;
+                pcm[offset + k] = (2.0 * PI * 1200.0 * t).sin() * 0.78;
+            }
+        }
+
+        normalize_master_mix_loudness(&mut pcm, -16.0, -1.0).expect("Normalizing should succeed");
+
+        let ceiling_linear = db_to_linear(-1.0);
+        let max_val = pcm.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
+        assert!(
+            max_val <= ceiling_linear + 1e-4,
+            "Max peak ({}) must not exceed ceiling ({})",
+            max_val,
+            ceiling_linear
+        );
+
+        let final_lufs = measure_integrated_lufs(&pcm);
+        assert!(
+            (final_lufs - (-16.0)).abs() <= 0.4,
+            "High crest-factor speech final LUFS ({}) must still reach -16.0 LUFS",
+            final_lufs
         );
     }
 }

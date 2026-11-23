@@ -2049,6 +2049,43 @@ def diarize_single_track_locally(
             if feats[idx] is None and idx > 0:
                 labels[idx] = labels[idx - 1]
 
+    # Content-based diarization fallback when acoustic separation could not distinguish 2 speakers
+    if len(set(labels)) < 2 and len(turns) >= 2:
+        turn_texts = ["".join(str(t.get("text") or "") for t in trn).strip() for trn in turns]
+        switch_signals = 0
+        proposed = ["1"] * len(turns)
+        cur_lbl = "1"
+        switch_lead_re = re.compile(
+            r"^(?:谢谢邀请|感谢邀请|你刚才|您刚才|你刚刚|您刚刚|回答一下|关于你|我同意|我赞同|请问|想请教|老师请问)"
+        )
+        intro_call_re = re.compile(r"(?:我叫|我叫做|本人叫)\s*([\u4e00-\u9fa5A-Za-z0-9_-]{2,12})")
+        prev_intro_name: Optional[str] = None
+        for idx, txt in enumerate(turn_texts):
+            if idx == 0:
+                m0 = intro_call_re.search(txt)
+                if m0:
+                    prev_intro_name = m0.group(1)
+                continue
+            prev_txt = turn_texts[idx - 1]
+            is_switch = False
+            if (prev_txt.endswith("?") or prev_txt.endswith("？")) and len(txt) >= 6 and not (txt.endswith("?") or txt.endswith("？")):
+                is_switch = True
+            elif switch_lead_re.search(txt):
+                is_switch = True
+            else:
+                m_cur = intro_call_re.search(txt)
+                if m_cur and prev_intro_name and m_cur.group(1) != prev_intro_name:
+                    is_switch = True
+                    prev_intro_name = m_cur.group(1)
+                elif m_cur and not prev_intro_name:
+                    prev_intro_name = m_cur.group(1)
+            if is_switch:
+                switch_signals += 1
+                cur_lbl = "2" if cur_lbl == "1" else "1"
+            proposed[idx] = cur_lbl
+        if switch_signals >= 2 and len(set(proposed)) >= 2:
+            labels = proposed
+
     speaker_order: List[str] = []
     segments: List[Tuple[int, int, str]] = []
     tokens_by_speaker: Dict[str, List[Dict[str, Any]]] = {}
@@ -3010,8 +3047,8 @@ def _format_srt_ms(ms: Any) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
 
 
-def _compact_srt_transcript(srt_text: str, max_chars: int = 55000) -> str:
-    """若 SRT 字幕块过于零碎导致总长度超出上下文安全阈值，按段自适应归并相邻字幕块以保留完整正文与起止时间。"""
+def _compact_srt_transcript(srt_text: str, max_chars: int = 80000) -> str:
+    """仅当 SRT 总长度超出上下文安全阈值时，才按温和粒度归并相邻字幕块，最大程度保留自然时间分布。"""
     if len(srt_text) <= max_chars:
         return srt_text
 
@@ -3022,8 +3059,8 @@ def _compact_srt_transcript(srt_text: str, max_chars: int = 55000) -> str:
     if not matches:
         return srt_text[:max_chars]
 
-    # 先按单块约 260 字归并相邻碎块，若仍超限再增大合并粒度，确保保留从头到尾的完整内容
-    target_body_chars = 260
+    # 轻量归并（每块约 80 字），若仍超限再适度放大粒度，确保保留全文与自然时间分布
+    target_body_chars = 80
     compacted = srt_text
     for _ in range(4):
         merged_blocks = []
@@ -3123,7 +3160,7 @@ def handle_generate_shownotes(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        effective_srt = _compact_srt_transcript(srt_transcript, max_chars=55000)
+        effective_srt = _compact_srt_transcript(srt_transcript, max_chars=80000)
         prompt = (
             f"# Role\n"
             f"你是一位资深的播客制作人与内容运营专家，擅长从长篇录音转文字稿中提炼核心价值，撰写兼具吸引力与信息密度的 Shownotes（单集介绍）。\n\n"
@@ -3221,6 +3258,25 @@ def handle_generate_shownotes(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def handle_analyze_live_speakers(payload: Dict[str, Any]) -> Dict[str, Any]:
+    load_dotenv_local()
+    llm_cfg = resolve_effective_llm_config(payload)
+    from live_session import analyze_speakers_by_content
+
+    res = analyze_speakers_by_content(
+        {
+            "scenario": payload.get("scenario", "interview"),
+            "prep": payload.get("prep") or {},
+            "speakers": payload.get("speakers") or [],
+            "utterances": payload.get("utterances") or [],
+            "mode": payload.get("mode", "hybrid"),
+            "allowNewSpeakers": payload.get("allowNewSpeakers", False),
+            "llmConfig": llm_cfg,
+        }
+    )
+    return {"ok": True, **res}
+
+
 def main() -> None:
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "live":
@@ -3244,6 +3300,8 @@ def main() -> None:
             out = handle_analyze_transcript(req)
         elif command == "generate_shownotes":
             out = handle_generate_shownotes(req)
+        elif command == "analyze_live_speakers":
+            out = handle_analyze_live_speakers(req)
         else:
             out = {"ok": False, "error": f"Unknown command: {command}"}
 

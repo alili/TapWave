@@ -967,6 +967,210 @@ class LiveSessionLogicTests(unittest.TestCase):
         self.assertEqual(norm["topicFlow"][1]["status"], "active")
         self.assertEqual(norm["topicFlow"][1]["relevance"], "medium")
 
+    def test_content_speaker_analyzer_rules(self) -> None:
+        analyzer = live_session.ContentSpeakerAnalyzer()
+        # 1. Self-intro extraction & stopword protection
+        name, ident = analyzer.extract_self_intro("大家好，我叫林哲，在团队负责前端架构。")
+        self.assertEqual(name, "林哲")
+        self.assertEqual(ident, "负责前端架构")
+
+        false_name, _ = analyzer.extract_self_intro("大家好，我是觉得这个方案需要再评估一下。")
+        self.assertIsNone(false_name)
+
+        # 2. Addressed speaker handoff
+        speakers = [
+            {"id": "spk_1", "name": "张三", "role": "self"},
+            {"id": "spk_2", "name": "林哲", "role": "counterpart"},
+        ]
+        hint_handoff = analyzer.analyze_realtime(
+            text="我觉得性能确实需要重点优化。",
+            start_ms=5000,
+            end_ms=7000,
+            speakers=speakers,
+            history=[{"id": "u1", "text": "林哲你怎么看这个方案？", "startMs": 1000, "endMs": 3500, "speakerId": "spk_1"}],
+            scenario="chat",
+        )
+        self.assertEqual(hint_handoff["speakerId"], "spk_2")
+        self.assertGreaterEqual(hint_handoff["confidence"], 0.85)
+
+        # 3. Continuation clause keeps previous speaker
+        hint_cont = analyzer.analyze_realtime(
+            text="另外还有一点也很关键，就是首屏渲染耗时。",
+            start_ms=8000,
+            end_ms=10000,
+            speakers=speakers,
+            history=[{"id": "u2", "text": "刚才说到性能优化。", "startMs": 5000, "endMs": 7000, "speakerId": "spk_2"}],
+            scenario="chat",
+        )
+        self.assertEqual(hint_cont["speakerId"], "spk_2")
+
+        # 4. Interview Q&A heuristic
+        iv_speakers = [
+            {"id": "spk_self", "name": "主持人", "role": "self"},
+            {"id": "spk_other", "name": "嘉宾", "role": "counterpart"},
+        ]
+        q_hint = analyzer.analyze_realtime(
+            text="请问当时为什么决定从零重写这套引擎？",
+            start_ms=1000,
+            end_ms=3000,
+            speakers=iv_speakers,
+            history=[],
+            scenario="interview",
+        )
+        self.assertEqual(q_hint["speakerId"], "spk_self")
+        a_hint = analyzer.analyze_realtime(
+            text="其实我们当时遇到最大的瓶颈是旧架构扩展性太差，每次迭代都很慢。",
+            start_ms=3500,
+            end_ms=7000,
+            speakers=iv_speakers,
+            history=[{"id": "u1", "text": "请问当时为什么决定从零重写这套引擎？", "startMs": 1000, "endMs": 3000, "speakerId": "spk_self"}],
+            scenario="interview",
+        )
+        self.assertEqual(a_hint["speakerId"], "spk_other")
+
+    def test_speaker_resolver_content_fusion_and_manual_protection(self) -> None:
+        speakers = [
+            {"id": "spk_self", "name": "我", "role": "self"},
+            {"id": "spk_other", "name": "嘉宾", "role": "counterpart"},
+        ]
+        # Fallback utterance rescued by content in hybrid mode
+        res_hybrid = live_session.SpeakerResolver(
+            speakers=speakers,
+            first_speaker_id="spk_other",
+            scenario="interview",
+            analysis_mode="hybrid",
+        )
+        spk1, _, src1 = res_hybrid.resolve(
+            "u_1", 0, 500, text="请问您对明年的开源生态怎么看？"
+        )
+        self.assertEqual(spk1, "spk_self")
+        self.assertEqual(src1, "content")
+
+        # Voiceprint-only mode ignores content hints
+        res_vp = live_session.SpeakerResolver(
+            speakers=speakers,
+            first_speaker_id="spk_other",
+            scenario="interview",
+            analysis_mode="voiceprint",
+        )
+        spk_vp, _, src_vp = res_vp.resolve(
+            "u_1", 0, 500, text="请问您对明年的开源生态怎么看？"
+        )
+        self.assertEqual(spk_vp, "spk_other")
+        self.assertEqual(src_vp, "fallback")
+
+        # apply_content_analysis must protect manual utterances
+        res_hybrid.resolve("u_2", 1000, 1400, cloud_speaker_id="1", text="其实我觉得很乐观。")
+        res_hybrid.assign("u_2", "spk_other", apply_to_label=False)
+        applied = res_hybrid.apply_content_analysis(
+            {
+                "engine": "local_rules",
+                "reassignments": [
+                    {"utteranceId": "u_2", "speakerId": "spk_self", "speakerSource": "content", "contentConfidence": 0.95, "reason": "尝试覆盖"},
+                ],
+                "speakerProfiles": [
+                    {"speakerId": "spk_other", "inferredName": "张伟", "inferredIdentity": "开源作者", "confidence": 0.9}
+                ],
+            }
+        )
+        self.assertEqual(applied["reassignments"], [])
+        self.assertEqual(res_hybrid._utterances["u_2"]["speakerId"], "spk_other")
+        self.assertEqual(res_hybrid._utterances["u_2"]["speakerSource"], "manual")
+        self.assertEqual(res_hybrid.speakers[1].get("inferredName"), "张伟")
+
+    def test_speaker_content_prompt_normalize_and_mock_llm(self) -> None:
+        speakers = [
+            {"id": "spk_1", "name": "发言人 1", "role": "self"},
+            {"id": "spk_2", "name": "发言人 2", "role": "counterpart"},
+        ]
+        utterances = [
+            {"id": "u_1", "text": "大家好，我叫陈默，请问你对端侧AI怎么看？", "startMs": 0, "endMs": 3000, "speakerId": "spk_1", "speakerSource": "manual"},
+            {"id": "u_2", "text": "谢谢你的问题，我是做底层推理引擎的，非常看好端侧部署。", "startMs": 3200, "endMs": 8000, "speakerId": "spk_1", "speakerSource": "voiceprint", "voiceprintConfidence": 0.6},
+        ]
+        prompt = live_session.build_speaker_content_analysis_prompt(
+            {"scenario": "interview", "prep": {"topic": "端侧AI"}, "speakers": speakers, "utterances": utterances, "mode": "hybrid"}
+        )
+        self.assertIn("已人工确认锚点(严禁修改)", prompt)
+        self.assertIn("u_2", prompt)
+
+        norm = live_session.normalize_speaker_content_analysis(
+            {
+                "reassignments": [
+                    {"utteranceId": "u_1", "speakerId": "spk_2", "confidence": 0.99, "reason": "不应修改manual"},
+                    {"utteranceId": "u_2", "speakerId": "spk_2", "confidence": 0.88, "reason": "回答前文提问"},
+                ],
+                "speakerProfiles": [
+                    {"speakerId": "spk_1", "inferredName": "陈默", "inferredIdentity": "主持人", "confidence": 0.9},
+                    {"speakerId": "spk_2", "inferredName": "觉得", "inferredIdentity": "底层推理引擎工程师", "confidence": 0.85},
+                ],
+                "duplicateHints": [],
+                "summary": "已校正 u_2 归属",
+            },
+            utterances=utterances,
+            speakers=speakers,
+            mode="hybrid",
+        )
+        self.assertEqual(len(norm["reassignments"]), 1)
+        self.assertEqual(norm["reassignments"][0]["utteranceId"], "u_2")
+        self.assertEqual(norm["speakerProfiles"][0]["inferredName"], "陈默")
+        # Stopword "觉得" should be filtered out while keeping valid inferredIdentity
+        self.assertNotIn("inferredName", norm["speakerProfiles"][1])
+        self.assertEqual(norm["speakerProfiles"][1]["inferredIdentity"], "底层推理引擎工程师")
+
+        # Fallback to local_rules when no API key is configured
+        fallback_res = live_session.analyze_speakers_by_content(
+            {"scenario": "interview", "speakers": speakers, "utterances": utterances, "mode": "hybrid", "llmConfig": {"provider": "local_only"}}
+        )
+        self.assertEqual(fallback_res["engine"], "local_rules")
+        self.assertTrue(any(p.get("inferredName") == "陈默" for p in fallback_res["speakerProfiles"]))
+
+        # Mock OpenAI-compatible endpoint for analyze_speakers_by_content
+        class _MockLlmHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args) -> None:  # noqa: A002
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                reply = {
+                    "reassignments": [
+                        {"utteranceId": "u_2", "speakerId": "spk_2", "confidence": 0.91, "reason": "明确回应提问"}
+                    ],
+                    "speakerProfiles": [
+                        {"speakerId": "spk_2", "inferredIdentity": "底层推理引擎研发", "confidence": 0.89}
+                    ],
+                    "duplicateHints": [],
+                    "summary": "大模型识别完成",
+                }
+                body = json.dumps({"choices": [{"message": {"content": json.dumps(reply, ensure_ascii=False)}}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = HTTPServer(("127.0.0.1", 0), _MockLlmHandler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            llm_res = live_session.analyze_speakers_by_content(
+                {
+                    "scenario": "interview",
+                    "speakers": speakers,
+                    "utterances": utterances,
+                    "mode": "hybrid",
+                    "llmConfig": {"provider": "openai", "apiKey": "sk-test", "baseUrl": f"http://127.0.0.1:{port}/v1", "model": "gpt-4o-mini"},
+                }
+            )
+            self.assertEqual(llm_res["engine"], "cloud_llm_openai")
+            self.assertEqual(len(llm_res["reassignments"]), 1)
+            self.assertEqual(llm_res["reassignments"][0]["speakerId"], "spk_2")
+            self.assertTrue(any(p.get("inferredName") == "陈默" for p in llm_res["speakerProfiles"]))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

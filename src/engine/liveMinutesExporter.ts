@@ -41,7 +41,13 @@ export function buildLiveSessionMarkdown(snap: LiveSessionSnapshot): string {
   lines.push('## 基本信息');
   lines.push(`- **日期**：${new Date().toLocaleDateString('zh-CN')}`);
   lines.push(`- **时长**：${formatLiveMmSs(snap.elapsedMs)}`);
-  lines.push(`- **参与人**：${snap.speakers.map((s) => s.name).join('、') || '未设定'}`);
+  lines.push(
+    `- **参与人**：${
+      snap.speakers
+        .map((s) => (s.inferredIdentity ? `${s.name}（${s.inferredIdentity}）` : s.name))
+        .join('、') || '未设定'
+    }`
+  );
   lines.push(`- **话题**：${snap.prep?.topic?.trim() || '未填写'}`);
   lines.push(`- **识别引擎**：${engineLabel}`);
   if (snap.wavPath) {

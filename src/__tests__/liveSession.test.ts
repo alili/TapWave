@@ -2,10 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { createDownsampler, int16ToBase64 } from '../engine/liveAudioCapture';
 import { buildLiveSessionMarkdown } from '../engine/liveMinutesExporter';
 import {
+  applyInferredSpeakerName,
   applyLiveEvent,
+  buildLiveAnalysisReportDoc,
   computeUtteranceUploadStates,
   createInitialLiveSnapshot,
+  dismissInferredSpeakerName,
   findSpeakerReassignSuggestions,
+  findSuspectedDuplicateSpeakers,
+  getLiveSnapshot,
+  mergeLiveSpeakers,
+  openLiveSessionFromJsonText,
+  parseAndRestoreLiveSession,
+  resetLiveSession,
 } from '../engine/liveSessionStore';
 import { LiveSessionSnapshot } from '../types/liveSession';
 
@@ -119,6 +128,36 @@ describe('liveSessionStore applyLiveEvent', () => {
     expect(snap.questions.find((q) => q.id === 'q_2')?.status).toBe('new');
     expect(snap.turnSummaries).toHaveLength(2);
     expect(snap.outline[0].status).toBe('covered');
+
+    // Third insight drops q_2 (still 'new') and introduces q_3 -> historical unasked q_2 is preserved with isLatest=false
+    snap = applyLiveEvent(snap, {
+      type: 'insight',
+      seq: 3,
+      profile: {
+        background: [{ text: '前架构师', evidenceMs: 1200 }],
+        stories: [{ title: '首次创业', gist: '半年融资', evidenceMs: 3000 }],
+        viewpoints: [],
+      },
+      questions: [
+        { id: 'q_3', type: 'deepen', text: '团队早期是怎么搭建的？', why: '看组织力', relatedTo: '团队' },
+        { id: 'q_1_dup', type: 'deepen', text: '当时为何离职', why: '重复文本测试', relatedTo: '背景' },
+      ],
+      turnSummaries: [],
+      keyPoints: ['要点A', '要点B'],
+      outlineCoverage: [],
+      generatedAt: 30000,
+    });
+    const q3 = snap.questions.find((q) => q.id === 'q_3');
+    const q2 = snap.questions.find((q) => q.id === 'q_2');
+    const q1Deduped = snap.questions.find((q) => q.id === 'q_1_dup');
+    expect(q3?.isLatest).toBe(true);
+    expect(q3?.insightSeq).toBe(3);
+    expect(q2?.status).toBe('new');
+    expect(q2?.isLatest).toBe(false);
+    expect(q2?.insightSeq).toBe(2);
+    // 文本归一化去重保留原 adopted 状态且不重复堆叠
+    expect(q1Deduped?.status).toBe('adopted');
+    expect(snap.questions.filter((q) => q.text.includes('当时为何离职'))).toHaveLength(1);
 
     // Non-fatal error keeps phase
     snap = applyLiveEvent(snap, { type: 'error', message: '提示信息', fatal: false });
@@ -590,5 +629,332 @@ describe('liveMinutesExporter buildLiveSessionMarkdown', () => {
       name: '发言人 3',
       role: 'counterpart',
     });
+  });
+});
+
+describe('liveSession report persistence, reopen & speaker merge', () => {
+  it('builds and restores analysis-report.json and raw sidecar session.json', () => {
+    const snap: LiveSessionSnapshot = {
+      ...createInitialLiveSnapshot(),
+      sessionId: 'sess_123',
+      phase: 'stopped',
+      scenario: 'chat',
+      title: '产品复盘会',
+      wavPath: '/tmp/live/recording.wav',
+      elapsedMs: 120_000,
+      speakers: [
+        { id: 'spk_1', name: '张三', role: 'self' },
+        { id: 'spk_2', name: '李四', role: 'counterpart' },
+      ],
+      utterances: [
+        {
+          id: 'u1',
+          text: '我们先看第一部分数据。',
+          startMs: 1000,
+          endMs: 5000,
+          speakerId: 'spk_1',
+          speakerSource: 'cloud',
+        },
+        {
+          id: 'u2',
+          text: '好的，转化率提升了百分之十。',
+          startMs: 6000,
+          endMs: 12000,
+          speakerId: 'spk_2',
+          speakerSource: 'voiceprint',
+        },
+      ],
+      topicFlow: [
+        {
+          id: 't1',
+          topic: '数据复盘',
+          status: 'ended',
+          relevance: 'high',
+          startMs: 1000,
+          endMs: 60000,
+          speakers: ['张三', '李四'],
+        },
+        {
+          id: 't2',
+          topic: '下周计划',
+          status: 'active',
+          relevance: 'high',
+          transitionFrom: '数据复盘',
+          startMs: 60000,
+          speakers: ['张三'],
+        },
+      ],
+      finalSummary: {
+        overview: '完成了产品数据复盘并制定下周计划。',
+        keyTakeaways: ['转化率提升 10%'],
+        nextSteps: ['跟进新版本上线'],
+      },
+    };
+
+    const doc = buildLiveAnalysisReportDoc(snap);
+    expect(doc.version).toBe(1);
+    expect(doc.speechAnalytics.utteranceCount).toBe(2);
+
+    const restoredFromReport = parseAndRestoreLiveSession(
+      JSON.stringify(doc),
+      '/tmp/live/analysis-report.json'
+    );
+    expect(restoredFromReport.phase).toBe('stopped');
+    expect(restoredFromReport.title).toBe('产品复盘会');
+    expect(restoredFromReport.wavPath).toBe('/tmp/live/recording.wav');
+    expect(restoredFromReport.outputDir).toBe('/tmp/live');
+    expect(restoredFromReport.topicFlow).toHaveLength(2);
+    expect(restoredFromReport.finalSummary?.overview).toContain('产品数据复盘');
+
+    // Also test raw sidecar session.json compatibility
+    const rawSidecarSession = {
+      sessionId: 'sess_raw',
+      scenario: 'dialogue',
+      title: '原始录制',
+      durationMs: 45_000,
+      wavPath: '/tmp/raw/rec.wav',
+      speakers: [{ id: 's1', name: '嘉宾A', role: 'counterpart' }],
+      utterances: snap.utterances,
+      latestInsight: {
+        profile: { background: [], stories: [], viewpoints: [] },
+        questions: [],
+        turnSummaries: [],
+        keyPoints: ['核心要点'],
+        topicFlow: snap.topicFlow,
+      },
+      finalSummary: snap.finalSummary,
+    };
+    const restoredFromSidecar = parseAndRestoreLiveSession(
+      JSON.stringify(rawSidecarSession),
+      '/tmp/raw/session.json'
+    );
+    expect(restoredFromSidecar.scenario).toBe('dialogue');
+    expect(restoredFromSidecar.keyPoints).toEqual(['核心要点']);
+    expect(restoredFromSidecar.topicFlow).toHaveLength(2);
+  });
+
+  it('detects suspected duplicate speakers and merges them cleanly', async () => {
+    const snap: LiveSessionSnapshot = {
+      ...createInitialLiveSnapshot(),
+      phase: 'stopped',
+      scenario: 'chat',
+      title: '多方讨论',
+      speakers: [
+        { id: 'spk_self', name: '我', role: 'self' },
+        { id: 'spk_a', name: '发言人 2', role: 'counterpart' },
+        { id: 'spk_b', name: '发言人 3', role: 'counterpart' },
+      ],
+      utterances: [
+        {
+          id: 'u1',
+          text: '开场白。',
+          startMs: 500,
+          endMs: 2000,
+          speakerId: 'spk_self',
+          speakerSource: 'manual',
+          voiceprintVector: [1, 0, 0],
+        },
+        {
+          id: 'u2',
+          text: '我觉得这个方案不错。',
+          startMs: 3000,
+          endMs: 6000,
+          speakerId: 'spk_a',
+          speakerSource: 'voiceprint',
+          voiceprintCluster: 'v1',
+          voiceprintVector: [0.1, 0.9, 0.2],
+        },
+        {
+          id: 'u3',
+          text: '我也补充一点细节。',
+          startMs: 7000,
+          endMs: 10000,
+          speakerId: 'spk_a',
+          speakerSource: 'voiceprint',
+          voiceprintCluster: 'v1',
+          voiceprintVector: [0.12, 0.88, 0.22],
+        },
+        {
+          id: 'u4',
+          text: '另外关于成本方面还要评估。',
+          startMs: 12000,
+          endMs: 16000,
+          speakerId: 'spk_b',
+          speakerSource: 'voiceprint',
+          voiceprintVector: [0.11, 0.89, 0.21],
+        },
+      ],
+      turnSummaries: [
+        { speakerId: 'spk_b', startMs: 12000, summary: '提醒评估成本' },
+      ],
+      topicFlow: [
+        {
+          id: 'tf1',
+          topic: '方案与成本',
+          status: 'active',
+          relevance: 'high',
+          startMs: 3000,
+          speakers: ['发言人 2', '发言人 3'],
+        },
+      ],
+    };
+
+    const pairs = findSuspectedDuplicateSpeakers(snap);
+    expect(pairs.length).toBeGreaterThanOrEqual(1);
+    expect(pairs[0].sourceSpeakerId).toBe('spk_b');
+    expect(pairs[0].targetSpeakerId).toBe('spk_a');
+
+    await openLiveSessionFromJsonText(
+      JSON.stringify(buildLiveAnalysisReportDoc(snap)),
+      '/tmp/merge/analysis-report.json'
+    );
+    const merged = mergeLiveSpeakers('spk_b', 'spk_a');
+    expect(merged).toBe(true);
+
+    const after = getLiveSnapshot();
+    expect(after.speakers.map((s) => s.id)).toEqual(['spk_self', 'spk_a']);
+    expect(after.utterances.find((u) => u.id === 'u4')?.speakerId).toBe('spk_a');
+    expect(after.turnSummaries[0].speakerId).toBe('spk_a');
+    expect(after.topicFlow?.[0].speakers).toEqual(['发言人 2']);
+
+    await resetLiveSession();
+  });
+
+  it('applies speaker_analysis events while protecting manual utterances and preserving voiceprints', async () => {
+    let snap: LiveSessionSnapshot = {
+      ...createInitialLiveSnapshot(),
+      phase: 'stopped',
+      scenario: 'chat',
+      title: '内容辨人测试',
+      speakerAnalysisMode: 'hybrid',
+      speakers: [
+        { id: 'spk_1', name: '发言人 1', role: 'self' },
+        { id: 'spk_2', name: '发言人 2', role: 'counterpart' },
+      ],
+      utterances: [
+        {
+          id: 'u1',
+          text: '大家好，我叫林哲，请问你对这个架构怎么看？',
+          startMs: 0,
+          endMs: 3000,
+          speakerId: 'spk_1',
+          speakerSource: 'manual',
+          voiceprintCluster: 'v0',
+        },
+        {
+          id: 'u2',
+          text: '谢谢邀请，我觉得稳定性最关键。',
+          startMs: 3200,
+          endMs: 6000,
+          speakerId: 'spk_1',
+          speakerSource: 'voiceprint',
+          voiceprintCluster: 'v1',
+          voiceprintConfidence: 0.62,
+          voiceprintVector: [0.2, 0.8, 0.1],
+        },
+      ],
+    };
+
+    snap = applyLiveEvent(snap, {
+      type: 'speaker_analysis',
+      mode: 'manual',
+      engine: 'cloud_llm_deepseek',
+      reassignments: [
+        {
+          utteranceId: 'u1',
+          speakerId: 'spk_2',
+          speakerSource: 'content',
+          contentConfidence: 0.95,
+          reason: '不应覆盖 manual',
+        },
+        {
+          utteranceId: 'u2',
+          speakerId: 'spk_2',
+          speakerSource: 'hybrid',
+          contentConfidence: 0.9,
+          reason: '回应前文提问',
+        },
+      ],
+      speakerProfiles: [
+        {
+          speakerId: 'spk_1',
+          inferredName: '林哲',
+          inferredIdentity: '主持人',
+          evidence: '[00:00] 自我介绍林哲',
+          confidence: 0.92,
+        },
+      ],
+      newSpeakers: [{ id: 'spk_3', name: '发言人 3', role: 'counterpart' }],
+      duplicateHints: [
+        {
+          sourceSpeakerId: 'spk_3',
+          targetSpeakerId: 'spk_2',
+          confidence: 0.84,
+          reason: '观点与自述一致',
+        },
+      ],
+      summary: '已优化 1 段归属',
+    });
+
+    expect(snap.utterances[0].speakerId).toBe('spk_1');
+    expect(snap.utterances[0].speakerSource).toBe('manual');
+    expect(snap.utterances[1].speakerId).toBe('spk_2');
+    expect(snap.utterances[1].speakerSource).toBe('hybrid');
+    expect(snap.utterances[1].voiceprintCluster).toBe('v1');
+    expect(snap.utterances[1].voiceprintVector).toEqual([0.2, 0.8, 0.1]);
+    expect(snap.speakers.find((s) => s.id === 'spk_1')?.inferredName).toBe('林哲');
+    expect(snap.speakers.find((s) => s.id === 'spk_1')?.inferredIdentity).toBe('主持人');
+    expect(snap.speakers).toHaveLength(3);
+
+    const dups = findSuspectedDuplicateSpeakers(snap);
+    expect(dups.some((d) => d.source === 'content' && d.sourceSpeakerId === 'spk_3')).toBe(true);
+
+    // Report persistence preserves speakerAnalysisMode & contentDuplicateHints
+    const doc = buildLiveAnalysisReportDoc(snap);
+    const restored = parseAndRestoreLiveSession(JSON.stringify(doc), '/tmp/r/analysis-report.json');
+    expect(restored.speakerAnalysisMode).toBe('hybrid');
+    expect(restored.contentDuplicateHints).toHaveLength(1);
+
+    // applyInferredSpeakerName & dismissInferredSpeakerName & mergeLiveSpeakers cleanup
+    await openLiveSessionFromJsonText(JSON.stringify(doc), '/tmp/r/analysis-report.json');
+    applyInferredSpeakerName('spk_1');
+    expect(getLiveSnapshot().speakers.find((s) => s.id === 'spk_1')?.name).toBe('林哲');
+    expect(getLiveSnapshot().speakers.find((s) => s.id === 'spk_1')?.inferredName).toBeUndefined();
+
+    dismissInferredSpeakerName('spk_2');
+    expect(mergeLiveSpeakers('spk_3', 'spk_2')).toBe(true);
+    expect(getLiveSnapshot().contentDuplicateHints).toEqual([]);
+    await resetLiveSession();
+  });
+
+  it('suggests content-related utterances when reassigning speakers', () => {
+    const speakers = [
+      { id: 'spk_host', name: '主持人', role: 'self' as const },
+      { id: 'spk_guest', name: '嘉宾', role: 'counterpart' as const },
+    ];
+    const utterances = [
+      {
+        id: 'u1',
+        text: '请问你们当时如何解决冷启动延迟问题？',
+        startMs: 1000,
+        endMs: 4000,
+        speakerId: 'spk_guest',
+        speakerSource: 'voiceprint' as const,
+        voiceprintCluster: 'v0',
+      },
+      {
+        id: 'u2',
+        text: '另外还有一点，冷启动延迟优化后吞吐量如何？',
+        startMs: 6000,
+        endMs: 9000,
+        speakerId: 'spk_guest',
+        speakerSource: 'voiceprint' as const,
+        voiceprintCluster: 'v1',
+      },
+    ];
+    const suggestions = findSpeakerReassignSuggestions(utterances, 'u1', 'spk_host', speakers);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].utteranceId).toBe('u2');
+    expect(suggestions[0].reason).toContain('内容');
   });
 });

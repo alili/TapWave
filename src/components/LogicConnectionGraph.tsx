@@ -1,39 +1,36 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
-  Clock,
-  HelpCircle,
-  Layers,
-  LayoutGrid,
+  Check,
+  Compass,
+  Copy,
+  GitBranch,
+  Link2,
   Maximize2,
   Minimize2,
-  MoveHorizontal,
+  RotateCcw,
   Sparkles,
+  X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   LogicConnectionMap,
-  LogicGraphEdge,
-  LogicGraphEdgeRelation,
-  LogicGraphNode,
   LogicRelationType,
 } from '../engine/liveSpeechAnalytics';
+import {
+  computeMindMapLayout,
+  DockedQuestion,
+  MindMapLayoutMode,
+  MindMapPositionedNode,
+} from '../engine/logicMindMapLayout';
 import { formatLiveMmSs } from '../engine/liveMinutesExporter';
 
 interface LogicConnectionGraphProps {
   logicMap: LogicConnectionMap;
   onJumpToMs: (ms: number) => void;
+  onQuestionAction?: (questionId: string, action: 'adopted' | 'dismissed') => void;
 }
-
-const NODE_H = 68;
-const H_GAP = 36;
-const ROW_GAP = 54;
-const PAD_X = 24;
-const GLOBAL_HEADER_H = 22;
-const TOP_ARC_PAD = 30;
-const LANE_GAP = 66;
-const TIMELINE_HEADER_H = 20;
-const TIMELINE_AXIS_OFFSET = 18;
-const BOTTOM_ARC_PAD = 42;
 
 const RELATION_BADGE_STYLE: Record<LogicRelationType, string> = {
   viewpoint: 'bg-blue-500/20 text-blue-200 border-blue-400/50',
@@ -51,124 +48,86 @@ const NODE_CARD_THEME: Record<
   { card: string; accent: string; label: string; dot: string }
 > = {
   viewpoint: {
-    card: 'border-blue-500/55 bg-blue-950/45 hover:border-blue-400/80',
+    card: 'border-blue-500/50 bg-blue-950/45 hover:border-blue-400/80',
     accent: 'bg-blue-400',
     label: '观点',
     dot: 'bg-blue-400',
   },
   story: {
-    card: 'border-purple-500/55 bg-purple-950/45 hover:border-purple-400/80',
+    card: 'border-purple-500/50 bg-purple-950/45 hover:border-purple-400/80',
     accent: 'bg-purple-400',
     label: '案例',
     dot: 'bg-purple-400',
   },
   causal: {
-    card: 'border-emerald-500/55 bg-emerald-950/45 hover:border-emerald-400/80',
+    card: 'border-emerald-500/50 bg-emerald-950/45 hover:border-emerald-400/80',
     accent: 'bg-emerald-400',
     label: '因果',
     dot: 'bg-emerald-400',
   },
   contrast: {
-    card: 'border-orange-500/55 bg-orange-950/45 hover:border-orange-400/80',
+    card: 'border-orange-500/50 bg-orange-950/45 hover:border-orange-400/80',
     accent: 'bg-orange-400',
     label: '转折',
     dot: 'bg-orange-400',
   },
   progression: {
-    card: 'border-teal-500/55 bg-teal-950/45 hover:border-teal-400/80',
+    card: 'border-teal-500/50 bg-teal-950/45 hover:border-teal-400/80',
     accent: 'bg-teal-400',
     label: '递进',
     dot: 'bg-teal-400',
   },
   example: {
-    card: 'border-indigo-500/55 bg-indigo-950/45 hover:border-indigo-400/80',
+    card: 'border-indigo-500/50 bg-indigo-950/45 hover:border-indigo-400/80',
     accent: 'bg-indigo-400',
     label: '举例',
     dot: 'bg-indigo-400',
   },
   conclusion: {
-    card: 'border-rose-500/55 bg-rose-950/45 hover:border-rose-400/80',
+    card: 'border-rose-500/50 bg-rose-950/45 hover:border-rose-400/80',
     accent: 'bg-rose-400',
     label: '结论',
     dot: 'bg-rose-400',
   },
   outline: {
-    card: 'border-slate-500/55 bg-slate-900/75 hover:border-slate-400/80',
+    card: 'border-slate-500/50 bg-slate-900/75 hover:border-slate-400/80',
     accent: 'bg-slate-400',
     label: '提纲',
     dot: 'bg-slate-400',
   },
 };
 
-const EDGE_COLOR: Record<LogicGraphEdgeRelation, string> = {
-  topic_link: '#38bdf8',
-  viewpoint: '#60a5fa',
-  story: '#c084fc',
-  support_of: '#818cf8',
-  example: '#818cf8',
-  causal: '#34d399',
-  contrast: '#fb923c',
-  progression: '#2dd4bf',
-  conclusion: '#fb7185',
-  echo: '#a78bfa',
-  sequence: '#64748b',
-  outline: '#94a3b8',
-  question_suggest: '#f59e0b',
-};
-
-type Side = 'top' | 'bottom' | 'left' | 'right';
-
-interface PositionedNode {
-  node: LogicGraphNode;
-  lane: 'global' | 'timeline';
-  row: number; // 全局绝对行号，用于路由判断
-  col: number;
-  x: number;
-  y: number;
-}
-
-interface RoutedEdge {
-  edge: LogicGraphEdge;
-  pathD: string;
-  labelX: number;
-  labelY: number;
-  color: string;
-}
-
-interface TimelineRowAxis {
-  row: number;
-  axisY: number;
-  startX: number;
-  endX: number;
-  nodes: PositionedNode[];
-}
-
-function cubicPointAt(
-  p0: number,
-  c1: number,
-  c2: number,
-  p3: number,
-  t: number
-): number {
-  const mt = 1 - t;
-  return (
-    mt * mt * mt * p0 +
-    3 * mt * mt * t * c1 +
-    3 * mt * t * t * c2 +
-    t * t * t * p3
-  );
-}
-
 export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
   logicMap,
   onJumpToMs,
+  onQuestionAction,
 }) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState<number>(680);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
+    width: 680,
+    height: 400,
+  });
+
+  const [layoutMode, setLayoutMode] = useState<MindMapLayoutMode>('radial');
+  const [showDockedQuestions, setShowDockedQuestions] = useState(true);
   const [onlyExpandable, setOnlyExpandable] = useState(false);
-  const [layoutMode, setLayoutMode] = useState<'fit' | 'linear'>('fit');
+  const [showCrossLinks, setShowCrossLinks] = useState(false);
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [copiedQuestionId, setCopiedQuestionId] = useState<string | null>(null);
+
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    originPanX: number;
+    originPanY: number;
+    moved: boolean;
+  } | null>(null);
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -179,579 +138,206 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isFullscreen]);
 
-  const handleJumpToMs = (ms: number) => {
-    if (isFullscreen) setIsFullscreen(false);
-    onJumpToMs(ms);
-  };
-
   useEffect(() => {
-    const el = containerRef.current;
+    const el = viewportRef.current;
     if (!el) return;
     const update = () => {
       const w = el.clientWidth;
-      if (w > 120) setContainerWidth(w);
+      const h = el.clientHeight;
+      if (w > 120) {
+        setViewportSize({ width: w, height: Math.max(280, h) });
+      }
     };
     update();
     const ro = new ResizeObserver(() => update());
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [isFullscreen]);
 
-  const layout = useMemo(() => {
-    const rawNodes = logicMap.nodes;
-    if (rawNodes.length === 0) {
-      return {
-        positioned: [] as PositionedNode[],
-        routedEdges: [] as RoutedEdge[],
-        nodeById: new Map<string, PositionedNode>(),
-        width: containerWidth,
-        height: 200,
-        nodeW: 164,
-        hasGlobal: false,
-        hasTimeline: false,
-        globalBandTop: 0,
-        timelineBandTop: 0,
-        timelineRowAxes: [] as TimelineRowAxis[],
-        timelineFlowPath: '',
-      };
-    }
+  // 聚焦可提问时临时展开被折叠的分支，避免提问被隐藏
+  const effectiveCollapsedIds = useMemo(() => {
+    if (onlyExpandable) return new Set<string>();
+    return collapsedIds;
+  }, [onlyExpandable, collapsedIds]);
 
-    const isGlobalNode = (n: LogicGraphNode): boolean => {
-      if (n.lane) return n.lane === 'global';
-      return n.kind === 'topic' || n.kind === 'outline' || Boolean(n.isRecurring);
+  const layout = useMemo(
+    () =>
+      computeMindMapLayout(logicMap, {
+        mode: layoutMode,
+        containerWidth: viewportSize.width,
+        showDockedQuestions,
+        collapsedIds: effectiveCollapsedIds,
+      }),
+    [logicMap, layoutMode, viewportSize.width, showDockedQuestions, effectiveCollapsedIds]
+  );
+
+  const effectiveZoom = zoom ?? layout.autoFitScale;
+
+  // 默认将思维导图居中放入画布视口
+  const baseOffset = useMemo(() => {
+    const scaledW = layout.width * effectiveZoom;
+    const scaledH = layout.height * effectiveZoom;
+    const canvasH = isFullscreen
+      ? viewportSize.height
+      : Math.min(540, Math.max(320, Math.ceil(scaledH + 24)));
+    return {
+      x: (viewportSize.width - scaledW) / 2,
+      y: (canvasH - scaledH) / 2,
+      canvasH,
     };
+  }, [layout.width, layout.height, effectiveZoom, viewportSize.width, viewportSize.height, isFullscreen]);
 
-    const globalNodes = rawNodes.filter(isGlobalNode);
-    const timelineAll = rawNodes.filter((n) => !isGlobalNode(n));
+  // 切换布局模式或全屏时复位手动平移
+  useEffect(() => {
+    setPan({ x: 0, y: 0 });
+  }, [layoutMode, isFullscreen]);
 
-    const globalOrder: Record<string, number> = {
-      topic: 0,
-      viewpoint: 1,
-      outline: 2,
-      question: 3,
-    };
-    const sortedGlobal = [...globalNodes].sort((a, b) => {
-      const oa = globalOrder[a.kind] ?? 4;
-      const ob = globalOrder[b.kind] ?? 4;
-      if (oa !== ob) return oa - ob;
-      if ((b.occurrenceCount ?? 0) !== (a.occurrenceCount ?? 0)) {
-        return (b.occurrenceCount ?? 0) - (a.occurrenceCount ?? 0);
-      }
-      return a.evidenceMs - b.evidenceMs;
-    });
+  const activeNodeId = hoveredNodeId ?? selectedNodeId;
 
-    const kindTieOrder: Record<string, number> = {
-      viewpoint: 0,
-      support: 1,
-      story: 2,
-      utterance: 3,
-      question: 4,
-    };
-    const sortedTimeline = [...timelineAll].sort((a, b) => {
-      if (a.evidenceMs !== b.evidenceMs) return a.evidenceMs - b.evidenceMs;
-      return (kindTieOrder[a.kind] ?? 9) - (kindTieOrder[b.kind] ?? 9);
-    });
+  // 计算当前高亮路径（祖先链 + 直接子节点 + 跨支关联）
+  const focusSets = useMemo(() => {
+    const pathNodes = new Set<string>();
+    const pathCurves = new Set<string>();
+    const crossPeerNodes = new Set<string>();
+    const branchId = activeNodeId ? layout.nodeById.get(activeNodeId)?.branchId ?? null : null;
 
-    const hasGlobal = sortedGlobal.length > 0;
-    const hasTimeline = sortedTimeline.length > 0;
-
-    // 计算一屏自适应列数与卡片宽度
-    const usableW = Math.max(320, containerWidth - PAD_X * 2);
-    const maxColsFit = Math.max(
-      2,
-      Math.min(5, Math.floor((usableW + H_GAP) / (148 + H_GAP)))
-    );
-
-    const nodeW =
-      layoutMode === 'fit'
-        ? Math.min(
-            188,
-            Math.max(138, Math.floor((usableW - (maxColsFit - 1) * H_GAP) / maxColsFit))
-          )
-        : 176;
-
-    const colsPerRow =
-      layoutMode === 'fit'
-        ? maxColsFit
-        : Math.max(sortedGlobal.length, sortedTimeline.length, 1);
-
-    const chunkRows = <T,>(items: T[], cols: number): T[][] => {
-      if (items.length === 0) return [];
-      const res: T[][] = [];
-      for (let i = 0; i < items.length; i += cols) {
-        res.push(items.slice(i, i + cols));
-      }
-      return res;
-    };
-
-    const globalRows = chunkRows(sortedGlobal, colsPerRow);
-    const timelineRows = chunkRows(sortedTimeline, colsPerRow);
-
-    const maxColsUsed = Math.max(
-      1,
-      ...globalRows.map((r) => r.length),
-      ...timelineRows.map((r) => r.length)
-    );
-    const contentW = maxColsUsed * nodeW + (maxColsUsed - 1) * H_GAP;
-    const totalW =
-      layoutMode === 'fit'
-        ? Math.max(containerWidth, contentW + PAD_X * 2)
-        : Math.max(containerWidth, contentW + PAD_X * 2);
-
-    const positioned: PositionedNode[] = [];
-    const nodeById = new Map<string, PositionedNode>();
-
-    const globalBandTop = 8;
-    let curY = globalBandTop + (hasGlobal ? GLOBAL_HEADER_H + TOP_ARC_PAD : 0);
-
-    let absRow = 0;
-    globalRows.forEach((rowNodes, rIdx) => {
-      const rowW = rowNodes.length * nodeW + (rowNodes.length - 1) * H_GAP;
-      const startX = PAD_X + Math.max(0, (totalW - PAD_X * 2 - rowW) / 2);
-      const y = curY + rIdx * (NODE_H + ROW_GAP);
-
-      rowNodes.forEach((node, colIdx) => {
-        const item: PositionedNode = {
-          node,
-          lane: 'global',
-          row: absRow,
-          col: colIdx,
-          x: startX + colIdx * (nodeW + H_GAP),
-          y,
-        };
-        positioned.push(item);
-        nodeById.set(node.id, item);
-      });
-      absRow += 1;
-    });
-
-    if (hasGlobal) {
-      curY +=
-        globalRows.length * NODE_H +
-        Math.max(0, globalRows.length - 1) * ROW_GAP;
-    }
-
-    const timelineBandTop = hasGlobal ? curY + LANE_GAP : 8;
-    const timelineStartY = hasTimeline
-      ? timelineBandTop + TIMELINE_HEADER_H + TIMELINE_AXIS_OFFSET + 6
-      : timelineBandTop;
-
-    const timelineRowAxes: TimelineRowAxis[] = [];
-    const timelineRowStride = NODE_H + ROW_GAP + 14;
-
-    timelineRows.forEach((rowNodes, rIdx) => {
-      const rowW = rowNodes.length * nodeW + (rowNodes.length - 1) * H_GAP;
-      const startX =
-        layoutMode === 'fit'
-          ? PAD_X + Math.max(0, (totalW - PAD_X * 2 - rowW) / 2)
-          : PAD_X;
-      const y = timelineStartY + rIdx * timelineRowStride;
-      const axisY = y - TIMELINE_AXIS_OFFSET;
-      const rowPositioned: PositionedNode[] = [];
-
-      rowNodes.forEach((node, colIdx) => {
-        const item: PositionedNode = {
-          node,
-          lane: 'timeline',
-          row: absRow,
-          col: colIdx,
-          x: startX + colIdx * (nodeW + H_GAP),
-          y,
-        };
-        positioned.push(item);
-        rowPositioned.push(item);
-        nodeById.set(node.id, item);
-      });
-
-      timelineRowAxes.push({
-        row: absRow,
-        axisY,
-        startX: Math.max(PAD_X, startX - 8),
-        endX: Math.min(totalW - PAD_X, startX + rowW + 14),
-        nodes: rowPositioned,
-      });
-
-      absRow += 1;
-    });
-
-    const totalH = hasTimeline
-      ? timelineStartY +
-        timelineRows.length * NODE_H +
-        Math.max(0, timelineRows.length - 1) * (ROW_GAP + 14) +
-        BOTTOM_ARC_PAD
-      : curY + BOTTOM_ARC_PAD;
-
-    // ===== 时间轴柔性曲线（粗线、彩色、支持微弧与跨行 S 形回环） =====
-    let timelineFlowPath = '';
-    if (timelineRowAxes.length > 0) {
-      const segs: string[] = [];
-      timelineRowAxes.forEach((rowAxis, rIdx) => {
-        const pts = rowAxis.nodes.map((n) => ({
-          x: n.x + nodeW / 2,
-          y: rowAxis.axisY,
-        }));
-        if (pts.length === 0) return;
-
-        const rowStartX = Math.min(rowAxis.startX, pts[0].x - 12);
-        const rowEndX = Math.max(rowAxis.endX, pts[pts.length - 1].x + 12);
-
-        if (rIdx === 0) {
-          segs.push(`M ${rowStartX.toFixed(1)} ${rowAxis.axisY.toFixed(1)}`);
-          segs.push(
-            `Q ${((rowStartX + pts[0].x) / 2).toFixed(1)} ${(rowAxis.axisY - 4).toFixed(1)}, ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
-          );
+    if (activeNodeId && layout.nodeById.has(activeNodeId)) {
+      let cur: string | null | undefined = activeNodeId;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        pathNodes.add(cur);
+        const pId: string | null = layout.parentMap.get(cur) ?? null;
+        if (pId) {
+          pathCurves.add(`curve-${pId}->${cur}`);
         }
+        cur = pId;
+      }
 
-        // 同行节点间采用柔性微弧贝塞尔曲线连接，而非死板直线
-        for (let i = 0; i < pts.length - 1; i += 1) {
-          const a = pts[i];
-          const b = pts[i + 1];
-          const midX = (a.x + b.x) / 2;
-          const arch = i % 2 === 0 ? -5.5 : 4.5;
-          segs.push(
-            `C ${(a.x + (b.x - a.x) * 0.35).toFixed(1)} ${(a.y + arch).toFixed(1)}, ${(a.x + (b.x - a.x) * 0.65).toFixed(1)} ${(b.y + arch).toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}`
-          );
-          void midX;
-        }
-
-        const lastPt = pts[pts.length - 1];
-        if (rIdx === timelineRowAxes.length - 1) {
-          // 末行收尾延伸
-          segs.push(
-            `Q ${((lastPt.x + rowEndX) / 2).toFixed(1)} ${(lastPt.y - 3).toFixed(1)}, ${rowEndX.toFixed(1)} ${lastPt.y.toFixed(1)}`
-          );
-        } else {
-          // 换行：从本行末节点通过右侧→行间通道→左侧优雅 S 形回环连接到下一行首节点
-          const nextRow = timelineRowAxes[rIdx + 1];
-          const nextFirst = nextRow.nodes[0];
-          if (nextFirst) {
-            const nextPt = {
-              x: nextFirst.x + nodeW / 2,
-              y: nextRow.axisY,
-            };
-            const turnRightX = Math.min(totalW - 8, Math.max(lastPt.x + 26, rowEndX + 6));
-            const turnLeftX = Math.max(8, Math.min(nextPt.x - 26, nextRow.startX - 6));
-            const midRowY = (lastPt.y + NODE_H + TIMELINE_AXIS_OFFSET + nextPt.y) / 2;
-            segs.push(
-              `C ${turnRightX.toFixed(1)} ${lastPt.y.toFixed(1)}, ${turnRightX.toFixed(1)} ${midRowY.toFixed(1)}, ${((turnRightX + turnLeftX) / 2).toFixed(1)} ${midRowY.toFixed(1)}`
-            );
-            segs.push(
-              `C ${turnLeftX.toFixed(1)} ${midRowY.toFixed(1)}, ${turnLeftX.toFixed(1)} ${nextPt.y.toFixed(1)}, ${nextPt.x.toFixed(1)} ${nextPt.y.toFixed(1)}`
-            );
+      const activeItem = layout.nodeById.get(activeNodeId);
+      if (activeItem) {
+        for (const cId of activeItem.childIds) {
+          if (layout.nodeById.has(cId)) {
+            pathNodes.add(cId);
+            pathCurves.add(`curve-${activeItem.id}->${cId}`);
           }
         }
-      });
-      timelineFlowPath = segs.join(' ');
-    }
+      }
 
-    // ===== 边路由与端口分配（支持树状发散 + 跨多行防遮挡绕行） =====
-    type EndpointSpec = {
-      edge: LogicGraphEdge;
-      src: PositionedNode;
-      dst: PositionedNode;
-      srcSide: Side;
-      dstSide: Side;
-      mode: 'adjacent_lr' | 'arc_top' | 'arc_bottom' | 'vertical' | 'detour';
-    };
-
-    const specs: EndpointSpec[] = [];
-    for (const edge of logicMap.edges) {
-      const src = nodeById.get(edge.source);
-      const dst = nodeById.get(edge.target);
-      if (!src || !dst) continue;
-
-      const rowDiff = Math.abs(dst.row - src.row);
-      if (src.row === dst.row) {
-        const colDiff = dst.col - src.col;
-        if (colDiff === 1) {
-          specs.push({
-            edge,
-            src,
-            dst,
-            srcSide: 'right',
-            dstSide: 'left',
-            mode: 'adjacent_lr',
-          });
-        } else {
-          // 同行跨节点：上泳道走上方弧线，下泳道走下方弧线，绝不穿过中间卡片
-          const useTop = src.lane === 'global';
-          specs.push({
-            edge,
-            src,
-            dst,
-            srcSide: useTop ? 'top' : 'bottom',
-            dstSide: useTop ? 'top' : 'bottom',
-            mode: useTop ? 'arc_top' : 'arc_bottom',
-          });
-        }
-      } else if (rowDiff === 1) {
-        specs.push({
-          edge,
-          src,
-          dst,
-          srcSide: src.row < dst.row ? 'bottom' : 'top',
-          dstSide: src.row < dst.row ? 'top' : 'bottom',
-          mode: 'vertical',
-        });
-      } else {
-        // 跨多行连线：走安全绕行通道，不穿越中间行卡片
-        specs.push({
-          edge,
-          src,
-          dst,
-          srcSide: src.row < dst.row ? 'bottom' : 'top',
-          dstSide: src.row < dst.row ? 'top' : 'bottom',
-          mode: 'detour',
-        });
+      for (const link of layout.crossLinks) {
+        if (link.sourceId === activeNodeId) crossPeerNodes.add(link.targetId);
+        if (link.targetId === activeNodeId) crossPeerNodes.add(link.sourceId);
       }
     }
 
-    // 统计一对多垂直发散（树状扇出），便于共用树干出口并向子节点柔性发散
-    const fanOutGroups = new Map<string, EndpointSpec[]>();
-    for (const s of specs) {
-      if (s.mode === 'vertical') {
-        const k = `${s.src.node.id}:${s.srcSide}`;
-        const list = fanOutGroups.get(k) ?? [];
-        list.push(s);
-        fanOutGroups.set(k, list);
-      }
-    }
+    return { pathNodes, pathCurves, crossPeerNodes, branchId };
+  }, [activeNodeId, layout]);
 
-    const portBuckets = new Map<
-      string,
-      Array<{ edgeId: string; peerCenter: number }>
-    >();
-    const pushPort = (
-      nodeId: string,
-      side: Side,
-      edgeId: string,
-      peerCenter: number
-    ) => {
-      const key = `${nodeId}:${side}`;
-      const arr = portBuckets.get(key) ?? [];
-      arr.push({ edgeId, peerCenter });
-      portBuckets.set(key, arr);
-    };
-
-    for (const s of specs) {
-      const srcCx = s.src.x + nodeW / 2;
-      const srcCy = s.src.y + NODE_H / 2;
-      const dstCx = s.dst.x + nodeW / 2;
-      const dstCy = s.dst.y + NODE_H / 2;
-
-      pushPort(
-        s.src.node.id,
-        s.srcSide,
-        s.edge.id,
-        s.srcSide === 'top' || s.srcSide === 'bottom' ? dstCx : dstCy
-      );
-      pushPort(
-        s.dst.node.id,
-        s.dstSide,
-        s.edge.id,
-        s.dstSide === 'top' || s.dstSide === 'bottom' ? srcCx : srcCy
-      );
-    }
-
-    const portRatioMap = new Map<string, number>();
-    for (const [key, list] of portBuckets.entries()) {
-      list.sort((a, b) => a.peerCenter - b.peerCenter);
-      const count = list.length;
-      const isTreeFanOut = (fanOutGroups.get(key)?.length ?? 0) > 1;
-      list.forEach((item, idx) => {
-        // 树状发散时将出口收束在节点底/顶部中间区域，形成清晰的树干发散感
-        const ratio =
-          count === 1
-            ? 0.5
-            : isTreeFanOut
-              ? 0.42 + (0.16 * idx) / (count - 1)
-              : 0.22 + (0.56 * idx) / (count - 1);
-        portRatioMap.set(`${key}:${item.edgeId}`, ratio);
-      });
-    }
-
-    const getAnchor = (
-      pos: PositionedNode,
-      side: Side,
-      edgeId: string,
-      isTarget: boolean
-    ) => {
-      const ratio = portRatioMap.get(`${pos.node.id}:${side}:${edgeId}`) ?? 0.5;
-      const pad = isTarget ? 1.5 : 0;
-      switch (side) {
-        case 'top':
-          return { x: pos.x + nodeW * ratio, y: pos.y - pad };
-        case 'bottom':
-          return { x: pos.x + nodeW * ratio, y: pos.y + NODE_H + pad };
-        case 'left':
-          return { x: pos.x - pad, y: pos.y + NODE_H * ratio };
-        case 'right':
-          return { x: pos.x + nodeW + pad, y: pos.y + NODE_H * ratio };
-      }
-    };
-
-    // 计算可用垂直通道（左外侧、列间缝隙、右外侧），用于跨多行连线避障
-    const candidateGutters: number[] = [Math.max(10, PAD_X * 0.48)];
-    for (let c = 0; c < maxColsUsed - 1; c += 1) {
-      const leftBound = PAD_X + c * (nodeW + H_GAP) + nodeW;
-      candidateGutters.push(leftBound + H_GAP / 2);
-    }
-    candidateGutters.push(Math.min(totalW - 10, totalW - PAD_X * 0.48));
-
-    const pickClearGutterX = (
-      minRow: number,
-      maxRow: number,
-      preferX: number,
-      detourOffsetIdx: number
-    ): number => {
-      const middleNodes = positioned.filter(
-        (n) => n.row > minRow && n.row < maxRow
-      );
-      const clear = candidateGutters.filter((gx) =>
-        middleNodes.every((n) => gx < n.x - 6 || gx > n.x + nodeW + 6)
-      );
-      const pool = clear.length > 0 ? clear : [candidateGutters[0], candidateGutters[candidateGutters.length - 1]];
-      const sorted = [...pool].sort(
-        (a, b) => Math.abs(a - preferX) - Math.abs(b - preferX)
-      );
-      const base = sorted[0] ?? preferX;
-      // 多条绕行线轻微错开，避免重叠
-      const jitter = ((detourOffsetIdx % 3) - 1) * 5;
-      return Math.max(8, Math.min(totalW - 8, base + jitter));
-    };
-
-    let topArcIdx = 0;
-    let bottomArcIdx = 0;
-    let detourIdx = 0;
-    const routedEdges: RoutedEdge[] = specs.map((s) => {
-      const p0 = getAnchor(s.src, s.srcSide, s.edge.id, false);
-      const p3 = getAnchor(s.dst, s.dstSide, s.edge.id, true);
-      const color = EDGE_COLOR[s.edge.relation] ?? '#94a3b8';
-
-      let pathD = '';
-      let labelX = (p0.x + p3.x) / 2;
-      let labelY = (p0.y + p3.y) / 2;
-
-      if (s.mode === 'adjacent_lr') {
-        const dx = Math.max(14, (p3.x - p0.x) * 0.48);
-        const c1x = p0.x + dx;
-        const c1y = p0.y;
-        const c2x = p3.x - dx;
-        const c2y = p3.y;
-        pathD = `M ${p0.x} ${p0.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p3.x} ${p3.y}`;
-        labelX = cubicPointAt(p0.x, c1x, c2x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, 0.5) - 10;
-      } else if (s.mode === 'arc_top') {
-        const span = Math.abs(s.dst.col - s.src.col);
-        const arcLift = Math.min(34, 16 + span * 5 + (topArcIdx % 3) * 6);
-        topArcIdx += 1;
-        const cy = Math.min(p0.y, p3.y) - arcLift;
-        pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${cy}, ${p3.x} ${cy}, ${p3.x} ${p3.y}`;
-        labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) - 2;
-      } else if (s.mode === 'arc_bottom') {
-        const span = Math.abs(s.dst.col - s.src.col);
-        const arcDrop = Math.min(40, 18 + span * 6 + (bottomArcIdx % 3) * 7);
-        bottomArcIdx += 1;
-        const cy = Math.max(p0.y, p3.y) + arcDrop;
-        pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${cy}, ${p3.x} ${cy}, ${p3.x} ${p3.y}`;
-        labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, 0.5);
-        labelY = cubicPointAt(p0.y, cy, cy, p3.y, 0.5) + 4;
-      } else if (s.mode === 'detour') {
-        const minRow = Math.min(s.src.row, s.dst.row);
-        const maxRow = Math.max(s.src.row, s.dst.row);
-        const preferX = (p0.x + p3.x) / 2;
-        const gutterX = pickClearGutterX(minRow, maxRow, preferX, detourIdx);
-        detourIdx += 1;
-
-        const dir = s.src.row < s.dst.row ? 1 : -1;
-        const exitY = p0.y + dir * 20;
-        const enterY = p3.y - dir * 20;
-        const midY = (exitY + enterY) / 2;
-
-        pathD = [
-          `M ${p0.x.toFixed(1)} ${p0.y.toFixed(1)}`,
-          `C ${p0.x.toFixed(1)} ${exitY.toFixed(1)}, ${gutterX.toFixed(1)} ${p0.y.toFixed(1)}, ${gutterX.toFixed(1)} ${((exitY + midY) / 2).toFixed(1)}`,
-          `L ${gutterX.toFixed(1)} ${((enterY + midY) / 2).toFixed(1)}`,
-          `C ${gutterX.toFixed(1)} ${p3.y.toFixed(1)}, ${p3.x.toFixed(1)} ${enterY.toFixed(1)}, ${p3.x.toFixed(1)} ${p3.y.toFixed(1)}`,
-        ].join(' ');
-        labelX = gutterX;
-        labelY = midY;
-      } else {
-        // 相邻行垂直连线：支持一对多树状发散（共用短树干再柔性分叉）
-        const fanGroup = fanOutGroups.get(`${s.src.node.id}:${s.srcSide}`) ?? [];
-        const isTreeFanOut = fanGroup.length > 1;
-        const dir = s.srcSide === 'bottom' ? 1 : -1;
-
-        if (isTreeFanOut) {
-          const stemLen = 14;
-          const trunkX = s.src.x + nodeW / 2;
-          const trunkEndY = p0.y + dir * stemLen;
-          const midY = (trunkEndY + p3.y) / 2;
-          pathD = [
-            `M ${p0.x.toFixed(1)} ${p0.y.toFixed(1)}`,
-            `Q ${p0.x.toFixed(1)} ${(p0.y + dir * 7).toFixed(1)}, ${trunkX.toFixed(1)} ${trunkEndY.toFixed(1)}`,
-            `C ${trunkX.toFixed(1)} ${midY.toFixed(1)}, ${p3.x.toFixed(1)} ${midY.toFixed(1)}, ${p3.x.toFixed(1)} ${p3.y.toFixed(1)}`,
-          ].join(' ');
-          const t = 0.58;
-          labelX = cubicPointAt(trunkX, trunkX, p3.x, p3.x, t);
-          labelY = cubicPointAt(trunkEndY, midY, midY, p3.y, t);
-        } else {
-          const dy = Math.max(24, Math.abs(p3.y - p0.y) * 0.5);
-          const c1y = p0.y + dir * dy;
-          const c2y = p3.y - dir * dy;
-          pathD = `M ${p0.x} ${p0.y} C ${p0.x} ${c1y}, ${p3.x} ${c2y}, ${p3.x} ${p3.y}`;
-          const t = s.src.col % 2 === 0 ? 0.44 : 0.56;
-          labelX = cubicPointAt(p0.x, p0.x, p3.x, p3.x, t);
-          labelY = cubicPointAt(p0.y, c1y, c2y, p3.y, t);
-        }
-      }
-
-      return {
-        edge: s.edge,
-        pathD,
-        labelX,
-        labelY,
-        color,
-      };
-    });
-
-    return {
-      positioned,
-      routedEdges,
-      nodeById,
-      width: totalW,
-      height: totalH,
-      nodeW,
-      hasGlobal,
-      hasTimeline,
-      globalBandTop,
-      timelineBandTop,
-      timelineRowAxes,
-      timelineFlowPath,
-    };
-  }, [logicMap.nodes, logicMap.edges, containerWidth, layoutMode]);
-
-  const selectedNode = selectedNodeId
-    ? layout.nodeById.get(selectedNodeId)?.node ?? null
+  const selectedItem: MindMapPositionedNode | null = selectedNodeId
+    ? layout.nodeById.get(selectedNodeId) ?? null
     : null;
 
-  const connectedToSelected = useMemo(() => {
-    const ids = new Set<string>();
-    const edgeIds = new Set<string>();
-    if (!selectedNodeId) return { ids, edgeIds };
-    ids.add(selectedNodeId);
-    for (const e of logicMap.edges) {
-      if (e.source === selectedNodeId || e.target === selectedNodeId) {
-        edgeIds.add(e.id);
-        ids.add(e.source);
-        ids.add(e.target);
+  const selectedCrossPeers = useMemo(() => {
+    if (!selectedItem) return [];
+    const peers: Array<{ node: MindMapPositionedNode; label: string; color: string }> = [];
+    for (const link of layout.crossLinks) {
+      if (link.sourceId === selectedItem.id) {
+        const peer = layout.nodeById.get(link.targetId);
+        if (peer) peers.push({ node: peer, label: link.edge.label, color: link.color });
+      } else if (link.targetId === selectedItem.id) {
+        const peer = layout.nodeById.get(link.sourceId);
+        if (peer) peers.push({ node: peer, label: link.edge.label, color: link.color });
       }
     }
-    return { ids, edgeIds };
-  }, [selectedNodeId, logicMap.edges]);
+    return peers;
+  }, [selectedItem, layout]);
 
-  const expandableCount = logicMap.expandableNodeIds.length;
+  const handleJumpToMs = (ms: number) => {
+    if (isFullscreen) setIsFullscreen(false);
+    onJumpToMs(ms);
+  };
+
+  const toggleCollapse = (nodeId: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  };
+
+  const handleCopyQuestion = (q: DockedQuestion) => {
+    navigator.clipboard?.writeText(q.text).catch(() => {});
+    setCopiedQuestionId(q.id);
+    window.setTimeout(() => {
+      setCopiedQuestionId((cur) => (cur === q.id ? null : cur));
+    }, 1500);
+  };
+
+  const handleViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-mindmap-interactive="true"]')) return;
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originPanX: pan.x,
+      originPanY: pan.y,
+      moved: false,
+    };
+    setIsDragging(true);
+  };
+
+  const handleViewportMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+      dragRef.current.moved = true;
+    }
+    setPan({
+      x: dragRef.current.originPanX + dx,
+      y: dragRef.current.originPanY + dy,
+    });
+  };
+
+  const handleViewportMouseUp = () => {
+    if (dragRef.current && !dragRef.current.moved) {
+      setSelectedNodeId(null);
+    }
+    dragRef.current = null;
+    setIsDragging(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const step = e.deltaY < 0 ? 0.08 : -0.08;
+    setZoom((prev) => {
+      const base = prev ?? layout.autoFitScale;
+      return Math.max(0.55, Math.min(1.45, Number((base + step).toFixed(2))));
+    });
+  };
+
+  const adjustZoom = (delta: number) => {
+    setZoom((prev) => {
+      const base = prev ?? layout.autoFitScale;
+      return Math.max(0.55, Math.min(1.45, Number((base + delta).toFixed(2))));
+    });
+  };
+
+  const resetView = () => {
+    setZoom(null);
+    setPan({ x: 0, y: 0 });
+  };
+
+  const visibleCrossLinks = useMemo(() => {
+    if (showCrossLinks) return layout.crossLinks;
+    if (!activeNodeId) return [];
+    return layout.crossLinks.filter(
+      (l) => l.sourceId === activeNodeId || l.targetId === activeNodeId
+    );
+  }, [showCrossLinks, activeNodeId, layout.crossLinks]);
 
   return (
     <div
@@ -761,7 +347,7 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
           : 'space-y-2'
       }
     >
-      {/* 图谱控制栏 */}
+      {/* 顶部控制栏 */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] shrink-0">
         <div className="flex flex-wrap items-center gap-2 text-zinc-400">
           {isFullscreen && (
@@ -772,61 +358,129 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
               <span className="text-zinc-600">|</span>
             </>
           )}
-          <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
-            <Sparkles className="w-3 h-3" />
-            <span>可提问 ({expandableCount})</span>
+          <span className="text-zinc-300 font-medium">
+            {layoutMode === 'radial' ? '中心发散' : '向右展开'} · {layout.nodes.length} 模块 ·{' '}
+            {layout.curves.length} 枝干
           </span>
-          <span className="text-zinc-600">|</span>
-          <span>边 {logicMap.edges.length}</span>
-          <span className="text-zinc-600">|</span>
-          <span className="hidden sm:inline">
-            上：核心/反复体现观点 · 下：时间线流转
-          </span>
+          {layout.totalDockedQuestions > 0 && (
+            <>
+              <span className="text-zinc-600">|</span>
+              <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
+                <Sparkles className="w-3 h-3" />
+                <span>磁吸提问 ({layout.totalDockedQuestions})</span>
+              </span>
+            </>
+          )}
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* 布局模式切换 */}
           <div className="inline-flex rounded border border-zinc-700 bg-zinc-900 p-0.5">
             <button
               type="button"
-              onClick={() => setLayoutMode('fit')}
+              onClick={() => setLayoutMode('radial')}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] cursor-pointer transition ${
-                layoutMode === 'fit'
-                  ? 'bg-blue-500/20 text-blue-300 font-medium'
+                layoutMode === 'radial'
+                  ? 'bg-cyan-500/20 text-cyan-200 font-medium'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
-              title="自适应当前窗口宽度折行总览"
+              title="以中心主题为核心向两侧发散的思维导图布局"
             >
-              <LayoutGrid className="w-2.5 h-2.5" />
-              <span>一屏总览</span>
+              <Compass className="w-2.5 h-2.5" />
+              <span>中心发散</span>
             </button>
             <button
               type="button"
-              onClick={() => setLayoutMode('linear')}
+              onClick={() => setLayoutMode('right')}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] cursor-pointer transition ${
-                layoutMode === 'linear'
-                  ? 'bg-blue-500/20 text-blue-300 font-medium'
+                layoutMode === 'right'
+                  ? 'bg-cyan-500/20 text-cyan-200 font-medium'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
-              title="单行横向时间轴（可左右滚动）"
+              title="从左向右逐级展开的逻辑树布局"
             >
-              <MoveHorizontal className="w-2.5 h-2.5" />
-              <span>横向长轴</span>
+              <GitBranch className="w-2.5 h-2.5" />
+              <span>向右展开</span>
             </button>
           </div>
 
-          {expandableCount > 0 && (
+          {layout.totalDockedQuestions > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowDockedQuestions((v) => !v)}
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer transition ${
+                  showDockedQuestions
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/60 font-medium'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                }`}
+                title="切换提问直接在模块底部展开或收起为紧凑角标"
+              >
+                <Sparkles className="w-2.5 h-2.5" />
+                <span>{showDockedQuestions ? '提问已吸附展开' : '提问紧凑角标'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setOnlyExpandable((v) => !v)}
+                className={`px-2 py-0.5 rounded border cursor-pointer transition ${
+                  onlyExpandable
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/60 font-medium'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                }`}
+              >
+                {onlyExpandable ? '显示全部' : '聚焦可提问'}
+              </button>
+            </>
+          )}
+
+          {layout.crossLinks.length > 0 && (
             <button
               type="button"
-              onClick={() => setOnlyExpandable((v) => !v)}
-              className={`px-2 py-0.5 rounded border cursor-pointer transition ${
-                onlyExpandable
-                  ? 'bg-amber-500/20 text-amber-200 border-amber-400/60 font-medium'
+              onClick={() => setShowCrossLinks((v) => !v)}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer transition ${
+                showCrossLinks
+                  ? 'bg-purple-500/20 text-purple-200 border-purple-400/60 font-medium'
                   : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
               }`}
+              title="默认仅悬停或选中节点时展示跨支关联，点击可常驻显示全部"
             >
-              {onlyExpandable ? '显示全部' : '聚焦可提问'}
+              <Link2 className="w-2.5 h-2.5" />
+              <span>跨支关联 ({layout.crossLinks.length})</span>
             </button>
           )}
+
+          {/* 缩放与居中控制 */}
+          <div className="inline-flex items-center rounded border border-zinc-700 bg-zinc-900 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => adjustZoom(-0.1)}
+              className="px-1.5 py-0.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 cursor-pointer transition"
+              title="缩小"
+            >
+              <ZoomOut className="w-3 h-3" />
+            </button>
+            <span className="px-1.5 font-mono text-zinc-300 select-none">
+              {Math.round(effectiveZoom * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={() => adjustZoom(0.1)}
+              className="px-1.5 py-0.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 cursor-pointer transition"
+              title="放大"
+            >
+              <ZoomIn className="w-3 h-3" />
+            </button>
+            <button
+              type="button"
+              onClick={resetView}
+              className="px-1.5 py-0.5 border-l border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 cursor-pointer transition inline-flex items-center gap-0.5"
+              title="重置缩放并居中适配"
+            >
+              <RotateCcw className="w-2.5 h-2.5" />
+              <span>适配</span>
+            </button>
+          </div>
 
           <button
             type="button"
@@ -853,425 +507,542 @@ export const LogicConnectionGraph: React.FC<LogicConnectionGraphProps> = ({
         </div>
       </div>
 
-      {/* 画布容器 */}
+      {/* 思维导图画布视口 */}
       <div
-        ref={containerRef}
-        className={`relative rounded-lg border border-zinc-800/80 bg-zinc-950/80 ${
+        ref={viewportRef}
+        onMouseDown={handleViewportMouseDown}
+        onMouseMove={handleViewportMouseMove}
+        onMouseUp={handleViewportMouseUp}
+        onMouseLeave={handleViewportMouseUp}
+        onWheel={handleWheel}
+        style={{
+          height: isFullscreen ? undefined : `${baseOffset.canvasH}px`,
+          backgroundImage:
+            'radial-gradient(rgba(148, 163, 184, 0.13) 1px, transparent 1px)',
+          backgroundSize: '18px 18px',
+        }}
+        className={`relative rounded-xl border border-zinc-800/80 bg-zinc-950/85 overflow-hidden select-none ${
           isFullscreen ? 'flex-1 min-h-0' : ''
-        } ${
-          layoutMode === 'linear'
-            ? isFullscreen
-              ? 'overflow-auto'
-              : 'overflow-x-auto'
-            : isFullscreen
-              ? 'overflow-y-auto overflow-x-hidden'
-              : 'overflow-hidden'
-        }`}
+        } ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       >
         <div
-          className="relative"
-          style={{ width: `${layout.width}px`, height: `${layout.height}px` }}
+          style={{
+            width: `${layout.width}px`,
+            height: `${layout.height}px`,
+            transform: `translate(${(baseOffset.x + pan.x).toFixed(1)}px, ${(
+              baseOffset.y + pan.y
+            ).toFixed(1)}px) scale(${effectiveZoom})`,
+            transformOrigin: '0 0',
+          }}
+          className="relative transition-transform duration-75 ease-out"
         >
-          {/* 泳道标识 */}
-          {layout.hasGlobal && (
-            <div
-              className="absolute left-3 right-3 flex items-center gap-1.5 text-[10px] font-medium text-cyan-300/80 pointer-events-none"
-              style={{ top: `${layout.globalBandTop}px` }}
-            >
-              <Layers className="w-3 h-3 text-cyan-400" />
-              <span>非时间线 · 核心主题与多次体现/总结观点</span>
-            </div>
-          )}
-
-          {layout.hasTimeline && (
-            <div
-              className="absolute left-3 right-3 flex items-center gap-1.5 text-[10px] font-medium text-zinc-400 pointer-events-none"
-              style={{ top: `${layout.timelineBandTop}px` }}
-            >
-              <Clock className="w-3 h-3 text-blue-400" />
-              <span>时间线 · 线性逻辑流转</span>
-            </div>
-          )}
-
-          {/* SVG 时间轴与连线层 */}
+          {/* SVG 聚类底板、有机枝干曲线与按需跨支关联线 */}
           <svg
             width={layout.width}
             height={layout.height}
-            className="absolute inset-0 pointer-events-none"
+            className="absolute inset-0 pointer-events-none overflow-visible"
           >
-            <defs>
-              {Object.entries(EDGE_COLOR).map(([rel, color]) => (
-                <marker
-                  key={rel}
-                  id={`logic-arrow-${rel}`}
-                  markerWidth="8"
-                  markerHeight="8"
-                  refX="7"
-                  refY="4"
-                  orient="auto"
-                  markerUnits="userSpaceOnUse"
-                >
-                  <path d="M0.5,1 L7,4 L0.5,7 Z" fill={color} />
-                </marker>
-              ))}
-              <linearGradient id="logic-timeline-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.9" />
-                <stop offset="50%" stopColor="#3b82f6" stopOpacity="0.95" />
-                <stop offset="100%" stopColor="#818cf8" stopOpacity="0.9" />
-              </linearGradient>
-              <marker
-                id="logic-timeline-axis-arrow"
-                markerWidth="9"
-                markerHeight="9"
-                refX="7"
-                refY="4.5"
-                orient="auto"
-                markerUnits="userSpaceOnUse"
-              >
-                <path d="M0.5,1 L7.5,4.5 L0.5,8 Z" fill="#38bdf8" />
-              </marker>
-            </defs>
-
-            {/* 连续柔性时间流主轴（更粗 + 蓝青渐变 + 跨行 S 曲线串联） */}
-            {layout.timelineFlowPath && (
-              <path
-                d={layout.timelineFlowPath}
-                fill="none"
-                stroke="url(#logic-timeline-gradient)"
-                strokeWidth={2.8}
-                strokeLinecap="round"
-                strokeOpacity={0.85}
-                markerEnd="url(#logic-timeline-axis-arrow)"
-              />
-            )}
-
-            {/* 每行时间线节点刻度点与短引线 */}
-            {layout.timelineRowAxes.map((rowAxis) => (
-              <g key={`axis-${rowAxis.row}`}>
-                {rowAxis.nodes
-                  .filter((item) => item.node.kind !== 'question')
-                  .map((item) => {
-                    const cx = item.x + layout.nodeW / 2;
-                  return (
-                    <g key={`tick-${item.node.id}`}>
-                      <line
-                        x1={cx}
-                        y1={rowAxis.axisY}
-                        x2={cx}
-                        y2={item.y}
-                        stroke="#38bdf8"
-                        strokeOpacity={0.35}
-                        strokeWidth={1.2}
-                        strokeDasharray="2 2"
-                      />
-                      <circle
-                        cx={cx}
-                        cy={rowAxis.axisY}
-                        r={5}
-                        fill="#38bdf8"
-                        fillOpacity={0.2}
-                      />
-                      <circle
-                        cx={cx}
-                        cy={rowAxis.axisY}
-                        r={3}
-                        fill="#38bdf8"
-                        stroke="#09090b"
-                        strokeWidth={1}
-                      />
-                      <text
-                        x={cx}
-                        y={rowAxis.axisY - 7}
-                        textAnchor="middle"
-                        fontSize={8.5}
-                        fontFamily="monospace"
-                        fontWeight={600}
-                        fill="#bae6fd"
-                      >
-                        {formatLiveMmSs(item.node.evidenceMs)}
-                      </text>
-                    </g>
-                  );
-                })}
-              </g>
-            ))}
-
-            {/* 逻辑连接边 */}
-            {layout.routedEdges.map(({ edge, pathD, labelX, labelY, color }) => {
-              const srcPos = layout.nodeById.get(edge.source);
-              const dstPos = layout.nodeById.get(edge.target);
-              const isHighlighted = selectedNodeId
-                ? connectedToSelected.edgeIds.has(edge.id)
-                : onlyExpandable
-                  ? Boolean(
-                      edge.relation === 'question_suggest' ||
-                        srcPos?.node.expandableForQuestion ||
-                        dstPos?.node.expandableForQuestion ||
-                        srcPos?.node.kind === 'question' ||
-                        dstPos?.node.kind === 'question'
-                    )
-                  : true;
-
-              const isFocused =
-                selectedNodeId !== null && connectedToSelected.edgeIds.has(edge.id);
-
+            {/* 分支微聚合底板：让关联模块一眼聚成视觉块 */}
+            {layout.clusters.map((cluster) => {
+              const isBranchActive = focusSets.branchId === cluster.branchId;
               return (
-                <g
-                  key={edge.id}
-                  style={{
-                    opacity: isHighlighted ? 0.94 : 0.16,
-                    transition: 'opacity 180ms ease',
-                  }}
-                >
-                  <path
-                    d={pathD}
-                    fill="none"
-                    stroke={color}
-                    strokeWidth={isFocused ? 2.1 : 1.4}
-                    strokeDasharray={edge.dashed ? '4 3' : undefined}
-                    markerEnd={`url(#logic-arrow-${edge.relation})`}
-                  />
-                  {edge.label && (
-                    <g transform={`translate(${labelX}, ${labelY})`}>
-                      <rect
-                        x={-20}
-                        y={-7}
-                        width={40}
-                        height={13}
-                        rx={4}
-                        fill="#09090b"
-                        fillOpacity={0.92}
-                        stroke={color}
-                        strokeOpacity={0.45}
-                        strokeWidth={0.7}
-                      />
-                      <text
-                        x={0}
-                        y={2.5}
-                        textAnchor="middle"
-                        fontSize={8}
-                        fill={color}
-                        fontWeight={500}
-                      >
-                        {edge.label.slice(0, 4)}
-                      </text>
-                    </g>
-                  )}
-                </g>
+                <rect
+                  key={`cluster-${cluster.branchId}`}
+                  x={cluster.x}
+                  y={cluster.y}
+                  width={cluster.width}
+                  height={cluster.height}
+                  rx={16}
+                  fill="rgba(24, 24, 27, 0.52)"
+                  stroke={cluster.accentColor}
+                  strokeOpacity={isBranchActive ? 0.45 : 0.14}
+                  strokeWidth={isBranchActive ? 1.3 : 0.9}
+                  style={{ transition: 'stroke-opacity 180ms ease' }}
+                />
               );
             })}
+
+            {/* 思维导图单父树有机贝塞尔枝干 */}
+            {layout.curves.map((curve) => {
+              const isPathActive =
+                activeNodeId !== null && focusSets.pathCurves.has(curve.id);
+              const dimmed =
+                (activeNodeId !== null && !isPathActive) ||
+                (onlyExpandable &&
+                  !layout.questionModuleIds.includes(curve.targetId) &&
+                  !layout.questionModuleIds.includes(curve.sourceId));
+
+              return (
+                <path
+                  key={curve.id}
+                  d={curve.pathD}
+                  fill="none"
+                  stroke={curve.color}
+                  strokeWidth={
+                    curve.depth === 1
+                      ? isPathActive
+                        ? 3.2
+                        : 2.3
+                      : isPathActive
+                        ? 2.3
+                        : 1.5
+                  }
+                  strokeLinecap="round"
+                  strokeOpacity={dimmed ? 0.2 : isPathActive ? 0.95 : 0.68}
+                  style={{ transition: 'stroke-opacity 180ms ease' }}
+                />
+              );
+            })}
+
+            {/* 枝干入点装饰圆点 */}
+            {layout.nodes.map((item) => {
+              if (item.depth === 0) return null;
+              const isLeft = item.side === 'left';
+              const cx = isLeft ? item.x + item.width : item.x;
+              const cy = item.y + item.bodyHeight / 2;
+              const color =
+                layout.curves.find((c) => c.targetId === item.id)?.color ?? '#60a5fa';
+              return (
+                <circle
+                  key={`dot-${item.id}`}
+                  cx={cx}
+                  cy={cy}
+                  r={2.5}
+                  fill={color}
+                  fillOpacity={0.9}
+                />
+              );
+            })}
+
+            {/* 按需浮现的跨分支语义关联虚弧线 */}
+            {visibleCrossLinks.map((link) => (
+              <g key={`cross-${link.edge.id}`}>
+                <path
+                  d={link.pathD}
+                  fill="none"
+                  stroke={link.color}
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  strokeOpacity={0.85}
+                />
+                {link.edge.label && (
+                  <g transform={`translate(${link.labelX}, ${link.labelY})`}>
+                    <rect
+                      x={-24}
+                      y={-8}
+                      width={48}
+                      height={15}
+                      rx={5}
+                      fill="#09090b"
+                      fillOpacity={0.92}
+                      stroke={link.color}
+                      strokeOpacity={0.55}
+                      strokeWidth={0.8}
+                    />
+                    <text
+                      x={0}
+                      y={3}
+                      textAnchor="middle"
+                      fontSize={8.5}
+                      fill={link.color}
+                      fontWeight={500}
+                    >
+                      {link.edge.label.slice(0, 4)}
+                    </text>
+                  </g>
+                )}
+              </g>
+            ))}
           </svg>
 
-          {/* 节点卡片层 */}
-          {layout.positioned.map(({ node, x, y }) => {
-            const isSelected = selectedNodeId === node.id;
-            const isTopic = node.kind === 'topic';
-            const isQuestion = node.kind === 'question';
-            const dimmed =
-              (selectedNodeId !== null && !connectedToSelected.ids.has(node.id)) ||
-              (onlyExpandable && !node.expandableForQuestion && !isQuestion && !isTopic);
+          {/* HTML 节点卡片层（含内嵌论据与底部磁吸提问底座） */}
+          {layout.nodes.map((item) => {
+            const { node, x, y, width, height, bodyHeight, dockHeight, dockedQuestions } =
+              item;
+            const isTopic = item.depth === 0;
+            const isSelected = selectedNodeId === item.id;
+            const isHovered = hoveredNodeId === item.id;
+            const hasDocked = dockedQuestions.length > 0;
+            const hasAdoptedQuestion = dockedQuestions.some(
+              (q) => q.status === 'adopted'
+            );
+
+            const isFocused =
+              activeNodeId === null ||
+              focusSets.pathNodes.has(item.id) ||
+              focusSets.crossPeerNodes.has(item.id);
+            const dimmedByExpandable =
+              onlyExpandable && !isTopic && !hasDocked;
+            const dimmed = (!isFocused && activeNodeId !== null) || dimmedByExpandable;
 
             const theme = NODE_CARD_THEME[node.relation] ?? NODE_CARD_THEME.outline;
-            const borderCls = isTopic
-              ? 'border-cyan-400/70 bg-cyan-950/55 hover:border-cyan-300/90 shadow-[0_0_12px_rgba(34,211,238,0.12)]'
-              : isQuestion
-                ? 'border-dashed border-amber-400/85 bg-gradient-to-br from-amber-950/75 to-[#1c1306] hover:border-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.2)]'
-                : theme.card;
-            const accentCls = isTopic
-              ? 'bg-cyan-400'
-              : isQuestion
-                ? 'bg-amber-400'
-                : theme.accent;
+            const hasChildren = item.childIds.length > 0;
+            const firstQ = dockedQuestions[0];
 
             return (
               <div
-                key={node.id}
+                key={item.id}
+                data-mindmap-interactive="true"
                 role="button"
                 tabIndex={0}
-                onClick={() =>
-                  setSelectedNodeId((prev) => (prev === node.id ? null : node.id))
+                onMouseEnter={() => setHoveredNodeId(item.id)}
+                onMouseLeave={() =>
+                  setHoveredNodeId((cur) => (cur === item.id ? null : cur))
                 }
-                onDoubleClick={() => {
-                  if (node.evidenceMs > 0 || !isTopic) {
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedNodeId((prev) => (prev === item.id ? null : item.id));
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  if (!isTopic || node.evidenceMs > 0) {
                     handleJumpToMs(node.evidenceMs);
                   }
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
+                    setSelectedNodeId((prev) => (prev === item.id ? null : item.id));
                   }
                 }}
                 style={{
                   left: `${x}px`,
                   top: `${y}px`,
-                  width: `${layout.nodeW}px`,
-                  height: `${NODE_H}px`,
-                  opacity: dimmed ? 0.25 : 1,
+                  width: `${width}px`,
+                  height: `${height}px`,
+                  opacity: dimmed ? 0.24 : 1,
                 }}
-                className={`absolute z-10 rounded-lg border pl-2.5 pr-2 py-1.5 flex flex-col justify-between cursor-pointer transition-all select-none overflow-hidden ${borderCls} ${
-                  isSelected ? 'ring-2 ring-blue-400/80' : ''
-                }`}
+                className={`absolute z-10 rounded-xl border transition-all duration-150 cursor-pointer ${
+                  isTopic
+                    ? 'border-cyan-400/75 bg-gradient-to-br from-cyan-950/90 via-slate-900/95 to-indigo-950/85 shadow-[0_0_24px_rgba(34,211,238,0.18)] hover:border-cyan-300'
+                    : `${theme.card} shadow-sm`
+                } ${isSelected ? 'ring-2 ring-blue-400/85' : isHovered ? 'ring-1 ring-white/25' : ''}`}
               >
-                {/* 左侧彩色标识条，让不同逻辑块一目了然 */}
-                <span
-                  aria-hidden="true"
-                  className={`absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r ${accentCls}`}
-                />
-
-                <div className="flex items-center justify-between gap-1">
-                  <div className="flex items-center gap-1 min-w-0">
-                    {isQuestion ? (
-                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded border border-amber-400/60 bg-amber-500/20 text-amber-200 text-[8.5px] font-semibold truncate max-w-[92px]">
-                        <Sparkles className="w-2.5 h-2.5 shrink-0 text-amber-300" />
-                        <span className="truncate">{node.relationLabel}</span>
-                      </span>
-                    ) : (
+                <div className="w-full h-full rounded-xl overflow-hidden flex flex-col">
+                  {/* 模块本体区 */}
+                  <div
+                    style={{ height: `${bodyHeight}px` }}
+                    className={`relative flex flex-col justify-between shrink-0 ${
+                      isTopic ? 'px-3 py-2.5 text-center' : 'pl-2.5 pr-2 py-2'
+                    }`}
+                  >
+                    {!isTopic && (
                       <span
-                        className={`px-1 py-0.5 rounded border text-[8.5px] font-medium truncate max-w-[78px] ${
-                          isTopic
-                            ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50'
-                            : RELATION_BADGE_STYLE[node.relation]
-                        }`}
-                      >
-                        {node.relationLabel}
-                      </span>
+                        aria-hidden="true"
+                        className={`absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r ${theme.accent}`}
+                      />
                     )}
-                    {!isQuestion && node.isRecurring && (node.occurrenceCount ?? 0) >= 2 && (
-                      <span className="px-1 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/50 text-indigo-200 text-[8px] font-medium shrink-0">
-                        ×{node.occurrenceCount}
-                      </span>
+
+                    {isTopic ? (
+                      <>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/45 text-cyan-200 text-[9px] font-semibold">
+                            核心主题
+                          </span>
+                          {!showDockedQuestions && hasDocked && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-200 text-[8.5px] font-semibold">
+                              <Sparkles className="w-2.5 h-2.5" />
+                              <span>{dockedQuestions.length}</span>
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[12.5px] font-bold leading-[17px] text-zinc-50 line-clamp-3">
+                          {node.title}
+                        </div>
+                        <div className="text-[9px] text-cyan-200/75">
+                          {item.childIds.length} 条主脉络
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        {/* 顶行：关系标签 + 反复次数 + 时间戳 / 紧凑提问角标 */}
+                        <div className="flex items-center justify-between gap-1">
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span
+                              className={`px-1.5 py-0.5 rounded border text-[8.5px] font-medium truncate max-w-[84px] ${
+                                RELATION_BADGE_STYLE[node.relation]
+                              }`}
+                            >
+                              {node.relationLabel}
+                            </span>
+                            {node.isRecurring && (node.occurrenceCount ?? 0) >= 2 && (
+                              <span className="px-1 py-0.5 rounded bg-indigo-500/25 border border-indigo-400/50 text-indigo-200 text-[8px] font-medium shrink-0">
+                                ×{node.occurrenceCount}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            {!showDockedQuestions && hasDocked && (
+                              <span
+                                title={`已吸附 ${dockedQuestions.length} 条提问建议`}
+                                className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-amber-500/25 border border-amber-400/60 text-amber-200 text-[8px] font-semibold"
+                              >
+                                <Sparkles className="w-2 h-2" />
+                                <span>{dockedQuestions.length}</span>
+                              </span>
+                            )}
+                            {node.evidenceMs > 0 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleJumpToMs(node.evidenceMs);
+                                }}
+                                className="text-[8.5px] font-mono text-sky-300 hover:underline cursor-pointer"
+                              >
+                                [{formatLiveMmSs(node.evidenceMs)}]
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 模块标题 */}
+                        <div className="text-[11px] font-medium leading-[16px] text-zinc-100 line-clamp-2">
+                          {node.title}
+                        </div>
+
+                        {/* 内嵌论据支点（零间距直连呈现） */}
+                        {item.inlineSupport && (
+                          <div className="mt-1 pt-1 border-t border-white/10 text-[10px] leading-[14px] text-indigo-200/90 line-clamp-2">
+                            <span className="text-indigo-300 font-semibold mr-1">论据:</span>
+                            {item.inlineSupport.text}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
 
-                  {isQuestion ? (
-                    <span className="px-1 py-0.5 rounded bg-amber-400/15 text-amber-300 text-[8px] font-semibold shrink-0">
-                      提问建议
-                    </span>
-                  ) : node.expandableForQuestion ? (
-                    <span
-                      title={node.questionHint || node.expandReason}
-                      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-amber-200 text-[8px] font-semibold shrink-0"
+                  {/* 零间距磁吸提问底座 */}
+                  {showDockedQuestions && dockHeight > 0 && firstQ && (
+                    <div
+                      style={{ height: `${dockHeight}px` }}
+                      className="border-t border-amber-400/40 bg-gradient-to-r from-amber-950/85 via-amber-950/55 to-zinc-950/85 px-2.5 py-1.5 flex flex-col justify-between shrink-0"
                     >
-                      <Sparkles className="w-2 h-2" />
-                      <span>可深挖</span>
-                    </span>
-                  ) : (
-                    !isTopic && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleJumpToMs(node.evidenceMs);
-                        }}
-                        className="text-[8.5px] font-mono text-sky-300 hover:underline cursor-pointer shrink-0"
-                      >
-                        [{formatLiveMmSs(node.evidenceMs)}]
-                      </button>
-                    )
+                      <div className="flex items-center justify-between gap-1 text-[8.5px]">
+                        <span className="inline-flex items-center gap-1 text-amber-300 font-semibold truncate">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                          <span className="truncate">{firstQ.reason}</span>
+                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {hasAdoptedQuestion && (
+                            <span className="px-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-medium">
+                              ✓ 已问
+                            </span>
+                          )}
+                          {dockedQuestions.length > 1 && (
+                            <span className="px-1 rounded bg-amber-500/20 text-amber-200 font-mono">
+                              +{dockedQuestions.length - 1}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-[10.5px] leading-[15px] text-amber-100 line-clamp-2">
+                        {firstQ.text}
+                      </div>
+                    </div>
                   )}
                 </div>
 
-                <div
-                  className={`text-[10.5px] font-medium leading-tight line-clamp-2 ${
-                    isQuestion ? 'text-amber-100' : 'text-zinc-100'
-                  }`}
-                >
-                  {node.title}
-                </div>
+                {/* 外侧分支折叠/展开小圆钮 */}
+                {!isTopic && hasChildren && (
+                  <button
+                    type="button"
+                    data-mindmap-interactive="true"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleCollapse(item.id);
+                    }}
+                    style={{ top: `${Math.max(10, bodyHeight / 2 - 9)}px` }}
+                    title={item.isCollapsed ? '展开子模块' : '折叠子模块'}
+                    className={`absolute ${
+                      item.side === 'left' ? '-left-2.5' : '-right-2.5'
+                    } w-5 h-5 rounded-full border text-[9px] font-mono font-bold flex items-center justify-center cursor-pointer transition shadow-sm ${
+                      item.isCollapsed
+                        ? 'bg-cyan-500/25 border-cyan-400/70 text-cyan-200'
+                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500'
+                    }`}
+                  >
+                    {item.isCollapsed ? `+${item.hiddenDescendantCount}` : '−'}
+                  </button>
+                )}
               </div>
             );
           })}
         </div>
       </div>
 
-      {/* 色彩图例 */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[10px] text-zinc-400 shrink-0">
-        <span className="inline-flex items-center gap-1">
-          <span className="w-2 h-2 rounded-sm bg-cyan-400" />
-          <span>主题</span>
-        </span>
-        {(
-          Object.entries(NODE_CARD_THEME) as Array<
-            [LogicRelationType, (typeof NODE_CARD_THEME)[LogicRelationType]]
-          >
-        ).map(([rel, cfg]) => (
-          <span key={rel} className="inline-flex items-center gap-1">
-            <span className={`w-2 h-2 rounded-sm ${cfg.dot}`} />
-            <span>{cfg.label}</span>
+      {/* 精简色彩图例与交互提示 */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[10px] text-zinc-400 shrink-0">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="inline-flex items-center gap-1">
+            <span className="w-2 h-2 rounded-sm bg-cyan-400" />
+            <span>中心主题</span>
           </span>
-        ))}
-        <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
-          <span className="w-2.5 h-2 rounded-sm border border-dashed border-amber-400 bg-amber-500/30" />
-          <span>提问建议节点</span>
+          {(
+            Object.entries(NODE_CARD_THEME) as Array<
+              [LogicRelationType, (typeof NODE_CARD_THEME)[LogicRelationType]]
+            >
+          ).map(([rel, cfg]) => (
+            <span key={rel} className="inline-flex items-center gap-1">
+              <span className={`w-2 h-2 rounded-sm ${cfg.dot}`} />
+              <span>{cfg.label}</span>
+            </span>
+          ))}
+          <span className="inline-flex items-center gap-1 text-amber-300 font-medium">
+            <span className="w-2.5 h-2 rounded-sm border border-amber-400/70 bg-amber-500/35" />
+            <span>磁吸提问底座</span>
+          </span>
+        </div>
+        <span className="text-[9.5px] text-zinc-500 hidden sm:inline">
+          拖拽平移 · Ctrl/Cmd+滚轮缩放 · 双击模块定位原文 · 悬停查看跨支关联
         </span>
       </div>
 
-      {/* 选中节点详情与提问拓展提示条 */}
-      {selectedNode && (
+      {/* 选中节点详情与吸附提问快捷操作面板 */}
+      {selectedItem && (
         <div
-          className={`rounded-lg border p-2.5 text-xs space-y-1.5 ${
-            selectedNode.kind === 'question' || selectedNode.expandableForQuestion
-              ? 'border-amber-500/45 bg-amber-950/20'
+          className={`rounded-lg border p-2.5 text-xs space-y-2 ${
+            selectedItem.dockedQuestions.length > 0
+              ? 'border-amber-500/45 bg-amber-950/15'
               : 'border-zinc-800 bg-zinc-900/80'
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <span
                 className={`px-1.5 py-0.5 rounded border text-[10px] ${
-                  selectedNode.kind === 'question'
-                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/50 font-semibold'
-                    : selectedNode.kind === 'topic'
-                      ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50'
-                      : RELATION_BADGE_STYLE[selectedNode.relation]
+                  selectedItem.depth === 0
+                    ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50'
+                    : RELATION_BADGE_STYLE[selectedItem.node.relation]
                 }`}
               >
-                {selectedNode.kind === 'question' ? '提问建议节点' : selectedNode.relationLabel}
+                {selectedItem.node.relationLabel}
               </span>
-              {selectedNode.isRecurring && (
+              {selectedItem.node.isRecurring && (
                 <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 text-[10px]">
-                  {selectedNode.occurrenceCount && selectedNode.occurrenceCount >= 2
-                    ? `跨时间反复体现 ×${selectedNode.occurrenceCount}`
+                  {selectedItem.node.occurrenceCount &&
+                  selectedItem.node.occurrenceCount >= 2
+                    ? `跨时间反复体现 ×${selectedItem.node.occurrenceCount}`
                     : '核心总结观点'}
                 </span>
               )}
-              {selectedNode.speakerName && (
+              {selectedItem.node.speakerName && (
                 <span className="text-[10px] text-zinc-400">
-                  发言人：{selectedNode.speakerName}
-                </span>
-              )}
-              {selectedNode.expandReason && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 text-[10px]">
-                  <HelpCircle className="w-3 h-3" />
-                  <span>{selectedNode.expandReason}</span>
+                  发言人：{selectedItem.node.speakerName}
                 </span>
               )}
             </div>
 
-            {selectedNode.kind !== 'topic' && selectedNode.evidenceMs > 0 && (
+            {selectedItem.node.evidenceMs > 0 && (
               <button
                 type="button"
-                onClick={() => handleJumpToMs(selectedNode.evidenceMs)}
+                onClick={() => handleJumpToMs(selectedItem.node.evidenceMs)}
                 className="inline-flex items-center gap-1 text-[11px] font-mono text-blue-400 hover:underline cursor-pointer"
               >
-                <span>定位原文 [{formatLiveMmSs(selectedNode.evidenceMs)}]</span>
+                <span>定位原文 [{formatLiveMmSs(selectedItem.node.evidenceMs)}]</span>
                 <ArrowRight className="w-3 h-3" />
               </button>
             )}
           </div>
 
-          <div className="text-zinc-100 font-medium">{selectedNode.title}</div>
-          {selectedNode.detail && selectedNode.detail !== selectedNode.questionHint && (
-            <div className="text-[11px] text-zinc-400">{selectedNode.detail}</div>
+          <div className="text-zinc-100 font-medium leading-relaxed">
+            {selectedItem.node.title}
+          </div>
+
+          {selectedItem.inlineSupport && (
+            <div className="rounded-md border border-indigo-500/30 bg-indigo-950/25 px-2.5 py-1.5 text-[11px] text-indigo-200">
+              <strong className="text-indigo-300 mr-1">内嵌论据：</strong>
+              {selectedItem.inlineSupport.text}
+            </div>
           )}
-          {selectedNode.questionHint && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200 flex items-start gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0 mt-0.5" />
-              <span>
-                <strong>{selectedNode.kind === 'question' ? '建议提问：' : '提问拓展建议：'}</strong>
-                {selectedNode.questionHint}
-              </span>
+
+          {selectedItem.node.detail &&
+            selectedItem.node.detail !== selectedItem.inlineSupport?.text &&
+            selectedItem.node.detail !== selectedItem.node.questionHint && (
+              <div className="text-[11px] text-zinc-400">{selectedItem.node.detail}</div>
+            )}
+
+          {/* 跨分支关联快捷跳转芯片 */}
+          {selectedCrossPeers.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+              <span className="text-zinc-400">跨支关联：</span>
+              {selectedCrossPeers.map((peer) => (
+                <button
+                  key={`${peer.node.id}-${peer.label}`}
+                  type="button"
+                  onClick={() => setSelectedNodeId(peer.node.id)}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-950/80 hover:border-zinc-500 text-zinc-200 cursor-pointer transition"
+                >
+                  <span style={{ color: peer.color }}>{peer.label}</span>
+                  <span className="text-zinc-500">→</span>
+                  <span className="truncate max-w-[160px]">{peer.node.node.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 吸附在该模块上的提问建议清单 */}
+          {selectedItem.dockedQuestions.length > 0 && (
+            <div className="space-y-1.5 pt-1">
+              {selectedItem.dockedQuestions.map((q) => (
+                <div
+                  key={q.id}
+                  className="rounded-md border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-[11px] space-y-1.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-1.5 text-amber-100">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="px-1 py-0.2 rounded bg-amber-500/25 text-amber-200 text-[9.5px] font-semibold mr-1.5">
+                          {q.reason}
+                        </span>
+                        <span className="font-medium leading-relaxed">{q.text}</span>
+                      </div>
+                    </div>
+                    {q.status === 'adopted' && (
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[9.5px] shrink-0">
+                        ✓ 已问
+                      </span>
+                    )}
+                  </div>
+
+                  {q.why && (
+                    <div className="text-[10px] text-amber-200/75 pl-5">{q.why}</div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyQuestion(q)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200 cursor-pointer transition"
+                    >
+                      <Copy className="w-2.5 h-2.5" />
+                      <span>{copiedQuestionId === q.id ? '已复制' : '复制'}</span>
+                    </button>
+                    {q.questionId && onQuestionAction && q.status !== 'adopted' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onQuestionAction(q.questionId!, 'dismissed')}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-400 cursor-pointer transition"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                          <span>忽略</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onQuestionAction(q.questionId!, 'adopted')}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600/80 hover:bg-emerald-500 text-[10px] text-white cursor-pointer transition"
+                        >
+                          <Check className="w-2.5 h-2.5" />
+                          <span>已问</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

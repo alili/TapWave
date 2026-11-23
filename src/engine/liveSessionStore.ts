@@ -9,11 +9,14 @@ import {
   LiveSessionSnapshot,
   LiveSidecarEvent,
   LiveSpeaker,
+  LiveSpeakerAnalysisMode,
   LiveSpeakerRole,
   LiveSpeakerSuggestionCandidate,
   LiveTargetFieldItem,
   LiveUtterance,
   LiveUtteranceUploadState,
+  RecentLiveSessionItem,
+  SuspectedDuplicateSpeakerPair,
 } from '../types/liveSession';
 import {
   buildAsrConfigFromPlatform,
@@ -27,7 +30,8 @@ import {
 } from './liveAudioCapture';
 import { LiveTransportHandle, startLiveSessionTransport } from './liveSessionBridge';
 import { buildLiveSessionMarkdown } from './liveMinutesExporter';
-import { isTauriRuntime } from './tauriBridge';
+import { computeLiveSpeechAnalytics } from './liveSpeechAnalytics';
+import { analyzeLiveSpeakersByContent, isTauriRuntime } from './tauriBridge';
 
 export function createInitialLiveSnapshot(): LiveSessionSnapshot {
   return {
@@ -41,6 +45,7 @@ export function createInitialLiveSnapshot(): LiveSessionSnapshot {
     wavPath: null,
     sessionJsonPath: null,
     minutesPath: null,
+    reportPath: null,
     asrEngine: null,
     engineNotice: null,
     asrStatus: 'idle',
@@ -63,12 +68,25 @@ export function createInitialLiveSnapshot(): LiveSessionSnapshot {
     analyzedUpToUtteranceId: null,
     finalSummary: null,
     errorMessage: null,
+    speakerAnalysisMode: 'hybrid',
+    contentDuplicateHints: [],
+    speakerAnalysisStatus: 'idle',
+    speakerAnalysisSummary: null,
   };
 }
 
 /**
  * Pure reducer applying a single sidecar NDJSON event onto a LiveSessionSnapshot.
  */
+const MAX_STORED_LIVE_QUESTIONS = 60;
+
+function normalizeLiveQuestionText(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s，。？！、；：,.?!;:「」『』“”"'`（）()]+/g, '');
+}
+
 export function applyLiveEvent(
   snap: LiveSessionSnapshot,
   ev: LiveSidecarEvent
@@ -153,10 +171,80 @@ export function applyLiveEvent(
                 speakerId: ev.speakerId,
                 speakerSource: ev.speakerSource,
                 voiceprintCluster: ev.voiceprintCluster ?? u.voiceprintCluster,
+                contentConfidence: ev.contentConfidence ?? u.contentConfidence,
+                speakerReason: ev.speakerReason ?? u.speakerReason,
               }
             : u
         ),
       };
+
+    case 'speaker_analysis': {
+      const nextSpeakers = [...snap.speakers];
+      const spkIdxMap = new Map<string, number>();
+      nextSpeakers.forEach((s, idx) => spkIdxMap.set(s.id, idx));
+
+      for (const nsp of ev.newSpeakers ?? []) {
+        if (!nsp.id || spkIdxMap.has(nsp.id)) continue;
+        spkIdxMap.set(nsp.id, nextSpeakers.length);
+        nextSpeakers.push(nsp);
+      }
+
+      for (const prof of ev.speakerProfiles ?? []) {
+        const idx = spkIdxMap.get(prof.speakerId);
+        if (idx === undefined) continue;
+        const cur = nextSpeakers[idx];
+        const cleanInfName = prof.inferredName?.trim();
+        const nextInfName =
+          cleanInfName && cleanInfName !== cur.name.trim()
+            ? cleanInfName
+            : cur.inferredName;
+        nextSpeakers[idx] = {
+          ...cur,
+          inferredName: nextInfName,
+          inferredIdentity: prof.inferredIdentity?.trim() || cur.inferredIdentity,
+          identityEvidence: prof.evidence?.trim() || cur.identityEvidence,
+          identityConfidence:
+            typeof prof.confidence === 'number'
+              ? prof.confidence
+              : cur.identityConfidence,
+        };
+      }
+
+      const reMap = new Map(ev.reassignments.map((r) => [r.utteranceId, r]));
+      const nextUtterances = snap.utterances.map((u) => {
+        if (u.speakerSource === 'manual') return u;
+        const hit = reMap.get(u.id);
+        if (!hit) return u;
+        return {
+          ...u,
+          speakerId: hit.speakerId,
+          speakerSource: hit.speakerSource,
+          contentConfidence: hit.contentConfidence,
+          speakerReason: hit.reason,
+        };
+      });
+
+      const validSpkSet = new Set(nextSpeakers.map((s) => s.id));
+      const nextDupHints = Array.isArray(ev.duplicateHints)
+        ? ev.duplicateHints.filter(
+            (h) =>
+              h.sourceSpeakerId &&
+              h.targetSpeakerId &&
+              h.sourceSpeakerId !== h.targetSpeakerId &&
+              validSpkSet.has(h.sourceSpeakerId) &&
+              validSpkSet.has(h.targetSpeakerId)
+          )
+        : snap.contentDuplicateHints;
+
+      return {
+        ...snap,
+        speakers: nextSpeakers,
+        utterances: nextUtterances,
+        contentDuplicateHints: nextDupHints,
+        speakerAnalysisStatus: 'done',
+        speakerAnalysisSummary: ev.summary ?? snap.speakerAnalysisSummary ?? null,
+      };
+    }
 
     case 'utterance_correction':
       return {
@@ -196,27 +284,65 @@ export function applyLiveEvent(
       };
 
     case 'insight': {
-      const oldStatusById = new Map<string, LiveQuestion['status']>();
-      const oldAdoptedOrDismissed: LiveQuestion[] = [];
+      const nowTs = ev.generatedAt ?? Date.now();
+      const oldById = new Map<string, LiveQuestion>();
+      const oldByNormText = new Map<string, LiveQuestion>();
       for (const q of snap.questions) {
-        oldStatusById.set(q.id, q.status);
-        if (q.status !== 'new') {
-          oldAdoptedOrDismissed.push(q);
+        oldById.set(q.id, q);
+        const norm = normalizeLiveQuestionText(q.text);
+        if (norm && !oldByNormText.has(norm)) {
+          oldByNormText.set(norm, q);
         }
       }
 
-      const incomingIds = new Set<string>();
-      const mergedQuestions: LiveQuestion[] = ev.questions.map((q) => {
-        incomingIds.add(q.id);
-        return {
-          ...q,
-          status: oldStatusById.get(q.id) ?? 'new',
-        };
-      });
-      for (const oldQ of oldAdoptedOrDismissed) {
-        if (!incomingIds.has(oldQ.id)) {
-          mergedQuestions.push(oldQ);
+      const consumedOldIds = new Set<string>();
+      const seenLatestNorm = new Set<string>();
+      const latestQuestions: LiveQuestion[] = [];
+
+      for (const q of ev.questions) {
+        const norm = normalizeLiveQuestionText(q.text);
+        if (norm && seenLatestNorm.has(norm)) {
+          continue;
         }
+        if (norm) {
+          seenLatestNorm.add(norm);
+        }
+        const prev = oldById.get(q.id) ?? (norm ? oldByNormText.get(norm) : undefined);
+        if (prev) {
+          consumedOldIds.add(prev.id);
+        }
+        latestQuestions.push({
+          ...q,
+          status: prev?.status ?? 'new',
+          insightSeq: ev.seq,
+          createdAt: prev?.createdAt ?? nowTs,
+          isLatest: true,
+        });
+      }
+
+      const preservedHistory: LiveQuestion[] = [];
+      for (const oldQ of snap.questions) {
+        if (consumedOldIds.has(oldQ.id)) continue;
+        preservedHistory.push({
+          ...oldQ,
+          isLatest: false,
+        });
+      }
+
+      let mergedQuestions: LiveQuestion[] = [...latestQuestions, ...preservedHistory];
+      if (mergedQuestions.length > MAX_STORED_LIVE_QUESTIONS) {
+        const mustKeep = mergedQuestions.filter(
+          (q) => q.isLatest === true || q.status === 'adopted'
+        );
+        const keepIdSet = new Set(mustKeep.map((q) => q.id));
+        const others = mergedQuestions.filter((q) => !keepIdSet.has(q.id));
+        const remainSlots = Math.max(0, MAX_STORED_LIVE_QUESTIONS - mustKeep.length);
+        const keptOthers = others.slice(0, remainSlots);
+        const finalIdSet = new Set([
+          ...mustKeep.map((q) => q.id),
+          ...keptOthers.map((q) => q.id),
+        ]);
+        mergedQuestions = mergedQuestions.filter((q) => finalIdSet.has(q.id));
       }
 
       const existingSummaryKeys = new Set(
@@ -427,14 +553,276 @@ async function cleanupHardwareAndTransport(): Promise<void> {
   }
 }
 
+const RECENT_LIVE_SESSIONS_KEY = 'podcraft.recentLiveSessions';
+const MAX_RECENT_LIVE_SESSIONS = 20;
+
+function getLocalStorageSafe(): Storage | null {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) return window.localStorage;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export function loadRecentLiveSessions(): RecentLiveSessionItem[] {
+  try {
+    const storage = getLocalStorageSafe();
+    if (!storage) return [];
+    const raw = storage.getItem(RECENT_LIVE_SESSIONS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item) =>
+          item &&
+          typeof item === 'object' &&
+          typeof item.reportPath === 'string' &&
+          Boolean(item.reportPath.trim())
+      )
+      .slice(0, MAX_RECENT_LIVE_SESSIONS);
+  } catch {
+    return [];
+  }
+}
+
+export function recordRecentLiveSession(snap: LiveSessionSnapshot, reportPath: string): void {
+  const cleanPath = reportPath.trim();
+  if (!cleanPath) return;
+  const storage = getLocalStorageSafe();
+  if (!storage) return;
+  try {
+    const item: RecentLiveSessionItem = {
+      sessionId: snap.sessionId || `live_${Date.now()}`,
+      title: snap.title?.trim() || snap.prep?.title?.trim() || '未命名录制',
+      scenario: snap.scenario,
+      outputDir: snap.outputDir,
+      reportPath: cleanPath,
+      wavPath: snap.wavPath,
+      minutesPath: snap.minutesPath,
+      durationMs: snap.elapsedMs,
+      utteranceCount: snap.utterances.length,
+      speakerCount: snap.speakers.length,
+      updatedAt: Date.now(),
+    };
+    const current = loadRecentLiveSessions().filter((x) => x.reportPath !== cleanPath);
+    const updated = [item, ...current].slice(0, MAX_RECENT_LIVE_SESSIONS);
+    storage.setItem(RECENT_LIVE_SESSIONS_KEY, JSON.stringify(updated));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function removeRecentLiveSession(reportPath: string): RecentLiveSessionItem[] {
+  const clean = reportPath.trim();
+  const next = loadRecentLiveSessions().filter((x) => x.reportPath !== clean);
+  try {
+    getLocalStorageSafe()?.setItem(RECENT_LIVE_SESSIONS_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+  return next;
+}
+
+export function buildLiveAnalysisReportDoc(snap: LiveSessionSnapshot) {
+  const cleanSnap: LiveSessionSnapshot = {
+    ...snap,
+    phase: 'stopped',
+    partial: null,
+    analyzingUpToUtteranceId: null,
+    asrStatus: 'idle',
+    llmStatus: 'idle',
+  };
+  return {
+    version: 1,
+    savedAt: Date.now(),
+    snapshot: cleanSnap,
+    speechAnalytics: computeLiveSpeechAnalytics(cleanSnap),
+  };
+}
+
+export function parseAndRestoreLiveSession(
+  rawJson: string,
+  sourcePath?: string
+): LiveSessionSnapshot {
+  const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+  const base = createInitialLiveSnapshot();
+  const dirFromPath = sourcePath
+    ? sourcePath.replace(/[\\/][^\\/]+$/, '')
+    : null;
+
+  // Case 1: analysis-report.json ({ version: 1, snapshot: { ... } })
+  if (parsed && typeof parsed === 'object' && parsed.snapshot && typeof parsed.snapshot === 'object') {
+    const s = parsed.snapshot as Partial<LiveSessionSnapshot>;
+    return {
+      ...base,
+      ...s,
+      phase: 'stopped',
+      partial: null,
+      asrStatus: 'idle',
+      llmStatus: 'idle',
+      analyzingUpToUtteranceId: null,
+      outputDir: s.outputDir || dirFromPath,
+      reportPath: sourcePath || s.reportPath || null,
+      speakers: Array.isArray(s.speakers) ? s.speakers : [],
+      utterances: Array.isArray(s.utterances) ? s.utterances : [],
+      profile: s.profile ?? { background: [], stories: [], viewpoints: [] },
+      questions: Array.isArray(s.questions) ? s.questions : [],
+      turnSummaries: Array.isArray(s.turnSummaries) ? s.turnSummaries : [],
+      keyPoints: Array.isArray(s.keyPoints) ? s.keyPoints : [],
+      outline: Array.isArray(s.outline) ? s.outline : [],
+      targetFields: Array.isArray(s.targetFields) ? s.targetFields : [],
+      topicFlow: Array.isArray(s.topicFlow) ? s.topicFlow : [],
+      speakerAnalysisMode: s.speakerAnalysisMode ?? 'hybrid',
+      contentDuplicateHints: Array.isArray(s.contentDuplicateHints)
+        ? s.contentDuplicateHints
+        : [],
+    };
+  }
+
+  // Case 2: sidecar session.json
+  const latestInsight =
+    parsed.latestInsight && typeof parsed.latestInsight === 'object'
+      ? (parsed.latestInsight as Record<string, unknown>)
+      : null;
+  const prep =
+    parsed.prep && typeof parsed.prep === 'object'
+      ? (parsed.prep as LiveSessionPrep)
+      : null;
+  const rawOutline = Array.isArray(prep?.outline) ? prep!.outline : [];
+  const outlineCov = Array.isArray(latestInsight?.outlineCoverage)
+    ? (latestInsight!.outlineCoverage as Array<{ id: string; status: LiveOutlineItem['status']; note?: string }>)
+    : [];
+  const outline: LiveOutlineItem[] = rawOutline.map((o) => {
+    const hit = outlineCov.find((c) => c.id === o.id);
+    return {
+      id: o.id,
+      text: o.text,
+      status: hit?.status ?? 'not_started',
+      note: hit?.note,
+    };
+  });
+
+  const rawTargetFields = Array.isArray(prep?.targetFields) ? prep!.targetFields : [];
+  const tfUpdates = Array.isArray(latestInsight?.targetFieldUpdates)
+    ? (latestInsight!.targetFieldUpdates as Array<{
+        id: string;
+        status: LiveTargetFieldItem['status'];
+        value?: string;
+        evidenceMs?: number;
+      }>)
+    : [];
+  const targetFields: LiveTargetFieldItem[] = rawTargetFields.map((tf) => {
+    const hit = tfUpdates.find((u) => u.id === tf.id);
+    return {
+      id: tf.id,
+      label: tf.label,
+      status: hit?.status ?? 'missing',
+      value: hit?.value,
+      evidenceMs: hit?.evidenceMs,
+    };
+  });
+
+  const rawQuestions = Array.isArray(latestInsight?.questions)
+    ? (latestInsight!.questions as Array<Omit<LiveQuestion, 'status'>>)
+    : [];
+
+  return {
+    ...base,
+    sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : `restored_${Date.now()}`,
+    phase: 'stopped',
+    scenario: (parsed.scenario as LiveSessionSnapshot['scenario']) || prep?.scenario || 'interview',
+    title: typeof parsed.title === 'string' ? parsed.title : prep?.title || '已保存的录制',
+    prep,
+    speakers: Array.isArray(parsed.speakers) ? (parsed.speakers as LiveSpeaker[]) : [],
+    outputDir: dirFromPath,
+    wavPath: typeof parsed.wavPath === 'string' ? parsed.wavPath : null,
+    sessionJsonPath: sourcePath || null,
+    reportPath: sourcePath || null,
+    elapsedMs: typeof parsed.durationMs === 'number' ? parsed.durationMs : 0,
+    utterances: Array.isArray(parsed.utterances) ? (parsed.utterances as LiveUtterance[]) : [],
+    profile:
+      latestInsight?.profile && typeof latestInsight.profile === 'object'
+        ? (latestInsight.profile as LiveSessionSnapshot['profile'])
+        : { background: [], stories: [], viewpoints: [] },
+    questions: rawQuestions.map((q) => ({ ...q, status: 'new' as const })),
+    turnSummaries: Array.isArray(latestInsight?.turnSummaries)
+      ? (latestInsight!.turnSummaries as LiveSessionSnapshot['turnSummaries'])
+      : [],
+    keyPoints: Array.isArray(latestInsight?.keyPoints)
+      ? (latestInsight!.keyPoints as string[])
+      : [],
+    outline,
+    targetFields,
+    currentTopic:
+      typeof latestInsight?.currentTopic === 'string' ? latestInsight.currentTopic : '',
+    topicFlow: Array.isArray(latestInsight?.topicFlow)
+      ? (latestInsight!.topicFlow as LiveSessionSnapshot['topicFlow'])
+      : [],
+    finalSummary:
+      parsed.finalSummary && typeof parsed.finalSummary === 'object'
+        ? (parsed.finalSummary as LiveSessionSnapshot['finalSummary'])
+        : null,
+    speakerAnalysisMode: prep?.speakerAnalysisMode ?? 'hybrid',
+    contentDuplicateHints: [],
+  };
+}
+
+export async function saveLiveReportAndMinutes(
+  snap: LiveSessionSnapshot = snapshot
+): Promise<{ minutesPath: string | null; reportPath: string | null }> {
+  if (!isTauriRuntime() || !snap.outputDir) {
+    return { minutesPath: snap.minutesPath, reportPath: snap.reportPath ?? null };
+  }
+  const sep = snap.outputDir.includes('\\') ? '\\' : '/';
+  const baseDir = snap.outputDir.replace(/[\\/]+$/, '');
+  const minutesPath = `${baseDir}${sep}纪要.md`;
+  const reportPath = `${baseDir}${sep}analysis-report.json`;
+
+  const md = buildLiveSessionMarkdown(snap);
+  const reportDoc = buildLiveAnalysisReportDoc({ ...snap, minutesPath, reportPath });
+  const reportJson = JSON.stringify(reportDoc, null, 2);
+
+  await invoke<string>('save_project_file', { filePath: minutesPath, contentJson: md });
+  await invoke<string>('save_project_file', { filePath: reportPath, contentJson: reportJson });
+
+  const nextSnap: LiveSessionSnapshot = {
+    ...snapshot,
+    minutesPath,
+    reportPath,
+  };
+  emitSnap(nextSnap);
+  recordRecentLiveSession(nextSnap, reportPath);
+  return { minutesPath, reportPath };
+}
+
+export async function openLiveSessionFromPath(filePath: string): Promise<LiveSessionSnapshot> {
+  const raw = await invoke<string>('load_project_file', { filePath });
+  const restored = parseAndRestoreLiveSession(raw, filePath);
+  await cleanupHardwareAndTransport();
+  emitSnap(restored);
+  recordRecentLiveSession(restored, filePath);
+  return restored;
+}
+
+export async function openLiveSessionFromJsonText(
+  rawJson: string,
+  filePath?: string
+): Promise<LiveSessionSnapshot> {
+  const restored = parseAndRestoreLiveSession(rawJson, filePath);
+  await cleanupHardwareAndTransport();
+  emitSnap(restored);
+  if (filePath) {
+    recordRecentLiveSession(restored, filePath);
+  }
+  return restored;
+}
+
 async function autoSaveMinutesIfTauri(snap: LiveSessionSnapshot): Promise<void> {
   if (!isTauriRuntime() || !snap.outputDir) return;
   try {
-    const sep = snap.outputDir.includes('\\') ? '\\' : '/';
-    const filePath = `${snap.outputDir.replace(/[\\/]+$/, '')}${sep}纪要.md`;
-    const md = buildLiveSessionMarkdown(snap);
-    await invoke<string>('save_project_file', { filePath, contentJson: md });
-    emitSnap({ ...snapshot, minutesPath: filePath });
+    await saveLiveReportAndMinutes(snap);
   } catch {
     // ignore auto-save failure; user can still export manually
   }
@@ -514,6 +902,7 @@ export async function startLiveSession(opts: {
     speakers: opts.speakers,
     outline: initialOutline,
     targetFields: initialTargetFields,
+    speakerAnalysisMode: opts.prep.speakerAnalysisMode ?? 'hybrid',
   });
 
   const platformCfg = getCachedAiPlatformConfig();
@@ -535,6 +924,7 @@ export async function startLiveSession(opts: {
     sessionId,
     asrEngine: opts.prep.asrEngine,
     enableStreamCorrection: opts.prep.enableStreamCorrection ?? true,
+    speakerAnalysisMode: opts.prep.speakerAnalysisMode ?? 'hybrid',
     scenario: opts.prep.scenario,
     title: opts.prep.title.trim() || opts.prep.topic.trim() || '未命名录制',
     prep: {
@@ -766,13 +1156,60 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return denom > 1e-6 ? dot / denom : 0;
 }
 
+const CONTENT_CONTINUATION_RE =
+  /^(?:然后|而且|并且|另外|还有|所以|比如|不过|但是|其实|也就是说|换句话说)/;
+const CONTENT_QUESTION_RE =
+  /(?:请问|怎么看|觉得|能不能|为什么|如何|是否|吗[？?]?$|呢[？?]?$|[？?]$)/;
+const CONTENT_STOP_BIGRAMS = new Set([
+  '我们',
+  '你们',
+  '他们',
+  '这个',
+  '那个',
+  '什么',
+  '怎么',
+  '就是',
+  '然后',
+  '因为',
+  '所以',
+  '可以',
+  '没有',
+  '不是',
+  '觉得',
+  '还是',
+  '一个',
+  '一些',
+  '如果',
+]);
+
+function extractChineseBigrams(text: string): Set<string> {
+  const cleaned = text.replace(/[^\u4e00-\u9fa5]/g, '');
+  const set = new Set<string>();
+  for (let i = 0; i < cleaned.length - 1; i++) {
+    const bg = cleaned.slice(i, i + 2);
+    if (!CONTENT_STOP_BIGRAMS.has(bg)) {
+      set.add(bg);
+    }
+  }
+  return set;
+}
+
+function countSharedBigrams(a: Set<string>, b: Set<string>): number {
+  let count = 0;
+  for (const item of a) {
+    if (b.has(item)) count += 1;
+  }
+  return count;
+}
+
 /**
- * 在修改某段语音的发言人后，基于每段语音保留的声纹信息，找出建议一并修改的其他语音片段。
+ * 在修改某段语音的发言人后，基于每段语音保留的声纹信息与内容上下文，找出建议一并修改的其他语音片段。
  */
 export function findSpeakerReassignSuggestions(
   utterances: LiveUtterance[],
   sourceUtteranceId: string,
-  targetSpeakerId: string
+  targetSpeakerId: string,
+  speakers?: LiveSpeaker[]
 ): LiveSpeakerSuggestionCandidate[] {
   const src = utterances.find((u) => u.id === sourceUtteranceId);
   if (!src) return [];
@@ -780,6 +1217,11 @@ export function findSpeakerReassignSuggestions(
   const srcCluster = src.voiceprintCluster || src.speakerLabel || '';
   const srcVec = src.voiceprintVector;
   const oldSpeakerId = src.speakerId;
+  const srcBigrams = extractChineseBigrams(src.text);
+  const srcIsQuestion = CONTENT_QUESTION_RE.test(src.text.trim());
+  const targetSpk = speakers?.find((s) => s.id === targetSpeakerId);
+  const targetIsInterviewer =
+    targetSpk?.role === 'self' || targetSpk?.speakerKind === 'host';
 
   const suggestions: LiveSpeakerSuggestionCandidate[] = [];
   for (const u of utterances) {
@@ -807,6 +1249,50 @@ export function findSpeakerReassignSuggestions(
         });
         continue;
       }
+    }
+
+    const uText = u.text.trim();
+    const uBigrams = extractChineseBigrams(uText);
+    const sharedBigrams = countSharedBigrams(srcBigrams, uBigrams);
+    const timeDistMs = Math.abs(u.startMs - src.startMs);
+
+    // 内容关联 1：同原发言人且时间相邻，语义延续或共享关键词
+    if (
+      u.speakerId === oldSpeakerId &&
+      timeDistMs <= 25_000 &&
+      (CONTENT_CONTINUATION_RE.test(uText) || sharedBigrams >= 2)
+    ) {
+      suggestions.push({
+        utteranceId: u.id,
+        reason: '内容语义连贯',
+        similarity: 0.81,
+      });
+      continue;
+    }
+
+    // 内容关联 2：目标为提问/主持人角色且源句与候选句均属提问引导语境
+    if (
+      targetIsInterviewer &&
+      srcIsQuestion &&
+      CONTENT_QUESTION_RE.test(uText) &&
+      uText.length <= 70
+    ) {
+      suggestions.push({
+        utteranceId: u.id,
+        reason: '同属提问/引导内容',
+        similarity: 0.78,
+      });
+      continue;
+    }
+
+    // 内容关联 3：跨段内容主题/关键词高度重合
+    if (sharedBigrams >= 3 && u.speakerId === oldSpeakerId) {
+      suggestions.push({
+        utteranceId: u.id,
+        reason: '内容主题与视角关联',
+        similarity: 0.76,
+      });
+      continue;
     }
 
     // 若缺少声纹特征（如极短句 fallback），当属于原发言人且时间相邻时提供次级建议
@@ -840,6 +1326,9 @@ export function assignLiveSpeaker(
   activeTransport?.send([
     { type: 'assign_speaker', utteranceId, speakerId, applyToLabel },
   ]);
+  if (snapshot.phase === 'stopped') {
+    void autoSaveMinutesIfTauri(snapshot);
+  }
 }
 
 export function batchAssignLiveSpeaker(
@@ -863,18 +1352,257 @@ export function batchAssignLiveSpeaker(
       applyToLabel,
     }))
   );
+  if (snapshot.phase === 'stopped') {
+    void autoSaveMinutesIfTauri(snapshot);
+  }
 }
 
 export function renameLiveSpeaker(speakerId: string, newName: string): void {
   const cleanName = newName.trim();
   if (!cleanName) return;
+  const oldName = snapshot.speakers.find((s) => s.id === speakerId)?.name;
   emitSnap({
     ...snapshot,
     speakers: snapshot.speakers.map((s) =>
       s.id === speakerId ? { ...s, name: cleanName } : s
     ),
+    topicFlow:
+      oldName && oldName !== cleanName && snapshot.topicFlow
+        ? snapshot.topicFlow.map((tf) => ({
+            ...tf,
+            speakers: tf.speakers?.map((n) => (n === oldName ? cleanName : n)),
+          }))
+        : snapshot.topicFlow,
   });
   activeTransport?.send([{ type: 'rename_speaker', speakerId, name: cleanName }]);
+  if (snapshot.phase === 'stopped') {
+    void autoSaveMinutesIfTauri(snapshot);
+  }
+}
+
+function averageVoiceprintVector(utterances: LiveUtterance[]): number[] | null {
+  const vecs = utterances
+    .map((u) => u.voiceprintVector)
+    .filter((v): v is number[] => Array.isArray(v) && v.length > 0);
+  if (vecs.length === 0) return null;
+  const dim = vecs[0].length;
+  const acc = new Array<number>(dim).fill(0);
+  let count = 0;
+  for (const v of vecs) {
+    if (v.length !== dim) continue;
+    for (let i = 0; i < dim; i++) acc[i] += v[i];
+    count += 1;
+  }
+  if (count === 0) return null;
+  return acc.map((x) => x / count);
+}
+
+/**
+ * 检测疑似同一人的发言人列表（基于声纹特征、内容重复线索、推断姓名或同名发言人）。
+ */
+export function findSuspectedDuplicateSpeakers(
+  snap: LiveSessionSnapshot
+): SuspectedDuplicateSpeakerPair[] {
+  if (snap.speakers.length < 2) return [];
+  const uttsBySpeaker = new Map<string, LiveUtterance[]>();
+  for (const sp of snap.speakers) uttsBySpeaker.set(sp.id, []);
+  for (const u of snap.utterances) {
+    const arr = uttsBySpeaker.get(u.speakerId);
+    if (arr) arr.push(u);
+  }
+
+  const clustersBySpeaker = new Map<string, Set<string>>();
+  const avgVecBySpeaker = new Map<string, number[] | null>();
+  for (const sp of snap.speakers) {
+    const list = uttsBySpeaker.get(sp.id) ?? [];
+    const clusters = new Set<string>();
+    for (const u of list) {
+      const c = u.voiceprintCluster || u.speakerLabel || '';
+      if (c) clusters.add(c);
+    }
+    clustersBySpeaker.set(sp.id, clusters);
+    avgVecBySpeaker.set(sp.id, averageVoiceprintVector(list));
+  }
+
+  const contentHintMap = new Map<string, { confidence: number; reason: string }>();
+  for (const h of snap.contentDuplicateHints ?? []) {
+    const key = [h.sourceSpeakerId, h.targetSpeakerId].sort().join('|');
+    const prev = contentHintMap.get(key);
+    if (!prev || h.confidence > prev.confidence) {
+      contentHintMap.set(key, { confidence: h.confidence, reason: h.reason });
+    }
+  }
+
+  const pairs: SuspectedDuplicateSpeakerPair[] = [];
+  for (let i = 0; i < snap.speakers.length; i++) {
+    for (let j = i + 1; j < snap.speakers.length; j++) {
+      const spA = snap.speakers[i];
+      const spB = snap.speakers[j];
+      const countA = uttsBySpeaker.get(spA.id)?.length ?? 0;
+      const countB = uttsBySpeaker.get(spB.id)?.length ?? 0;
+
+      let similarity = 0;
+      let reason = '';
+      let sourceType: SuspectedDuplicateSpeakerPair['source'];
+
+      // 1. 共有声纹簇
+      const clA = clustersBySpeaker.get(spA.id)!;
+      const clB = clustersBySpeaker.get(spB.id)!;
+      const sharedCluster = Array.from(clA).find((c) => clB.has(c));
+      if (sharedCluster) {
+        similarity = 0.95;
+        reason = `共有声纹簇 (${sharedCluster})`;
+        sourceType = 'voiceprint';
+      } else {
+        // 2. 平均声纹向量余弦相似度
+        const vA = avgVecBySpeaker.get(spA.id);
+        const vB = avgVecBySpeaker.get(spB.id);
+        if (vA && vB) {
+          const sim = cosineSimilarity(vA, vB);
+          if (sim >= 0.82) {
+            similarity = Number(sim.toFixed(2));
+            reason = `声纹特征高度相似 (${Math.round(sim * 100)}%)`;
+            sourceType = 'voiceprint';
+          }
+        }
+      }
+
+      // 3. 内容分析重复线索 & 同推断姓名
+      const pairKey = [spA.id, spB.id].sort().join('|');
+      const contentHint = contentHintMap.get(pairKey);
+      const infA = spA.inferredName?.trim();
+      const infB = spB.inferredName?.trim();
+      const sameInferred = Boolean(infA && infB && infA === infB);
+
+      if (contentHint) {
+        if (sourceType === 'voiceprint') {
+          similarity = Math.max(similarity, Number(contentHint.confidence.toFixed(2)));
+          reason = `${reason} · ${contentHint.reason}`;
+          sourceType = 'hybrid';
+        } else {
+          similarity = Number(contentHint.confidence.toFixed(2));
+          reason = contentHint.reason;
+          sourceType = 'content';
+        }
+      } else if (sameInferred) {
+        const infReason = `内容均识别为「${infA}」`;
+        if (sourceType === 'voiceprint') {
+          similarity = Math.max(similarity, 0.9);
+          reason = `${reason} · ${infReason}`;
+          sourceType = 'hybrid';
+        } else {
+          similarity = 0.88;
+          reason = infReason;
+          sourceType = 'content';
+        }
+      }
+
+      // 4. 同名发言人
+      if (!reason && spA.name.trim() && spA.name.trim() === spB.name.trim()) {
+        similarity = 0.9;
+        reason = '发言人名称相同';
+        sourceType = 'name';
+      }
+
+      if (!reason) continue;
+
+      // 优先保留发言更多或 role==='self' 的席位作为 target
+      const keepA =
+        spA.role === 'self' && spB.role !== 'self'
+          ? true
+          : spB.role === 'self' && spA.role !== 'self'
+            ? false
+            : countA >= countB;
+      const target = keepA ? spA : spB;
+      const source = keepA ? spB : spA;
+      const targetCount = keepA ? countA : countB;
+      const sourceCount = keepA ? countB : countA;
+
+      pairs.push({
+        sourceSpeakerId: source.id,
+        targetSpeakerId: target.id,
+        similarity,
+        reason,
+        source: sourceType,
+        sourceUtteranceCount: sourceCount,
+        targetUtteranceCount: targetCount,
+      });
+    }
+  }
+
+  return pairs.sort((a, b) => b.similarity - a.similarity);
+}
+
+/**
+ * 将 sourceSpeakerId 合并到 targetSpeakerId：
+ * 迁移所有发言段落、轮次小结、议题参与人，并移除源发言人席位。
+ */
+export function mergeLiveSpeakers(
+  sourceSpeakerId: string,
+  targetSpeakerId: string
+): boolean {
+  if (!sourceSpeakerId || !targetSpeakerId || sourceSpeakerId === targetSpeakerId) {
+    return false;
+  }
+  const sourceSpeaker = snapshot.speakers.find((s) => s.id === sourceSpeakerId);
+  const targetSpeaker = snapshot.speakers.find((s) => s.id === targetSpeakerId);
+  if (!sourceSpeaker || !targetSpeaker) {
+    return false;
+  }
+
+  const affectedUtteranceIds: string[] = [];
+  const nextUtterances = snapshot.utterances.map((u) => {
+    if (u.speakerId !== sourceSpeakerId) return u;
+    affectedUtteranceIds.push(u.id);
+    return { ...u, speakerId: targetSpeakerId, speakerSource: 'manual' as const };
+  });
+
+  const nextTurnSummaries = snapshot.turnSummaries.map((ts) =>
+    ts.speakerId === sourceSpeakerId ? { ...ts, speakerId: targetSpeakerId } : ts
+  );
+
+  const nextTopicFlow = snapshot.topicFlow?.map((tf) => {
+    if (!tf.speakers || tf.speakers.length === 0) return tf;
+    const mapped = tf.speakers.map((name) =>
+      name === sourceSpeaker.name ? targetSpeaker.name : name
+    );
+    return { ...tf, speakers: Array.from(new Set(mapped)) };
+  });
+
+  const nextPartial =
+    snapshot.partial && snapshot.partial.speakerId === sourceSpeakerId
+      ? { ...snapshot.partial, speakerId: targetSpeakerId }
+      : snapshot.partial;
+
+  const nextDupHints = (snapshot.contentDuplicateHints ?? []).filter(
+    (h) => h.sourceSpeakerId !== sourceSpeakerId && h.targetSpeakerId !== sourceSpeakerId
+  );
+
+  emitSnap({
+    ...snapshot,
+    speakers: snapshot.speakers.filter((s) => s.id !== sourceSpeakerId),
+    utterances: nextUtterances,
+    turnSummaries: nextTurnSummaries,
+    topicFlow: nextTopicFlow,
+    partial: nextPartial,
+    contentDuplicateHints: nextDupHints,
+  });
+
+  if (affectedUtteranceIds.length > 0) {
+    activeTransport?.send(
+      affectedUtteranceIds.map((utteranceId) => ({
+        type: 'assign_speaker',
+        utteranceId,
+        speakerId: targetSpeakerId,
+        applyToLabel: true,
+      }))
+    );
+  }
+
+  if (snapshot.phase === 'stopped') {
+    void autoSaveMinutesIfTauri(snapshot);
+  }
+  return true;
 }
 
 export function addAndAssignLiveSpeaker(
@@ -1056,6 +1784,106 @@ export function revertLiveUtteranceCorrection(utteranceId: string): void {
         : u
     ),
   });
+}
+
+export function setLiveSpeakerAnalysisMode(mode: LiveSpeakerAnalysisMode): void {
+  emitSnap({ ...snapshot, speakerAnalysisMode: mode });
+  activeTransport?.send([{ type: 'set_speaker_analysis_mode', mode }]);
+}
+
+export function applyInferredSpeakerName(speakerId: string): void {
+  const sp = snapshot.speakers.find((s) => s.id === speakerId);
+  const cleanInf = sp?.inferredName?.trim();
+  if (!sp || !cleanInf) return;
+  renameLiveSpeaker(speakerId, cleanInf);
+  emitSnap({
+    ...snapshot,
+    speakers: snapshot.speakers.map((s) =>
+      s.id === speakerId ? { ...s, inferredName: undefined } : s
+    ),
+  });
+}
+
+export function dismissInferredSpeakerName(speakerId: string): void {
+  emitSnap({
+    ...snapshot,
+    speakers: snapshot.speakers.map((s) =>
+      s.id === speakerId ? { ...s, inferredName: undefined } : s
+    ),
+  });
+}
+
+export async function requestLiveSpeakerContentAnalysis(
+  projectState: PodcastProjectState
+): Promise<{
+  ok: boolean;
+  mode: 'live' | 'review';
+  engine?: string;
+  reassignedCount?: number;
+  profileCount?: number;
+  duplicateCount?: number;
+  summary?: string;
+  error?: string;
+}> {
+  const analysisMode = snapshot.speakerAnalysisMode ?? 'hybrid';
+  if (snapshot.utterances.length === 0) {
+    return { ok: false, mode: activeTransport ? 'live' : 'review', error: '暂无发言内容可分析' };
+  }
+
+  emitSnap({ ...snapshot, speakerAnalysisStatus: 'analyzing' });
+
+  if (activeTransport) {
+    activeTransport.send([{ type: 'analyze_speakers', mode: analysisMode }]);
+    return { ok: true, mode: 'live' };
+  }
+
+  try {
+    const res = await analyzeLiveSpeakersByContent({
+      scenario: snapshot.scenario,
+      prep: snapshot.prep,
+      speakers: snapshot.speakers,
+      utterances: snapshot.utterances,
+      mode: analysisMode,
+      allowNewSpeakers: snapshot.scenario === 'chat',
+      projectState,
+    });
+    if (!res || res.ok === false) {
+      const errMsg = res?.error || '内容辨人分析失败';
+      emitSnap({ ...snapshot, speakerAnalysisStatus: 'error' });
+      return { ok: false, mode: 'review', error: errMsg };
+    }
+
+    const nextSnap = applyLiveEvent(snapshot, {
+      type: 'speaker_analysis',
+      mode: 'manual',
+      engine: res.engine,
+      reassignments: res.reassignments ?? [],
+      speakerProfiles: res.speakerProfiles ?? [],
+      duplicateHints: res.duplicateHints ?? [],
+      newSpeakers: res.newSpeakers ?? [],
+      summary: res.summary,
+    });
+    emitSnap(nextSnap);
+    if (nextSnap.phase === 'stopped') {
+      void autoSaveMinutesIfTauri(nextSnap);
+    }
+    return {
+      ok: true,
+      mode: 'review',
+      engine: res.engine,
+      reassignedCount: res.reassignments?.length ?? 0,
+      profileCount: res.speakerProfiles?.length ?? 0,
+      duplicateCount: res.duplicateHints?.length ?? 0,
+      summary: res.summary,
+    };
+  } catch (err) {
+    emitSnap({ ...snapshot, speakerAnalysisStatus: 'error' });
+    return {
+      ok: false,
+      mode: 'review',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export async function resetLiveSession(): Promise<void> {

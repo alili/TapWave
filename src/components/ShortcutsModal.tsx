@@ -53,6 +53,8 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ['+', '-'], desc: '步进放大 / 缩小波形时间轴' },
       { keys: ['⌘ O', '⌘ S'], desc: '打开 / 保存 .podcraft 工程' },
       { keys: ['⇧ ⌘ S'], desc: '工程另存为' },
+      { keys: ['⌘ E'], desc: '导出 MP3 成片 (-16 LUFS)' },
+      { keys: ['⇧ ⌘ E'], desc: '导出无损 WAV 成片 (-16 LUFS)' },
       { keys: ['?'], desc: '打开 / 关闭本快捷键说明' },
     ],
   },

@@ -166,6 +166,29 @@ export interface LogicGraphNode {
   matchedQuestionId?: string;
   /** 提问建议节点所依附的源节点 ID */
   parentNodeId?: string;
+  /** 匹配的 AI 提问类型 */
+  questionType?: LiveQuestion['type'];
+  /** 匹配的 AI 提问意图说明 */
+  questionWhy?: string;
+  /** 匹配的 AI 提问状态 */
+  questionStatus?: LiveQuestion['status'];
+}
+
+function questionTypeLabel(type?: LiveQuestion['type']): string {
+  switch (type) {
+    case 'follow_up':
+      return '延伸追问';
+    case 'deepen':
+      return '深度挖掘';
+    case 'pivot':
+      return '角度切换';
+    case 'handle_objection':
+      return '化解异议';
+    case 'advance':
+      return '推进话题';
+    default:
+      return 'AI 建议追问';
+  }
 }
 
 export interface LogicGraphEdge {
@@ -953,64 +976,116 @@ function buildLogicConnectionMap(
       node.isRecurring = false;
     }
 
-    const kindOrder: Record<LogicGraphNodeKind, number> = {
-      topic: 0,
-      outline: 1,
-      viewpoint: 2,
-      support: 3,
-      story: 4,
-      utterance: 5,
-      question: 6,
+    // 5) AI 提问优先 1 对 1 最佳归属 + 结构性深挖兜底
+    const MAX_QUESTION_NODES = 8;
+    const activeQuestions = questions
+      .filter((q) => q.status !== 'dismissed')
+      .sort((a, b) => (a.isLatest === false ? 1 : 0) - (b.isLatest === false ? 1 : 0));
+    const contentNodes = nodes.filter((n) => n.kind !== 'topic' && n.kind !== 'question');
+    const nodePriority: Record<LogicGraphNodeKind, number> = {
+      viewpoint: 0,
+      story: 1,
+      utterance: 2,
+      outline: 3,
+      support: 4,
+      topic: 9,
+      question: 9,
     };
 
-    const timelinePrimary = nodes
-      .filter((n) => n.lane === 'timeline' && n.kind !== 'support')
-      .sort((a, b) => {
-        if (a.evidenceMs !== b.evidenceMs) return a.evidenceMs - b.evidenceMs;
-        return (kindOrder[a.kind] ?? 9) - (kindOrder[b.kind] ?? 9);
-      });
+    const aiAttachedNodeIds = new Set<string>();
+    let addedQuestionCount = 0;
 
-    const connectedPair = new Set<string>();
-    for (const e of edges) {
-      connectedPair.add(`${e.source}->${e.target}`);
-      connectedPair.add(`${e.target}->${e.source}`);
-    }
-
-    for (let i = 1; i < timelinePrimary.length; i++) {
-      const prev = timelinePrimary[i - 1];
-      const curr = timelinePrimary[i];
-      if (!connectedPair.has(`${prev.id}->${curr.id}`)) {
-        addEdge(prev.id, curr.id, 'sequence', '时序推进', true);
-        connectedPair.add(`${prev.id}->${curr.id}`);
-      }
-    }
-
-    // 5) 高亮可作为提问拓展的节点（优先匹配 AI 提问建议，其次标记结构性深挖点）
-    const activeQuestions = questions.filter((q) => q.status !== 'dismissed');
-    for (const node of nodes) {
-      if (node.kind === 'topic') continue;
-      const nTok = nodeTokens.get(node.id) ?? new Set();
-
-      let bestQ: LiveQuestion | null = null;
+    for (const q of activeQuestions.slice(0, 6)) {
+      const qTok = extractSemanticTokens(`${q.relatedTo} ${q.text}`);
+      let bestTarget: LogicGraphNode | null = null;
       let bestScore = 0;
-      for (const q of activeQuestions) {
-        const qTok = extractSemanticTokens(`${q.relatedTo} ${q.text}`);
-        const score = tokenOverlapScore(nTok, qTok);
-        if (score > bestScore) {
+
+      for (const candidate of contentNodes) {
+        const cTok = nodeTokens.get(candidate.id) ?? new Set();
+        const score = tokenOverlapScore(cTok, qTok);
+        if (score <= 0) continue;
+        if (
+          score > bestScore ||
+          (score === bestScore &&
+            bestTarget !== null &&
+            ((nodePriority[candidate.kind] ?? 9) < (nodePriority[bestTarget.kind] ?? 9) ||
+              ((nodePriority[candidate.kind] ?? 9) === (nodePriority[bestTarget.kind] ?? 9) &&
+                candidate.evidenceMs < bestTarget.evidenceMs)))
+        ) {
           bestScore = score;
-          bestQ = q;
+          bestTarget = candidate;
         }
       }
 
-      if (bestQ && bestScore >= 1) {
-        node.expandableForQuestion = true;
-        node.matchedQuestionId = bestQ.id;
-        node.expandReason = 'AI 建议追问';
-        node.questionHint = bestQ.text;
-        continue;
-      }
+      const qLabel = questionTypeLabel(q.type);
+      const qNodeId = `qnode_ai_${q.id}`;
 
-      // 结构性可拓展节点识别
+      if (bestTarget && bestScore >= 1) {
+        bestTarget.expandableForQuestion = true;
+        if (!bestTarget.matchedQuestionId) {
+          bestTarget.matchedQuestionId = q.id;
+          bestTarget.expandReason = 'AI 建议追问';
+          bestTarget.questionHint = q.text;
+          bestTarget.questionType = q.type;
+          bestTarget.questionWhy = q.why;
+          bestTarget.questionStatus = q.status;
+        }
+
+        nodes.push({
+          id: qNodeId,
+          kind: 'question',
+          relation: bestTarget.relation,
+          relationLabel: qLabel,
+          title: clipText(q.text, 44),
+          detail: q.why ? `${q.text}（${q.why}）` : q.text,
+          speakerId: bestTarget.speakerId,
+          speakerName: bestTarget.speakerName,
+          evidenceMs: bestTarget.evidenceMs,
+          tier: 3,
+          lane: bestTarget.lane ?? 'timeline',
+          expandableForQuestion: false,
+          expandReason: qLabel,
+          questionHint: q.text,
+          questionType: q.type,
+          questionWhy: q.why,
+          questionStatus: q.status,
+          matchedQuestionId: q.id,
+          parentNodeId: bestTarget.id,
+        });
+        addEdge(bestTarget.id, qNodeId, 'question_suggest', '建议提问', true);
+        aiAttachedNodeIds.add(bestTarget.id);
+        addedQuestionCount += 1;
+      } else {
+        // 未匹配到具体分支的 AI 提问，直接吸附到真实中心主题节点 'node-topic'
+        nodes.push({
+          id: qNodeId,
+          kind: 'question',
+          relation: 'progression',
+          relationLabel: qLabel,
+          title: clipText(q.text, 44),
+          detail: q.why ? `${q.text}（${q.why}）` : q.text,
+          evidenceMs: 0,
+          tier: 2,
+          lane: 'global',
+          expandableForQuestion: false,
+          expandReason: qLabel,
+          questionHint: q.text,
+          questionType: q.type,
+          questionWhy: q.why,
+          questionStatus: q.status,
+          matchedQuestionId: q.id,
+          parentNodeId: 'node-topic',
+        });
+        addEdge('node-topic', qNodeId, 'question_suggest', '建议提问', true);
+        addedQuestionCount += 1;
+      }
+    }
+
+    // 6) 为尚未挂载 AI 提问的内容节点补充克制的结构性深挖点
+    const structuralCandidates: LogicGraphNode[] = [];
+    for (const node of contentNodes) {
+      if (aiAttachedNodeIds.has(node.id)) continue;
+
       if (node.kind === 'viewpoint' && !node.detail) {
         node.expandableForQuestion = true;
         node.expandReason = '论据待补充';
@@ -1024,30 +1099,22 @@ function buildLogicConnectionMap(
         node.expandReason = '因果延伸点';
         node.questionHint = '可追问该因果链背后的深层动因或后续影响';
       }
+
+      if (node.expandableForQuestion && node.questionHint) {
+        structuralCandidates.push(node);
+      }
     }
 
-    // 6) 为可提问拓展点生成独立的「提问建议节点」，直观呈现在导图中
-    const MAX_QUESTION_NODES = 6;
-    const matchedQuestionIds = new Set<string>();
-    const questionCandidates = nodes
-      .filter((n) => n.kind !== 'topic' && n.kind !== 'question' && n.expandableForQuestion && n.questionHint)
-      .sort((a, b) => {
-        const aAi = a.matchedQuestionId ? 0 : 1;
-        const bAi = b.matchedQuestionId ? 0 : 1;
-        if (aAi !== bAi) return aAi - bAi;
-        return a.evidenceMs - b.evidenceMs;
-      })
-      .slice(0, MAX_QUESTION_NODES);
-
-    for (const src of questionCandidates) {
-      if (src.matchedQuestionId) matchedQuestionIds.add(src.matchedQuestionId);
+    const remainQuota = Math.max(0, MAX_QUESTION_NODES - addedQuestionCount);
+    structuralCandidates.sort((a, b) => a.evidenceMs - b.evidenceMs);
+    for (const src of structuralCandidates.slice(0, remainQuota)) {
       const qNodeId = `qnode_${src.id}`;
       nodes.push({
         id: qNodeId,
         kind: 'question',
         relation: src.relation,
         relationLabel: src.expandReason || '提问建议',
-        title: clipText(src.questionHint || '', 40),
+        title: clipText(src.questionHint || '', 44),
         detail: src.questionHint,
         speakerId: src.speakerId,
         speakerName: src.speakerName,
@@ -1057,36 +1124,9 @@ function buildLogicConnectionMap(
         expandableForQuestion: false,
         expandReason: src.expandReason,
         questionHint: src.questionHint,
-        matchedQuestionId: src.matchedQuestionId,
         parentNodeId: src.id,
       });
       addEdge(src.id, qNodeId, 'question_suggest', '建议提问', true);
-    }
-
-    // 若仍有未匹配到具体节点的新 AI 提问建议，挂到核心主题下补充展示
-    let addedQuestionCount = questionCandidates.length;
-    for (const q of activeQuestions) {
-      if (addedQuestionCount >= MAX_QUESTION_NODES) break;
-      if (matchedQuestionIds.has(q.id)) continue;
-      const qNodeId = `qnode_ai_${q.id}`;
-      nodes.push({
-        id: qNodeId,
-        kind: 'question',
-        relation: 'progression',
-        relationLabel: 'AI 建议追问',
-        title: clipText(q.text, 40),
-        detail: q.why ? `${q.text}（${q.why}）` : q.text,
-        evidenceMs: 0,
-        tier: 2,
-        lane: 'global',
-        expandableForQuestion: false,
-        expandReason: 'AI 建议追问',
-        questionHint: q.text,
-        matchedQuestionId: q.id,
-        parentNodeId: 'topic_root',
-      });
-      addEdge('topic_root', qNodeId, 'question_suggest', '建议提问', true);
-      addedQuestionCount += 1;
     }
   }
 

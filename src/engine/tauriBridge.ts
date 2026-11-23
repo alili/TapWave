@@ -16,6 +16,14 @@ import {
 } from '../data/emptyProject';
 import { SidecarTrackTranscribeDto } from './transcriptBuilder';
 import {
+  LiveContentDuplicateHint,
+  LiveScenario,
+  LiveSessionPrep,
+  LiveSpeaker,
+  LiveSpeakerAnalysisMode,
+  LiveUtterance,
+} from '../types/liveSession';
+import {
   buildLlmConfigForFeature,
   getCachedAiPlatformConfig,
 } from './aiPlatformConfig';
@@ -504,6 +512,90 @@ export async function runPythonSidecarShownotes(
     };
   }
   return (await resp.json()) as SidecarShownotesResponse;
+}
+
+export interface SidecarLiveSpeakerAnalysisResponseDto {
+  ok?: boolean;
+  error?: string;
+  engine: string;
+  reassignments: Array<{
+    utteranceId: string;
+    speakerId: string;
+    speakerSource: 'content' | 'hybrid';
+    contentConfidence: number;
+    reason: string;
+  }>;
+  speakerProfiles: Array<{
+    speakerId: string;
+    inferredName?: string;
+    inferredIdentity?: string;
+    evidence?: string;
+    confidence?: number;
+  }>;
+  duplicateHints?: LiveContentDuplicateHint[];
+  newSpeakers?: LiveSpeaker[];
+  summary?: string;
+  fallbackReason?: string;
+}
+
+export async function analyzeLiveSpeakersByContent(params: {
+  scenario: LiveScenario;
+  prep: LiveSessionPrep | null;
+  speakers: LiveSpeaker[];
+  utterances: LiveUtterance[];
+  mode: LiveSpeakerAnalysisMode;
+  allowNewSpeakers?: boolean;
+  projectState: PodcastProjectState;
+}): Promise<SidecarLiveSpeakerAnalysisResponseDto> {
+  const platformCfg = getCachedAiPlatformConfig();
+  const routedLlm = platformCfg
+    ? buildLlmConfigForFeature(
+        platformCfg,
+        'transcript_analysis',
+        params.projectState.llmConfig
+      )
+    : params.projectState.llmConfig;
+  const effectiveLlm =
+    ('forceLocalOnly' in routedLlm && routedLlm.forceLocalOnly) ||
+    routedLlm.apiKey.trim()
+      ? routedLlm
+      : params.projectState.llmConfig;
+
+  const payload = {
+    command: 'analyze_live_speakers',
+    scenario: params.scenario,
+    prep: params.prep ?? {},
+    speakers: params.speakers,
+    utterances: params.utterances.map((u) => ({
+      id: u.id,
+      text: u.text,
+      startMs: u.startMs,
+      endMs: u.endMs,
+      speakerId: u.speakerId,
+      speakerSource: u.speakerSource,
+      voiceprintCluster: u.voiceprintCluster,
+      voiceprintConfidence: u.voiceprintConfidence,
+    })),
+    mode: params.mode,
+    allowNewSpeakers: Boolean(params.allowNewSpeakers),
+    llmConfig: effectiveLlm,
+  };
+  const payloadJson = JSON.stringify(payload);
+
+  if (isTauriRuntime()) {
+    const rawJson = await invoke<string>('run_ai_sidecar', { payloadJson });
+    return JSON.parse(rawJson) as SidecarLiveSpeakerAnalysisResponseDto;
+  }
+
+  const resp = await fetch('/api/sidecar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payloadJson,
+  });
+  if (!resp.ok) {
+    throw new Error(`内容发言人分析请求失败 (HTTP_${resp.status})`);
+  }
+  return (await resp.json()) as SidecarLiveSpeakerAnalysisResponseDto;
 }
 
 function triggerBrowserBlobDownload(filename: string, blob: Blob): void {

@@ -172,6 +172,44 @@ describe('liveSpeechAnalytics', () => {
     expect(questionNodes.length).toBeGreaterThanOrEqual(1);
     expect(questionNodes.some((n) => n.questionHint?.includes('INT8'))).toBe(true);
     expect(res.logicMap.edges.some((e) => e.relation === 'question_suggest')).toBe(true);
+    // 同一条 AI 提问只精准挂载到 1 个最佳模块，不重复复制
+    const q1Nodes = questionNodes.filter((n) => n.matchedQuestionId === 'q_1');
+    expect(q1Nodes).toHaveLength(1);
+    // 不再生成冗余的时序推进虚线
+    expect(res.logicMap.edges.some((e) => e.relation === 'sequence')).toBe(false);
+  });
+
+  it('attaches unmatched AI questions to real root node-topic without broken edges', () => {
+    const base = buildSampleSnapshot();
+    const snap: LiveSessionSnapshot = {
+      ...base,
+      questions: [
+        {
+          id: 'q_unmatched',
+          type: 'pivot',
+          text: '下一步商业化收费模式你们准备怎么设计？',
+          why: '拓展商业化视角',
+          relatedTo: '商业化变现与定价',
+          status: 'new',
+        },
+      ],
+    };
+
+    const res = computeLiveSpeechAnalytics(snap);
+    const unmatchedNode = res.logicMap.nodes.find(
+      (n) => n.kind === 'question' && n.matchedQuestionId === 'q_unmatched'
+    );
+    expect(unmatchedNode).toBeDefined();
+    expect(unmatchedNode?.parentNodeId).toBe('node-topic');
+    expect(
+      res.logicMap.edges.some(
+        (e) =>
+          e.relation === 'question_suggest' &&
+          e.source === 'node-topic' &&
+          e.target === unmatchedNode?.id
+      )
+    ).toBe(true);
+    expect(res.logicMap.edges.some((e) => e.source === 'topic_root')).toBe(false);
   });
 
   it('computes insight last-update timestamp and next-round progress', () => {

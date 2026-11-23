@@ -3,11 +3,16 @@ import {
   Activity,
   BookOpen,
   Briefcase,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   Clock,
   Compass,
   GitBranch,
   Layers,
   MessageSquareWarning,
+  RotateCcw,
   Sparkles,
   TrendingUp,
   Zap,
@@ -15,6 +20,7 @@ import {
 import {
   LiveOutlineItem,
   LiveSessionSnapshot,
+  LiveTopicFlowItem,
 } from '../types/liveSession';
 import {
   computeInsightUpdateStatus,
@@ -30,6 +36,9 @@ interface LiveAnalyticsCenterPaneProps {
   isListenMode: boolean;
   onJumpToMs: (ms: number) => void;
   onOverrideOutline: (id: string, status: LiveOutlineItem['status']) => void;
+  onQuestionAction?: (questionId: string, action: 'adopted' | 'dismissed') => void;
+  selectedTopicId?: string | null;
+  onSelectTopicId?: (topicId: string | null) => void;
 }
 
 const RELATION_STYLE: Record<LogicRelationType, string> = {
@@ -76,15 +85,29 @@ function outlineBadge(status: LiveOutlineItem['status']): { label: string; cls: 
   }
 }
 
+function getTopicKey(item: LiveTopicFlowItem, idx: number): string {
+  return item.id || `${item.topic}-${idx}`;
+}
+
 export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = ({
   snap,
   isListenMode,
   onJumpToMs,
   onOverrideOutline,
+  onQuestionAction,
+  selectedTopicId: controlledTopicId,
+  onSelectTopicId,
 }) => {
   const [selectedSpeakerId, setSelectedSpeakerId] = useState<string | null>(null);
   const [logicViewMode, setLogicViewMode] = useState<'graph' | 'list'>('graph');
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [internalTopicId, setInternalTopicId] = useState<string | null>(null);
+  const [filterByTopic, setFilterByTopic] = useState(false);
+  const [showAllTopicTimeline, setShowAllTopicTimeline] = useState(true);
+
+  const selectedTopicId =
+    controlledTopicId !== undefined ? controlledTopicId : internalTopicId;
+  const setSelectedTopicId = onSelectTopicId ?? setInternalTopicId;
 
   useEffect(() => {
     if (snap.phase !== 'recording') return;
@@ -95,9 +118,84 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
     return () => window.clearInterval(timer);
   }, [snap.phase, snap.lastInsightAt]);
 
+  const topicFlow = snap.topicFlow ?? [];
+
+  const topicWindowInfo = useMemo(() => {
+    if (topicFlow.length === 0) {
+      return {
+        activeIdx: -1,
+        viewedIdx: -1,
+        viewedItem: undefined as LiveTopicFlowItem | undefined,
+        viewedKey: null as string | null,
+        isViewingHistorical: false,
+        rangeStartMs: 0,
+        rangeEndMs: Number.MAX_SAFE_INTEGER,
+        isLast: true,
+      };
+    }
+
+    const foundActive = topicFlow.findIndex((f) => f.status === 'active');
+    const activeIdx = foundActive !== -1 ? foundActive : topicFlow.length - 1;
+
+    let viewedIdx = activeIdx;
+    if (selectedTopicId) {
+      const matched = topicFlow.findIndex(
+        (f, idx) => getTopicKey(f, idx) === selectedTopicId
+      );
+      if (matched !== -1) {
+        viewedIdx = matched;
+      }
+    }
+
+    const viewedItem = topicFlow[viewedIdx];
+    const viewedKey = getTopicKey(viewedItem, viewedIdx);
+    const isLast = viewedIdx === topicFlow.length - 1;
+    const nextStart = !isLast ? topicFlow[viewedIdx + 1].startMs : Number.MAX_SAFE_INTEGER;
+    const rangeEndMs = viewedItem.endMs ?? nextStart;
+
+    return {
+      activeIdx,
+      viewedIdx,
+      viewedItem,
+      viewedKey,
+      isViewingHistorical: viewedIdx !== activeIdx,
+      rangeStartMs: viewedItem.startMs,
+      rangeEndMs,
+      isLast,
+    };
+  }, [topicFlow, selectedTopicId]);
+
+  useEffect(() => {
+    if (topicFlow.length === 0 && filterByTopic) {
+      setFilterByTopic(false);
+    }
+  }, [topicFlow.length, filterByTopic]);
+
+  const effectiveSnap = useMemo(() => {
+    if (!filterByTopic || !topicWindowInfo.viewedItem) {
+      return snap;
+    }
+    const { rangeStartMs, rangeEndMs, isLast } = topicWindowInfo;
+    const inRange = (ms: number) =>
+      isLast ? ms >= rangeStartMs : ms >= rangeStartMs && ms < rangeEndMs;
+
+    return {
+      ...snap,
+      title: topicWindowInfo.viewedItem.topic || snap.title,
+      utterances: snap.utterances.filter((u) => inRange(u.startMs)),
+      turnSummaries: snap.turnSummaries.filter((ts) => inRange(ts.startMs)),
+      profile: {
+        ...snap.profile,
+        background: snap.profile.background.filter((b) => inRange(b.evidenceMs)),
+        stories: snap.profile.stories.filter((s) => inRange(s.evidenceMs)),
+        viewpoints: snap.profile.viewpoints.filter((v) => inRange(v.evidenceMs)),
+      },
+    };
+  }, [snap, filterByTopic, topicWindowInfo]);
+
   const analytics = useMemo(
-    () => computeLiveSpeechAnalytics(snap, selectedSpeakerId),
-    [snap, selectedSpeakerId]
+    () => computeLiveSpeechAnalytics(effectiveSnap, selectedSpeakerId),
+    [effectiveSnap, selectedSpeakerId]
   );
 
   const insightStatus = useMemo(
@@ -247,15 +345,64 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
 
       {/* 主滚动区域 */}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
-        {/* 聊天模式：当前议题与议题流转 / 相关性追踪 */}
-        {snap.scenario === 'chat' && (() => {
-          const flow = snap.topicFlow ?? [];
+        {/* 录制结束 / 回看报告：全场总结卡片 */}
+        {snap.finalSummary && (
+          <section className="rounded-xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/30 via-zinc-900/80 to-zinc-900/80 p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-[11px] font-semibold text-emerald-200">
+                  全场分析报告总结
+                </span>
+                {snap.minutesPath && (
+                  <span className="text-[10px] text-emerald-300/80 truncate max-w-[260px]" title={snap.minutesPath}>
+                    已保存至本地
+                  </span>
+                )}
+              </div>
+            </div>
+            {snap.finalSummary.overview && (
+              <p className="text-xs text-zinc-200 leading-relaxed">{snap.finalSummary.overview}</p>
+            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              {snap.finalSummary.keyTakeaways.length > 0 && (
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-2.5 space-y-1">
+                  <div className="text-[11px] font-semibold text-zinc-300">
+                    {isListenMode ? '关键收获' : '关键要点'}
+                  </div>
+                  <ul className="space-y-1 text-[11px] text-zinc-200 list-disc pl-4">
+                    {snap.finalSummary.keyTakeaways.map((k, i) => (
+                      <li key={i}>{k}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {snap.finalSummary.nextSteps.length > 0 && (
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-2.5 space-y-1">
+                  <div className="text-[11px] font-semibold text-zinc-300">
+                    {isListenMode ? '延伸思考与行动' : '下一步行动'}
+                  </div>
+                  <ul className="space-y-1 text-[11px] text-emerald-300 list-disc pl-4">
+                    {snap.finalSummary.nextSteps.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* 议题时间轴：以时间轴串联不同的议题块，支持点击切换查看 */}
+        {(snap.scenario === 'chat' || topicFlow.length > 0) && (() => {
+          const flow = topicFlow;
           const activeItem =
-            flow.find((f) => f.status === 'active') ??
-            (flow.length > 0 ? flow[flow.length - 1] : undefined);
+            topicWindowInfo.activeIdx >= 0
+              ? flow[topicWindowInfo.activeIdx]
+              : undefined;
+          const viewedItem = topicWindowInfo.viewedItem ?? activeItem;
           const displayCurrentTopic =
+            viewedItem?.topic ||
             snap.currentTopic?.trim() ||
-            activeItem?.topic ||
             snap.prep?.topic?.trim() ||
             '正在识别当前讨论议题…';
           const relMeta = (rel?: 'high' | 'medium' | 'off_topic') => {
@@ -263,120 +410,489 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
               return {
                 label: '偏离主线',
                 cls: 'bg-rose-500/15 text-rose-300 border-rose-500/40',
+                barCls: 'bg-rose-500/70',
               };
             }
             if (rel === 'medium') {
               return {
                 label: '延伸相关',
                 cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+                barCls: 'bg-amber-500/70',
               };
             }
             return {
               label: '高度相关',
               cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40',
+              barCls: 'bg-cyan-500/80',
             };
           };
-          const curRel = relMeta(activeItem?.relevance);
+          const curRel = relMeta(viewedItem?.relevance);
+          const lastUttEndMs =
+            snap.utterances.length > 0
+              ? snap.utterances[snap.utterances.length - 1].endMs
+              : 0;
+          const totalSessionMs = Math.max(
+            1000,
+            snap.elapsedMs,
+            lastUttEndMs,
+            flow.length > 0 ? flow[flow.length - 1].endMs ?? flow[flow.length - 1].startMs + 1000 : 1000
+          );
+
+          const formatDurationLabel = (ms: number) => {
+            const sec = Math.max(1, Math.round(ms / 1000));
+            if (sec < 60) return `${sec}秒`;
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            return s > 0 ? `${m}分${s}秒` : `${m}分钟`;
+          };
+
+          const switchToOffset = (delta: -1 | 1) => {
+            if (flow.length <= 1 || topicWindowInfo.viewedIdx < 0) return;
+            const nextIdx = Math.max(
+              0,
+              Math.min(flow.length - 1, topicWindowInfo.viewedIdx + delta)
+            );
+            setSelectedTopicId(getTopicKey(flow[nextIdx], nextIdx));
+          };
+
+          const viewedBlockEnd = viewedItem
+            ? Math.max(
+                viewedItem.startMs,
+                viewedItem.endMs ??
+                  (topicWindowInfo.isLast
+                    ? totalSessionMs
+                    : flow[topicWindowInfo.viewedIdx + 1].startMs)
+              )
+            : totalSessionMs;
+          const viewedUtterances = viewedItem
+            ? snap.utterances.filter((u) => {
+                if (topicWindowInfo.isLast) return u.startMs >= viewedItem.startMs;
+                return u.startMs >= viewedItem.startMs && u.startMs < viewedBlockEnd;
+              })
+            : [];
+          const viewedSummaries = viewedItem
+            ? snap.turnSummaries.filter((ts) => {
+                if (topicWindowInfo.isLast) return ts.startMs >= viewedItem.startMs;
+                return ts.startMs >= viewedItem.startMs && ts.startMs < viewedBlockEnd;
+              })
+            : [];
 
           return (
             <section className="rounded-xl border border-cyan-500/35 bg-gradient-to-br from-cyan-950/35 via-zinc-900/75 to-zinc-900/80 p-3.5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="px-2 py-0.5 rounded-md bg-cyan-500/20 border border-cyan-500/40 text-[11px] font-semibold text-cyan-200 shrink-0">
-                    当前议题
+                  <span
+                    className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold shrink-0 ${
+                      topicWindowInfo.isViewingHistorical
+                        ? 'bg-indigo-500/20 border-indigo-400/45 text-indigo-200'
+                        : 'bg-cyan-500/20 border-cyan-500/40 text-cyan-200'
+                    }`}
+                  >
+                    {topicWindowInfo.isViewingHistorical ? '查看议题' : '当前议题'}
                   </span>
                   <h3 className="text-sm font-bold text-zinc-100 truncate">
                     {displayCurrentTopic}
                   </h3>
+                  {topicWindowInfo.isViewingHistorical && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedTopicId(null);
+                        setFilterByTopic(false);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-[10px] text-cyan-200 cursor-pointer shrink-0 transition"
+                      title="切换回正在讨论的最新议题"
+                    >
+                      <RotateCcw className="w-2.5 h-2.5" />
+                      <span>回到当前议题</span>
+                    </button>
+                  )}
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {activeItem && (
+
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  {viewedItem && (
                     <span className={`px-2 py-0.5 rounded border text-[10px] font-medium ${curRel.cls}`}>
                       {curRel.label}
                     </span>
                   )}
-                  <span className="text-[10px] font-mono text-zinc-400">
-                    共 {flow.length} 个议题节点
-                  </span>
+
+                  {flow.length > 1 && (
+                    <div className="inline-flex items-center rounded border border-zinc-700 bg-zinc-900/90 overflow-hidden text-[10px]">
+                      <button
+                        type="button"
+                        disabled={topicWindowInfo.viewedIdx <= 0}
+                        onClick={() => switchToOffset(-1)}
+                        className="px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
+                        title="上一个议题"
+                      >
+                        <ChevronLeft className="w-3 h-3" />
+                      </button>
+                      <span className="px-1.5 font-mono text-zinc-400">
+                        {topicWindowInfo.viewedIdx + 1}/{flow.length}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={topicWindowInfo.viewedIdx >= flow.length - 1}
+                        onClick={() => switchToOffset(1)}
+                        className="px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
+                        title="下一个议题"
+                      >
+                        <ChevronRight className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+
+                  {viewedItem && (
+                    <button
+                      type="button"
+                      onClick={() => setFilterByTopic((v) => !v)}
+                      className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer transition ${
+                        filterByTopic
+                          ? 'bg-cyan-500/25 text-cyan-100 border-cyan-400/60 font-medium'
+                          : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                      }`}
+                      title="开启后下方指标、提炼内容与导图仅展示当前所选议题时段"
+                    >
+                      {filterByTopic ? '已按此议题筛选' : '仅看此议题分析'}
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {(activeItem?.transitionFrom || activeItem?.relevanceNote) && (
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-300 bg-zinc-950/60 border border-zinc-800/80 rounded-lg px-2.5 py-1.5">
-                  {activeItem.transitionFrom && (
-                    <span className="text-cyan-300/90">
-                      流转自：<span className="font-medium">{activeItem.transitionFrom}</span>
-                    </span>
-                  )}
-                  {activeItem.transitionFrom && activeItem.relevanceNote && (
-                    <span className="text-zinc-600">·</span>
-                  )}
-                  {activeItem.relevanceNote && (
-                    <span className="text-zinc-300">{activeItem.relevanceNote}</span>
-                  )}
-                </div>
-              )}
-
               {flow.length > 0 ? (
-                <div className="space-y-1.5">
-                  <div className="text-[11px] font-medium text-zinc-400">议题流转与相关性轨迹</div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {flow.map((item, idx) => {
-                      const rm = relMeta(item.relevance);
-                      const isActive = item.status === 'active';
-                      return (
-                        <React.Fragment key={item.id || `${item.topic}-${idx}`}>
-                          <div
-                            className={`rounded-lg border px-2.5 py-1.5 text-xs space-y-1 transition ${
-                              isActive
-                                ? 'border-cyan-500/50 bg-cyan-950/35 shadow-sm'
-                                : 'border-zinc-800 bg-zinc-950/70'
+                <div className="space-y-3">
+                  {/* 横向时间轴总览条：点击色块直接切换查看对应议题 */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                      <span>00:00</span>
+                      <span>点击议题色块或胶囊即可切换查看</span>
+                      <span>{formatLiveMmSs(totalSessionMs)}</span>
+                    </div>
+                    <div className="h-3 w-full rounded-full bg-zinc-950/90 border border-zinc-800 overflow-hidden flex gap-0.5 p-0.5">
+                      {flow.map((item, idx) => {
+                        const key = getTopicKey(item, idx);
+                        const isViewed = key === topicWindowInfo.viewedKey;
+                        const nextStart =
+                          idx < flow.length - 1 ? flow[idx + 1].startMs : totalSessionMs;
+                        const blockEnd = Math.max(
+                          item.startMs + 1000,
+                          item.endMs ?? nextStart
+                        );
+                        const spanMs = Math.max(1000, blockEnd - item.startMs);
+                        const pct = Math.max(4, (spanMs / totalSessionMs) * 100);
+                        const rm = relMeta(item.relevance);
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => setSelectedTopicId(key)}
+                            title={`点击切换查看：${item.topic} (${formatLiveMmSs(item.startMs)} - ${formatLiveMmSs(blockEnd)})`}
+                            style={{ width: `${pct}%` }}
+                            className={`h-full rounded-sm ${rm.barCls} hover:brightness-125 transition cursor-pointer ${
+                              isViewed
+                                ? 'ring-2 ring-white brightness-125'
+                                : 'opacity-70 hover:opacity-100'
                             }`}
-                          >
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                  isActive ? 'bg-cyan-400 animate-pulse' : 'bg-zinc-600'
-                                }`}
-                              />
-                              <span className={`font-semibold ${isActive ? 'text-cyan-100' : 'text-zinc-200'}`}>
-                                {item.topic}
-                              </span>
-                              <span className={`px-1.5 py-0.2 rounded border text-[10px] ${rm.cls}`}>
-                                {rm.label}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => onJumpToMs(item.startMs)}
-                                className="text-[10px] font-mono text-blue-400 hover:underline cursor-pointer ml-1"
-                              >
-                                [{formatLiveMmSs(item.startMs)}]
-                              </button>
-                            </div>
-                            {(item.relevanceNote || (item.speakers && item.speakers.length > 0)) && (
-                              <div className="text-[10px] text-zinc-400 flex flex-wrap items-center gap-1.5">
-                                {item.speakers && item.speakers.length > 0 && (
-                                  <span className="text-zinc-300">
-                                    参与：{item.speakers.join('、')}
-                                  </span>
-                                )}
-                                {item.relevanceNote && (
-                                  <span className="truncate max-w-xs">{item.relevanceNote}</span>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          {idx < flow.length - 1 && (
-                            <span className="text-zinc-500 text-xs font-mono shrink-0">→</span>
-                          )}
-                        </React.Fragment>
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 可点击议题切换胶囊栏 */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {flow.map((item, idx) => {
+                      const key = getTopicKey(item, idx);
+                      const isViewed = key === topicWindowInfo.viewedKey;
+                      const isLiveActive = item.status === 'active';
+                      return (
+                        <button
+                          key={`pill-${key}`}
+                          type="button"
+                          onClick={() => setSelectedTopicId(key)}
+                          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] cursor-pointer transition max-w-full ${
+                            isViewed
+                              ? 'border-cyan-400/75 bg-cyan-500/20 text-cyan-100 font-semibold shadow-sm'
+                              : 'border-zinc-800 bg-zinc-950/75 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                          }`}
+                        >
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              isLiveActive
+                                ? 'bg-cyan-400 animate-pulse'
+                                : isViewed
+                                  ? 'bg-indigo-300'
+                                  : 'bg-zinc-600'
+                            }`}
+                          />
+                          <span className="font-mono text-[10px] opacity-75 shrink-0">
+                            #{idx + 1}
+                          </span>
+                          <span className="truncate max-w-[180px]">{item.topic}</span>
+                          <span className="font-mono text-[10px] text-blue-300/80 shrink-0">
+                            {formatLiveMmSs(item.startMs)}
+                          </span>
+                        </button>
                       );
                     })}
                   </div>
+
+                  {/* 正在查看议题焦点详情卡 */}
+                  {viewedItem && (
+                    <div className="rounded-lg border border-cyan-500/35 bg-zinc-950/75 p-2.5 text-xs space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-300">
+                          <span className="font-mono text-blue-300">
+                            {formatLiveMmSs(viewedItem.startMs)} - {formatLiveMmSs(viewedBlockEnd)}
+                          </span>
+                          <span className="text-zinc-500">
+                            ({formatDurationLabel(Math.max(0, viewedBlockEnd - viewedItem.startMs))})
+                          </span>
+                          {viewedItem.transitionFrom && (
+                            <span className="text-cyan-300/90">
+                              承接自：{viewedItem.transitionFrom}
+                            </span>
+                          )}
+                          {viewedItem.speakers && viewedItem.speakers.length > 0 && (
+                            <span className="text-zinc-300">
+                              参与：{viewedItem.speakers.join('、')}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onJumpToMs(viewedItem.startMs)}
+                          className="text-[11px] font-mono text-blue-400 hover:underline cursor-pointer shrink-0"
+                        >
+                          定位议题起点原文 [{formatLiveMmSs(viewedItem.startMs)}]
+                        </button>
+                      </div>
+
+                      {viewedItem.relevanceNote && (
+                        <p className="text-[11px] text-zinc-400">{viewedItem.relevanceNote}</p>
+                      )}
+
+                      {viewedSummaries.length > 0 && (
+                        <div className="space-y-1 pt-1 border-t border-zinc-800/70">
+                          {viewedSummaries.map((ts, sIdx) => (
+                            <div
+                              key={`${ts.startMs}-${sIdx}`}
+                              className="text-[11px] text-zinc-300 flex items-start gap-1.5"
+                            >
+                              <span className="text-cyan-400 shrink-0">•</span>
+                              <span className="leading-snug">{ts.summary}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {viewedUtterances.length > 0 && (
+                        <div className="space-y-1 pt-1 border-t border-zinc-800/70">
+                          <div className="text-[10px] text-zinc-500">
+                            关联发言 ({viewedUtterances.length} 段)
+                          </div>
+                          <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                            {viewedUtterances.slice(0, 4).map((u) => (
+                              <button
+                                key={u.id}
+                                type="button"
+                                onClick={() => onJumpToMs(u.startMs)}
+                                className="w-full text-left flex items-center gap-2 px-2 py-1 rounded bg-zinc-900/70 hover:bg-zinc-800/80 text-[11px] text-zinc-300 cursor-pointer transition"
+                              >
+                                <span className="font-mono text-[10px] text-blue-400 shrink-0">
+                                  [{formatLiveMmSs(u.startMs)}]
+                                </span>
+                                <span className="truncate">{u.text}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 纵向议题时间轴折叠开关 */}
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-zinc-400 font-medium">议题流转时间轴</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAllTopicTimeline((v) => !v)}
+                      className="inline-flex items-center gap-1 text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                    >
+                      {showAllTopicTimeline ? (
+                        <>
+                          <ChevronUp className="w-3 h-3" />
+                          <span>收起时间轴</span>
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="w-3 h-3" />
+                          <span>展开全部 ({flow.length})</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* 纵向时间轴：点击卡片即可切换当前查看议题 */}
+                  {showAllTopicTimeline && (
+                    <div className="relative pl-4 space-y-2.5">
+                      {flow.map((item, idx) => {
+                        const key = getTopicKey(item, idx);
+                        const rm = relMeta(item.relevance);
+                        const isLiveActive = item.status === 'active';
+                        const isViewed = key === topicWindowInfo.viewedKey;
+                        const isLast = idx === flow.length - 1;
+                        const nextStart =
+                          idx < flow.length - 1 ? flow[idx + 1].startMs : totalSessionMs;
+                        const blockEnd = Math.max(
+                          item.startMs,
+                          item.endMs ?? nextStart
+                        );
+                        const blockDuration = Math.max(0, blockEnd - item.startMs);
+
+                        const blockUtterances = snap.utterances.filter((u) => {
+                          if (isLast) return u.startMs >= item.startMs;
+                          return u.startMs >= item.startMs && u.startMs < blockEnd;
+                        });
+                        const blockSummaries = snap.turnSummaries.filter((ts) => {
+                          if (isLast) return ts.startMs >= item.startMs;
+                          return ts.startMs >= item.startMs && ts.startMs < blockEnd;
+                        });
+
+                        return (
+                          <div key={key} className="relative">
+                            {/* 时间轴竖向连线 */}
+                            {!isLast && (
+                              <span
+                                aria-hidden="true"
+                                className="absolute -left-[11px] top-4 bottom-[-14px] w-0.5 bg-cyan-500/30"
+                              />
+                            )}
+                            {/* 时间轴节点圆点 */}
+                            <span
+                              aria-hidden="true"
+                              className={`absolute -left-[15px] top-2.5 w-2.5 h-2.5 rounded-full border-2 ${
+                                isViewed
+                                  ? 'bg-cyan-400 border-white shadow-[0_0_8px_rgba(34,211,238,0.9)]'
+                                  : isLiveActive
+                                    ? 'bg-cyan-400 border-cyan-200 animate-pulse'
+                                    : 'bg-zinc-800 border-cyan-500/60'
+                              }`}
+                            />
+
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setSelectedTopicId(key)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  setSelectedTopicId(key);
+                                }
+                              }}
+                              className={`rounded-lg border p-2.5 text-xs space-y-1.5 transition cursor-pointer ${
+                                isViewed
+                                  ? 'border-cyan-400/75 bg-cyan-950/40 ring-1 ring-cyan-400/35 shadow-sm'
+                                  : 'border-zinc-800 bg-zinc-950/75 hover:border-zinc-700'
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onJumpToMs(item.startMs);
+                                    }}
+                                    className="px-1.5 py-0.5 rounded bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 text-[10px] font-mono text-blue-300 cursor-pointer shrink-0"
+                                    title="点击跳转到该议题起始时间点"
+                                  >
+                                    {formatLiveMmSs(item.startMs)} - {formatLiveMmSs(blockEnd)}
+                                  </button>
+                                  <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                                    ({formatDurationLabel(blockDuration)})
+                                  </span>
+                                  <span
+                                    className={`font-semibold truncate ${
+                                      isViewed ? 'text-cyan-100' : 'text-zinc-100'
+                                    }`}
+                                  >
+                                    {item.topic}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {isViewed && (
+                                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/25 border border-cyan-400/50 text-cyan-200 text-[10px] font-medium">
+                                      正在查看
+                                    </span>
+                                  )}
+                                  <span className={`px-1.5 py-0.5 rounded border text-[10px] ${rm.cls}`}>
+                                    {rm.label}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {(item.transitionFrom ||
+                                item.relevanceNote ||
+                                (item.speakers && item.speakers.length > 0)) && (
+                                <div className="text-[11px] text-zinc-400 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                  {item.transitionFrom && (
+                                    <span className="text-cyan-300/90">
+                                      承接自：{item.transitionFrom}
+                                    </span>
+                                  )}
+                                  {item.speakers && item.speakers.length > 0 && (
+                                    <span className="text-zinc-300">
+                                      参与：{item.speakers.join('、')}
+                                    </span>
+                                  )}
+                                  {item.relevanceNote && (
+                                    <span className="text-zinc-400">{item.relevanceNote}</span>
+                                  )}
+                                </div>
+                              )}
+
+                              {(blockSummaries.length > 0 || blockUtterances.length > 0) && (
+                                <div className="pt-1 border-t border-zinc-800/70 space-y-1">
+                                  {blockSummaries.slice(0, 2).map((ts, sIdx) => (
+                                    <div
+                                      key={`${ts.startMs}-${sIdx}`}
+                                      className="text-[11px] text-zinc-300 flex items-start gap-1.5"
+                                    >
+                                      <span className="text-cyan-400 shrink-0">•</span>
+                                      <span className="leading-snug">{ts.summary}</span>
+                                    </div>
+                                  ))}
+                                  {blockUtterances.length > 0 && (
+                                    <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                                      <span className="truncate max-w-[78%]">
+                                        关联 {blockUtterances.length} 段发言：「
+                                        {blockUtterances[0].text}」
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onJumpToMs(item.startMs);
+                                        }}
+                                        className="text-blue-400 hover:underline cursor-pointer shrink-0"
+                                      >
+                                        定位原文
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/50 py-3 px-3 text-[11px] text-zinc-400">
-                  多人聊天开始后，AI 将持续识别当前议题、追踪话题流转轨迹并评估与核心主题的相关性…
+                  多人聊天开始后，AI 将持续识别当前议题、以时间轴串联不同议题块并评估与核心主题的相关性…
                 </div>
               )}
             </section>
@@ -476,8 +992,8 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
               <span className="text-[11px] text-zinc-400">处连接词</span>
             </div>
             <div className="text-[10px] text-zinc-500 flex items-center justify-between">
-              <span>观点 {snap.profile.viewpoints.length}</span>
-              <span>要点 {snap.keyPoints.length}</span>
+              <span>观点 {effectiveSnap.profile.viewpoints.length}</span>
+              <span>要点 {effectiveSnap.keyPoints.length}</span>
             </div>
           </div>
         </div>
@@ -492,16 +1008,16 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
                 <span>{isListenMode ? '讲者与主题背景' : '身份与背景信息'}</span>
               </h3>
               <span className="text-[10px] font-mono text-zinc-500">
-                {snap.profile.background.length} 项
+                {effectiveSnap.profile.background.length} 项
               </span>
             </div>
-            {snap.profile.background.length === 0 ? (
+            {effectiveSnap.profile.background.length === 0 ? (
               <div className="flex-1 rounded-lg border border-dashed border-zinc-800 bg-zinc-950/50 py-5 px-3 flex items-center justify-center text-center text-[11px] text-zinc-500">
                 {isListenMode ? '等待讲座内容中自动提取…' : '等待对话中自动提取…'}
               </div>
             ) : (
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                {snap.profile.background.map((b, i) => (
+                {effectiveSnap.profile.background.map((b, i) => (
                   <div
                     key={i}
                     className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5 text-xs text-zinc-200 space-y-1"
@@ -528,16 +1044,16 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
                 <span>经历与案例</span>
               </h3>
               <span className="text-[10px] font-mono text-zinc-500">
-                {snap.profile.stories.length} 项
+                {effectiveSnap.profile.stories.length} 项
               </span>
             </div>
-            {snap.profile.stories.length === 0 ? (
+            {effectiveSnap.profile.stories.length === 0 ? (
               <div className="flex-1 rounded-lg border border-dashed border-zinc-800 bg-zinc-950/50 py-5 px-3 flex items-center justify-center text-center text-[11px] text-zinc-500">
                 暂无经历或案例提取…
               </div>
             ) : (
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                {snap.profile.stories.map((st, i) => (
+                {effectiveSnap.profile.stories.map((st, i) => (
                   <div
                     key={i}
                     className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5 text-xs text-zinc-200 space-y-1"
@@ -565,16 +1081,16 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
                 <span>核心立场 / 观点</span>
               </h3>
               <span className="text-[10px] font-mono text-zinc-500">
-                {snap.profile.viewpoints.length} 项
+                {effectiveSnap.profile.viewpoints.length} 项
               </span>
             </div>
-            {snap.profile.viewpoints.length === 0 ? (
+            {effectiveSnap.profile.viewpoints.length === 0 ? (
               <div className="flex-1 rounded-lg border border-dashed border-zinc-800 bg-zinc-950/50 py-5 px-3 flex items-center justify-center text-center text-[11px] text-zinc-500">
                 暂无核心观点提取…
               </div>
             ) : (
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                {snap.profile.viewpoints.map((vp, i) => (
+                {effectiveSnap.profile.viewpoints.map((vp, i) => (
                   <div
                     key={i}
                     className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5 text-xs text-zinc-200 space-y-1"
@@ -605,7 +1121,7 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
               <h3 className="text-xs font-bold text-zinc-100">逻辑连接导图</h3>
               <span className="text-[11px] text-zinc-500">
                 {logicViewMode === 'graph'
-                  ? '多维逻辑图谱 · 高亮节点支持提问拓展'
+                  ? '思维导图 · 中心发散 · 提问吸附至关联模块'
                   : '点击节点可定位右侧原文'}
               </span>
             </div>
@@ -662,6 +1178,7 @@ export const LiveAnalyticsCenterPane: React.FC<LiveAnalyticsCenterPaneProps> = (
             <LogicConnectionGraph
               logicMap={analytics.logicMap}
               onJumpToMs={onJumpToMs}
+              onQuestionAction={onQuestionAction}
             />
           ) : (
             <div className="relative rounded-lg border border-zinc-800/80 bg-zinc-950/70 p-3 overflow-x-auto">

@@ -472,7 +472,7 @@ export function buildPureSrtTranscript(
 
     const startSec = Math.max(0, m.editedStartSec);
     const endSec = Math.max(startSec, m.editedEndSec);
-    const gapExceeded = current ? startSec - current.endSec > 4.0 : false;
+    const gapExceeded = current ? startSec - current.endSec > 1.5 : false;
 
     if (!current || gapExceeded) {
       flushCue();
@@ -488,10 +488,10 @@ export function buildPureSrtTranscript(
       current.charLen += cleanWord.length;
     }
 
-    // 聚合成自然语义句段（120~220字），避免按单句/短词拆出上千条碎块 SRT 稀释模型注意力
+    // 保持自然的句子级 SRT 粒度（18~60字），既有精细时间分布又避免 1~3 字碎块
     if (
       current &&
-      ((current.charLen >= 120 && /[。！？!?]$/.test(cleanWord)) || current.charLen >= 220)
+      ((current.charLen >= 18 && /[。！？!?]$/.test(cleanWord)) || current.charLen >= 60)
     ) {
       flushCue();
     }

@@ -8,7 +8,14 @@ export type LiveSpeakerKind =
   | 'respondent'
   | 'keynote'
   | 'audience';
-export type LiveSpeakerSource = 'cloud' | 'voiceprint' | 'manual' | 'fallback';
+export type LiveSpeakerAnalysisMode = 'hybrid' | 'voiceprint' | 'content';
+export type LiveSpeakerSource =
+  | 'cloud'
+  | 'voiceprint'
+  | 'content'
+  | 'hybrid'
+  | 'manual'
+  | 'fallback';
 export type LiveUtteranceUploadState = 'none' | 'pending' | 'uploading' | 'uploaded';
 
 export interface LiveSpeaker {
@@ -16,6 +23,14 @@ export interface LiveSpeaker {
   name: string;
   role: LiveSpeakerRole;
   speakerKind?: LiveSpeakerKind;
+  /** 内容分析推断的建议姓名（如从自我介绍或他人称呼中提取） */
+  inferredName?: string;
+  /** 内容分析推断的身份/角色/立场视角 */
+  inferredIdentity?: string;
+  /** 内容身份推断的依据摘要 */
+  identityEvidence?: string;
+  /** 内容身份推断置信度 (0 ~ 1) */
+  identityConfidence?: number;
 }
 
 export interface LiveOutlineItem {
@@ -48,6 +63,7 @@ export interface LiveSessionPrep {
   captureAudience?: boolean;
   asrEngine: LiveAsrEngineMode;
   enableStreamCorrection?: boolean;
+  speakerAnalysisMode?: LiveSpeakerAnalysisMode;
   outline: Array<{ id: string; text: string }>;
   targetFields?: Array<{ id: string; label: string }>;
 }
@@ -69,6 +85,10 @@ export interface LiveUtterance {
   voiceprintConfidence?: number;
   /** 轻量声纹特征向量摘要，用于跨段声纹比对与建议 */
   voiceprintVector?: number[];
+  /** 内容/语义分析置信度 (0 ~ 1) */
+  contentConfidence?: number;
+  /** 内容分析或融合判定的简短原因说明 */
+  speakerReason?: string;
 }
 
 export interface LiveSpeakerSuggestionCandidate {
@@ -142,6 +162,12 @@ export interface LiveQuestion {
   relatedTo: string;
   targetField?: string;
   status: 'new' | 'adopted' | 'dismissed';
+  /** 生成该提问的 AI 洞察轮次序号 */
+  insightSeq?: number;
+  /** 首次生成时间戳 (ms) */
+  createdAt?: number;
+  /** 是否属于最新一轮 AI 推送（false 表示历史轮次保留） */
+  isLatest?: boolean;
 }
 
 export interface LiveTurnSummary {
@@ -179,6 +205,13 @@ export type LiveSessionPhase =
   | 'stopped'
   | 'error';
 
+export interface LiveContentDuplicateHint {
+  sourceSpeakerId: string;
+  targetSpeakerId: string;
+  confidence: number;
+  reason: string;
+}
+
 export interface LiveSessionSnapshot {
   sessionId: string | null;
   phase: LiveSessionPhase;
@@ -190,6 +223,7 @@ export interface LiveSessionSnapshot {
   wavPath: string | null;
   sessionJsonPath: string | null;
   minutesPath: string | null;
+  reportPath?: string | null;
   asrEngine: string | null;
   engineNotice: string | null;
   asrStatus: LiveAsrStatus;
@@ -212,6 +246,34 @@ export interface LiveSessionSnapshot {
   analyzedUpToUtteranceId: string | null;
   finalSummary: LiveFinalSummary | null;
   errorMessage: string | null;
+  speakerAnalysisMode?: LiveSpeakerAnalysisMode;
+  contentDuplicateHints?: LiveContentDuplicateHint[];
+  speakerAnalysisStatus?: 'idle' | 'analyzing' | 'done' | 'error';
+  speakerAnalysisSummary?: string | null;
+}
+
+export interface SuspectedDuplicateSpeakerPair {
+  sourceSpeakerId: string;
+  targetSpeakerId: string;
+  similarity: number;
+  reason: string;
+  source?: 'voiceprint' | 'content' | 'name' | 'hybrid';
+  sourceUtteranceCount: number;
+  targetUtteranceCount: number;
+}
+
+export interface RecentLiveSessionItem {
+  sessionId: string;
+  title: string;
+  scenario: LiveScenario;
+  outputDir: string | null;
+  reportPath: string;
+  wavPath: string | null;
+  minutesPath: string | null;
+  durationMs: number;
+  utteranceCount: number;
+  speakerCount: number;
+  updatedAt: number;
 }
 
 export type LiveSidecarEvent =
@@ -253,7 +315,31 @@ export type LiveSidecarEvent =
       speakerId: string;
       speakerSource: LiveSpeakerSource;
       voiceprintCluster?: string;
+      contentConfidence?: number;
+      speakerReason?: string;
       suggestedUtterances?: LiveSpeakerSuggestionCandidate[];
+    }
+  | {
+      type: 'speaker_analysis';
+      mode: 'realtime' | 'manual';
+      engine: string;
+      reassignments: Array<{
+        utteranceId: string;
+        speakerId: string;
+        speakerSource: 'content' | 'hybrid';
+        contentConfidence: number;
+        reason: string;
+      }>;
+      speakerProfiles: Array<{
+        speakerId: string;
+        inferredName?: string;
+        inferredIdentity?: string;
+        evidence?: string;
+        confidence?: number;
+      }>;
+      duplicateHints?: LiveContentDuplicateHint[];
+      newSpeakers?: LiveSpeaker[];
+      summary?: string;
     }
   | {
       type: 'utterance_correction';

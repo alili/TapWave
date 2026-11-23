@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -219,12 +220,381 @@ class AudioRingBuffer:
         return joined.astype(np.float32) / 32768.0
 
 
+VALID_SPEAKER_ANALYSIS_MODES = ("hybrid", "voiceprint", "content")
+
+_INTRO_NAME_STOPWORDS = {
+    "觉得", "说", "想", "做", "从", "在", "一个", "比较", "负责", "来自", "这边",
+    "不是", "就是", "大家", "我们", "你们", "他们", "主持人", "嘉宾", "主讲人",
+    "参与者", "发言人", "对方", "自己", "老师", "老板", "同学", "同事", "朋友",
+    "真的", "其实", "应该", "可能", "已经", "现在", "今天", "刚才", "那个", "这个",
+}
+_INTRO_BAD_CHARS_RE = re.compile(r"[的了吗呢吧啊很都也就还和跟与或把被让给在]")
+_GENERIC_SPEAKER_NAME_RE = re.compile(
+    r"^(?:我|对方|嘉宾\d*|主持人|主讲人|参与者|发言人\s*\d*|提问/私下讨论)$"
+)
+_SELF_CALL_RE = re.compile(
+    r"(?:大家好|各位好|哈喽|你好)?[,，、\s]*(?:我叫|我叫做|本人叫)\s*([\u4e00-\u9fa5]{2,4}|[A-Za-z][A-Za-z0-9_-]{1,14})"
+)
+_SELF_IAM_RE = re.compile(
+    r"(?:大家好|各位好)[,，、\s]*我是\s*([\u4e00-\u9fa5]{2,4}|[A-Za-z][A-Za-z0-9_-]{1,14})"
+)
+_IDENTITY_ROLE_RE = re.compile(
+    r"(?:担任|我是)\s*([\u4e00-\u9fa5A-Za-z0-9]{1,10}(?:负责人|经理|总监|工程师|架构师|设计师|创始人|合伙人|CEO|CTO|CPO|PM|主播|主持人|嘉宾|老师|顾问|销售))"
+)
+_IDENTITY_RESP_RE = re.compile(r"负责([\u4e00-\u9fa5A-Za-z0-9]{2,14})")
+_IDENTITY_DO_RE = re.compile(r"(?:^|[，,。；;\s])(?:我是)?(?:做|搞)([\u4e00-\u9fa5A-Za-z0-9]{2,12})的")
+
+_HANDOFF_CUE_RE = re.compile(r"[?？]|(?:呢|吗|怎么看|觉得|分享|说说|介绍|聊聊|请)")
+_TURN_SWITCH_RE = re.compile(
+    r"^(?:你刚才|您刚才|你刚刚|您刚刚|谢谢你的问题|感谢提问|回答一下刚才|关于你刚才|针对你刚才|我同意你|我赞同你|我补充一下你|不太同意你)"
+)
+_CONTINUATION_RE = re.compile(
+    r"^(?:然后|而且|并且|另外|还有就是|其次|第二|第三|最后|所以说|也就是说|换句话说|举个例子|比如|比如说|但是我觉得|不过话说回来)"
+)
+_HOST_QUESTION_RE = re.compile(
+    r"(?:请问|想请教|能不能(?:分享|聊聊|介绍)|您(?:怎么看|觉得)|你(?:怎么看|觉得)|下一个问题|接下来想问|欢迎来到|今天我们请到)"
+)
+_ANSWER_LEAD_RE = re.compile(
+    r"^(?:其实我|我们当时|对我来说|我个人觉得|在我的经历里|当时我)"
+)
+_AUDIENCE_ASK_RE = re.compile(
+    r"^(?:老师请问|请问老师|我想问一下|请问一下主讲人)"
+)
+
+
+_INTRO_NAME_STOP_PREFIXES = (
+    "觉得", "认为", "说", "想", "做", "从", "在", "一个", "比较", "负责", "来自", "这边",
+    "不是", "就是", "大家", "我们", "你们", "他们", "主持人", "嘉宾", "主讲人",
+    "参与者", "发言人", "对方", "自己", "老师", "老板", "同学", "同事", "朋友",
+    "真的", "其实", "应该", "可能", "已经", "现在", "今天", "刚才", "那个", "这个",
+    "非常", "特别", "主要", "专门", "从事", "担任", "需要", "希望", "准备",
+)
+
+
+def _is_valid_extracted_name(cand: str) -> bool:
+    name = str(cand or "").strip()
+    if not name or len(name) < 2:
+        return False
+    if name in _INTRO_NAME_STOPWORDS:
+        return False
+    if any(name.startswith(p) for p in _INTRO_NAME_STOP_PREFIXES):
+        return False
+    if _GENERIC_SPEAKER_NAME_RE.match(name):
+        return False
+    if re.search(r"[\u4e00-\u9fa5]", name) and _INTRO_BAD_CHARS_RE.search(name):
+        return False
+    return True
+
+
+class ContentSpeakerAnalyzer:
+    """Zero-latency local heuristic analyzer for speaker attribution by utterance content."""
+
+    def extract_self_intro(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        txt = str(text or "").strip()
+        if not txt:
+            return None, None
+
+        inferred_name: Optional[str] = None
+        for pattern in (_SELF_CALL_RE, _SELF_IAM_RE):
+            m = pattern.search(txt)
+            if m:
+                cand = m.group(1).strip()
+                if _is_valid_extracted_name(cand):
+                    inferred_name = cand
+                    break
+
+        inferred_identity: Optional[str] = None
+        m_role = _IDENTITY_ROLE_RE.search(txt)
+        if m_role:
+            cand_id = m_role.group(1).strip()
+            if len(cand_id) >= 2:
+                inferred_identity = cand_id
+        if not inferred_identity:
+            m_resp = _IDENTITY_RESP_RE.search(txt)
+            if m_resp:
+                inferred_identity = f"负责{m_resp.group(1).strip()}"
+        if not inferred_identity:
+            m_do = _IDENTITY_DO_RE.search(txt)
+            if m_do:
+                inferred_identity = f"从事{m_do.group(1).strip()}"
+
+        return inferred_name, inferred_identity
+
+    def detect_addressed_speaker(
+        self,
+        prev_text: str,
+        speakers: List[Dict[str, Any]],
+        prev_speaker_id: Optional[str],
+    ) -> Optional[Tuple[str, str]]:
+        pt = str(prev_text or "").strip()
+        if not pt or not _HANDOFF_CUE_RE.search(pt):
+            return None
+        for sp in speakers:
+            sid = str(sp.get("id") or "")
+            if not sid or sid == prev_speaker_id:
+                continue
+            names = [str(sp.get("name") or "").strip(), str(sp.get("inferredName") or "").strip()]
+            for nm in names:
+                if not nm or len(nm) < 2 or _GENERIC_SPEAKER_NAME_RE.match(nm):
+                    continue
+                if nm in pt:
+                    return sid, nm
+        return None
+
+    def is_turn_switch_response(self, text: str) -> bool:
+        return bool(_TURN_SWITCH_RE.search(str(text or "").strip()))
+
+    def is_continuation_clause(self, text: str, gap_ms: int, prev_text: str = "") -> bool:
+        if gap_ms > 4000:
+            return False
+        pt = str(prev_text or "").strip()
+        if pt.endswith("?") or pt.endswith("？"):
+            return False
+        return bool(_CONTINUATION_RE.search(str(text or "").strip()))
+
+    def is_host_question(self, text: str) -> bool:
+        txt = str(text or "").strip()
+        if not txt or len(txt) > 70:
+            return False
+        if not _HOST_QUESTION_RE.search(txt):
+            return False
+        return ("?" in txt or "？" in txt or "请问" in txt or "请教" in txt or "欢迎" in txt or "请到" in txt or "聊聊" in txt or "分享" in txt)
+
+    def analyze_realtime(
+        self,
+        text: str,
+        start_ms: int,
+        end_ms: int,
+        speakers: List[Dict[str, Any]],
+        history: List[Dict[str, Any]],
+        scenario: str = "interview",
+        prep: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        txt = str(text or "").strip()
+        inferred_name, inferred_identity = self.extract_self_intro(txt)
+        result: Dict[str, Any] = {
+            "speakerId": None,
+            "confidence": 0.0,
+            "reason": "",
+            "switchFromPrev": False,
+            "inferredName": inferred_name,
+            "inferredIdentity": inferred_identity,
+        }
+        if not txt:
+            return result
+
+        # 1. Self-intro matching an existing speaker name
+        if inferred_name:
+            for sp in speakers:
+                sp_name = str(sp.get("name") or "").strip()
+                sp_inf = str(sp.get("inferredName") or "").strip()
+                if inferred_name == sp_name or (sp_inf and inferred_name == sp_inf):
+                    result["speakerId"] = str(sp["id"])
+                    result["confidence"] = 0.92
+                    result["reason"] = f"自我介绍匹配「{inferred_name}」"
+                    return result
+
+        prev = history[-1] if history else None
+        prev_text = str(prev.get("text") or "") if prev else ""
+        prev_spk = str(prev.get("speakerId") or "") if prev else ""
+        prev_end = int(prev.get("endMs") or 0) if prev else 0
+        gap_ms = max(0, int(start_ms) - prev_end) if prev else 0
+
+        # 2. Previous utterance directly addressed another speaker
+        if prev and gap_ms <= 15000:
+            addressed = self.detect_addressed_speaker(prev_text, speakers, prev_spk)
+            if addressed:
+                target_sid, target_name = addressed
+                result["speakerId"] = target_sid
+                result["confidence"] = 0.88
+                result["reason"] = f"承接前文点名「{target_name}」"
+                result["switchFromPrev"] = True
+                return result
+
+        # 3. Listen mode audience question
+        if scenario == "listen" and (prep or {}).get("captureAudience", True):
+            if _AUDIENCE_ASK_RE.search(txt):
+                aud = next((s for s in speakers if s.get("id") == "spk_audience" or s.get("speakerKind") == "audience"), None)
+                if aud:
+                    result["speakerId"] = str(aud["id"])
+                    result["confidence"] = 0.86
+                    result["reason"] = "现场听众提问语境"
+                    result["switchFromPrev"] = bool(prev_spk and prev_spk != str(aud["id"]))
+                    return result
+
+        # 4. Explicit turn switch response
+        if prev and self.is_turn_switch_response(txt):
+            result["switchFromPrev"] = True
+            other_speakers = [str(s["id"]) for s in speakers if str(s.get("id")) != prev_spk]
+            if len(other_speakers) == 1:
+                result["speakerId"] = other_speakers[0]
+                result["confidence"] = 0.86
+                result["reason"] = "明确回应前文发言"
+                return result
+            elif len(other_speakers) > 1:
+                # Prefer self if prev was counterpart, else first counterpart
+                prev_role = next((s.get("role") for s in speakers if str(s.get("id")) == prev_spk), "")
+                pref = next((str(s["id"]) for s in speakers if str(s.get("id")) != prev_spk and s.get("role") != prev_role), other_speakers[0])
+                result["speakerId"] = pref
+                result["confidence"] = 0.78
+                result["reason"] = "明确回应前文发言"
+                return result
+            else:
+                result["confidence"] = 0.80
+                result["reason"] = "检测到对话对象切换"
+                return result
+
+        # 5. Scenario-based Q&A heuristics
+        has_host = bool((prep or {}).get("hasHost", True))
+        if scenario in ("interview", "sales") or (scenario == "dialogue" and has_host):
+            self_spk = next((s for s in speakers if s.get("role") == "self"), None)
+            counterpart_spk = next((s for s in speakers if s.get("role") == "counterpart"), None)
+            if self_spk and counterpart_spk:
+                if self.is_host_question(txt):
+                    result["speakerId"] = str(self_spk["id"])
+                    result["confidence"] = 0.80
+                    result["reason"] = "提问/主持引导语境"
+                    result["switchFromPrev"] = bool(prev_spk and prev_spk != str(self_spk["id"]))
+                    return result
+                if prev and prev_spk == str(self_spk["id"]) and (
+                    len(txt) >= 18 or _ANSWER_LEAD_RE.search(txt)
+                ) and not (txt.endswith("?") or txt.endswith("？")):
+                    result["speakerId"] = str(counterpart_spk["id"])
+                    result["confidence"] = 0.82
+                    result["reason"] = "回答前文提问"
+                    result["switchFromPrev"] = True
+                    return result
+
+        # 6. Continuation clause from same speaker
+        if prev and prev_spk and self.is_continuation_clause(txt, gap_ms, prev_text):
+            result["speakerId"] = prev_spk
+            result["confidence"] = 0.74
+            result["reason"] = "语义连贯延续上文"
+            return result
+
+        return result
+
+
+def analyze_speakers_by_local_rules(
+    utterances: List[Dict[str, Any]],
+    speakers: List[Dict[str, Any]],
+    scenario: str = "interview",
+    prep: Optional[Dict[str, Any]] = None,
+    mode: str = "hybrid",
+    allow_new_speakers: bool = False,
+) -> Dict[str, Any]:
+    """Offline fallback speaker content analyzer using deterministic dialogue heuristics."""
+    analyzer = ContentSpeakerAnalyzer()
+    working_speakers = [dict(s) for s in (speakers or [])]
+    profiles_by_id: Dict[str, Dict[str, Any]] = {}
+    reassignments: List[Dict[str, Any]] = []
+    history: List[Dict[str, Any]] = []
+
+    for u in utterances or []:
+        uid = str(u.get("id") or "")
+        text = str(u.get("text") or "").strip()
+        cur_spk = str(u.get("speakerId") or "")
+        src = str(u.get("speakerSource") or "")
+        start_ms = int(u.get("startMs") or 0)
+        end_ms = int(u.get("endMs") or start_ms)
+        if not uid:
+            continue
+
+        hint = analyzer.analyze_realtime(
+            text=text,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            speakers=working_speakers,
+            history=history,
+            scenario=scenario,
+            prep=prep,
+        )
+
+        effective_spk = cur_spk
+        if src != "manual" and hint.get("speakerId"):
+            pred_spk = str(hint["speakerId"])
+            conf = float(hint.get("confidence") or 0.0)
+            vp_conf = u.get("voiceprintConfidence")
+            min_conf = 0.82 if (mode == "hybrid" and (src == "cloud" or (isinstance(vp_conf, (int, float)) and vp_conf >= 0.85))) else 0.70
+            if pred_spk != cur_spk and conf >= min_conf:
+                reassignments.append(
+                    {
+                        "utteranceId": uid,
+                        "speakerId": pred_spk,
+                        "speakerSource": "hybrid" if mode == "hybrid" and src in ("cloud", "voiceprint") else "content",
+                        "contentConfidence": round(conf, 2),
+                        "reason": str(hint.get("reason") or "内容上下文分析"),
+                    }
+                )
+                effective_spk = pred_spk
+
+        if effective_spk:
+            inf_name = hint.get("inferredName")
+            inf_id = hint.get("inferredIdentity")
+            if inf_name or inf_id:
+                prof = profiles_by_id.setdefault(effective_spk, {"speakerId": effective_spk})
+                if inf_name and not prof.get("inferredName"):
+                    prof["inferredName"] = inf_name
+                    prof["evidence"] = f"[{_format_mm_ss(start_ms)}] {text[:36]}"
+                    prof["confidence"] = 0.85
+                if inf_id and not prof.get("inferredIdentity"):
+                    prof["inferredIdentity"] = inf_id
+                    if not prof.get("evidence"):
+                        prof["evidence"] = f"[{_format_mm_ss(start_ms)}] {text[:36]}"
+                    prof["confidence"] = max(float(prof.get("confidence") or 0.78), 0.78)
+
+        history.append(
+            {
+                "id": uid,
+                "text": text,
+                "startMs": start_ms,
+                "endMs": end_ms,
+                "speakerId": effective_spk,
+            }
+        )
+
+    # Detect duplicate speakers sharing the same inferredName
+    duplicate_hints: List[Dict[str, Any]] = []
+    name_owners: Dict[str, List[str]] = {}
+    for sid, prof in profiles_by_id.items():
+        nm = str(prof.get("inferredName") or "").strip()
+        if nm:
+            name_owners.setdefault(nm, []).append(sid)
+    for nm, sids in name_owners.items():
+        if len(sids) >= 2:
+            for i in range(1, len(sids)):
+                duplicate_hints.append(
+                    {
+                        "sourceSpeakerId": sids[i],
+                        "targetSpeakerId": sids[0],
+                        "confidence": 0.88,
+                        "reason": f"内容自我介绍均指向「{nm}」",
+                    }
+                )
+
+    speaker_profiles = list(profiles_by_id.values())
+    summary = (
+        f"本地内容规则分析完成：调整 {len(reassignments)} 段发言，提取 {len(speaker_profiles)} 项身份线索"
+        if (reassignments or speaker_profiles)
+        else "本地内容规则分析完成，当前发言归属与上下文基本一致"
+    )
+    return {
+        "engine": "local_rules",
+        "reassignments": reassignments,
+        "speakerProfiles": speaker_profiles,
+        "duplicateHints": duplicate_hints,
+        "newSpeakers": [],
+        "summary": summary,
+    }
+
+
 class SpeakerResolver:
     """
-    Resolves utterance speakers via 3 tiers:
+    Resolves utterance speakers via voiceprint + content fusion:
       1. Cloud speaker_id (`c<id>`)
       2. Online acoustic voiceprint clustering (`v<k>`) using podcraft_ai._extract_speaker_feature_vector
-      3. Manual assignment (`assign`), optionally updating label_map & cluster centroid
+      3. Zero-latency local content heuristics (hybrid / content mode)
+      4. Manual assignment (`assign`), optionally updating label_map & cluster centroid
     """
 
     def __init__(
@@ -233,6 +603,9 @@ class SpeakerResolver:
         first_speaker_id: Optional[str] = None,
         auto_discover: bool = False,
         max_auto_speakers: int = 12,
+        scenario: str = "interview",
+        prep: Optional[Dict[str, Any]] = None,
+        analysis_mode: str = "hybrid",
     ) -> None:
         self.speakers = list(speakers) if speakers else [
             {"id": "spk_self", "name": "我", "role": "self"},
@@ -245,6 +618,12 @@ class SpeakerResolver:
         self.auto_discover = bool(auto_discover)
         self.max_auto_speakers = max(2, int(max_auto_speakers))
         self.max_clusters = max(1, len(self.speaker_ids))
+        self.scenario = scenario
+        self.prep = dict(prep or {})
+        self.analysis_mode = (
+            analysis_mode if analysis_mode in VALID_SPEAKER_ANALYSIS_MODES else "hybrid"
+        )
+        self._content_analyzer = ContentSpeakerAnalyzer()
         self._newly_added_speakers: List[Dict[str, Any]] = []
         self.ring = AudioRingBuffer()
         self.label_map: Dict[str, str] = {}
@@ -255,8 +634,16 @@ class SpeakerResolver:
         self._utterance_labels: Dict[str, Optional[str]] = {}
         self._utterance_features: Dict[str, np.ndarray] = {}
         self._utterance_vp_meta: Dict[str, Dict[str, Any]] = {}
+        self._utterance_content_meta: Dict[str, Dict[str, Any]] = {}
+        self._history: List[Dict[str, Any]] = []
         self._last_cluster_dist: float = 0.0
         self._lock = threading.Lock()
+
+    def set_analysis_mode(self, mode: str) -> str:
+        clean = mode if mode in VALID_SPEAKER_ANALYSIS_MODES else "hybrid"
+        with self._lock:
+            self.analysis_mode = clean
+        return clean
 
     def append_audio(self, pcm_int16: np.ndarray) -> int:
         with self._lock:
@@ -364,6 +751,7 @@ class SpeakerResolver:
         start_ms: int,
         end_ms: int,
         cloud_speaker_id: Optional[str] = None,
+        text: str = "",
     ) -> Tuple[str, str, str]:
         """Returns (speaker_id, label, speaker_source)."""
         with self._lock:
@@ -408,6 +796,82 @@ class SpeakerResolver:
                     vp_meta["voiceprintVector"] = [round(float(x), 4) for x in feat[:16]]
                 self._utterance_vp_meta[utterance_id] = vp_meta
 
+            # Content-based speaker analysis fusion (when text provided & mode != 'voiceprint')
+            clean_text = str(text or "").strip()
+            content_meta: Dict[str, Any] = {}
+            if clean_text and self.analysis_mode != "voiceprint":
+                hint = self._content_analyzer.analyze_realtime(
+                    text=clean_text,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    speakers=self.speakers,
+                    history=self._history,
+                    scenario=self.scenario,
+                    prep=self.prep,
+                )
+                c_spk = hint.get("speakerId")
+                c_conf = float(hint.get("confidence") or 0.0)
+                c_reason = str(hint.get("reason") or "").strip()
+
+                # Auto-discover new speaker in content mode when explicit switch detected with 1 speaker
+                if (
+                    self.analysis_mode == "content"
+                    and not c_spk
+                    and (hint.get("switchFromPrev") or hint.get("inferredName"))
+                    and self.auto_discover
+                    and len(self.speakers) == 1
+                    and len(self.speakers) < self.max_auto_speakers
+                ):
+                    idx = len(self.speakers) + 1
+                    chosen = f"spk_{idx}"
+                    nm = str(hint.get("inferredName") or f"发言人 {idx}")
+                    speaker_obj = {
+                        "id": chosen,
+                        "name": nm,
+                        "role": "counterpart",
+                        "speakerKind": "guest",
+                    }
+                    self.speakers.append(speaker_obj)
+                    self.speaker_ids.append(chosen)
+                    self.max_clusters = max(self.max_clusters, len(self.speaker_ids))
+                    self._newly_added_speakers.append(dict(speaker_obj))
+                    c_spk = chosen
+                    c_conf = max(c_conf, 0.80)
+                    c_reason = c_reason or "内容识别出新发言人"
+
+                if c_spk and c_spk in self.speaker_ids and c_conf > 0:
+                    if self.analysis_mode == "content":
+                        if c_conf >= 0.65:
+                            source = "hybrid" if (c_spk == spk_id and source in ("cloud", "voiceprint")) else "content"
+                            spk_id = str(c_spk)
+                    else:  # hybrid
+                        if source == "cloud":
+                            if c_spk == spk_id and c_conf >= 0.72:
+                                source = "hybrid"
+                            elif c_spk != spk_id and c_conf >= 0.90:
+                                spk_id = str(c_spk)
+                                source = "content"
+                        elif source == "voiceprint":
+                            if c_spk == spk_id and c_conf >= 0.65:
+                                source = "hybrid"
+                            elif c_spk != spk_id and (
+                                ((vp_conf or 0.0) < 0.75 and c_conf >= 0.78) or c_conf >= 0.88
+                            ):
+                                spk_id = str(c_spk)
+                                source = "content"
+                        else:  # fallback
+                            if c_conf >= 0.65:
+                                spk_id = str(c_spk)
+                                source = "content"
+
+                    if source in ("content", "hybrid"):
+                        content_meta["contentConfidence"] = round(c_conf, 2)
+                        if c_reason:
+                            content_meta["speakerReason"] = c_reason
+
+            if content_meta:
+                self._utterance_content_meta[utterance_id] = content_meta
+
             self._last_speaker_id = spk_id
             self._utterance_labels[utterance_id] = label or None
             self._utterances[utterance_id] = {
@@ -418,12 +882,29 @@ class SpeakerResolver:
                 "speakerLabel": label,
                 "speakerSource": source,
                 **self._utterance_vp_meta.get(utterance_id, {}),
+                **content_meta,
             }
+            if clean_text:
+                self._history.append(
+                    {
+                        "id": utterance_id,
+                        "text": clean_text,
+                        "startMs": start_ms,
+                        "endMs": end_ms,
+                        "speakerId": spk_id,
+                    }
+                )
+                if len(self._history) > 40:
+                    self._history = self._history[-40:]
             return spk_id, label, source
 
     def get_utterance_voiceprint(self, utterance_id: str) -> Dict[str, Any]:
         with self._lock:
             return dict(self._utterance_vp_meta.get(utterance_id, {}))
+
+    def get_utterance_content_meta(self, utterance_id: str) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._utterance_content_meta.get(utterance_id, {}))
 
     def preview_speaker_for_cloud(self, cloud_speaker_id: Optional[str]) -> Optional[str]:
         if cloud_speaker_id in (None, ""):
@@ -488,6 +969,10 @@ class SpeakerResolver:
                 return None
             utt["speakerId"] = speaker_id
             utt["speakerSource"] = "manual"
+            for h in self._history:
+                if h.get("id") == utterance_id:
+                    h["speakerId"] = speaker_id
+                    break
             label = self._utterance_labels.get(utterance_id)
             if apply_to_label and label:
                 self.label_map[label] = speaker_id
@@ -512,6 +997,94 @@ class SpeakerResolver:
             if suggested:
                 result["suggestedUtterances"] = suggested
             return result
+
+    def apply_content_analysis(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Applies normalized content-based reassignments and profiles without overwriting manual anchors."""
+        res = analysis_result if isinstance(analysis_result, dict) else {}
+        with self._lock:
+            applied_new_speakers: List[Dict[str, Any]] = []
+            for nsp in res.get("newSpeakers") or []:
+                if not isinstance(nsp, dict):
+                    continue
+                sid = str(nsp.get("id") or "").strip()
+                if not sid or sid in self.speaker_ids:
+                    continue
+                if len(self.speakers) >= self.max_auto_speakers:
+                    continue
+                spk_obj = {
+                    "id": sid,
+                    "name": str(nsp.get("name") or "").strip() or f"发言人 {len(self.speakers) + 1}",
+                    "role": "self" if nsp.get("role") == "self" else "counterpart",
+                    "speakerKind": nsp.get("speakerKind") or "guest",
+                }
+                self.speakers.append(spk_obj)
+                self.speaker_ids.append(sid)
+                self.max_clusters = max(self.max_clusters, len(self.speaker_ids))
+                applied_new_speakers.append(dict(spk_obj))
+
+            applied_reassignments: List[Dict[str, Any]] = []
+            for item in res.get("reassignments") or []:
+                if not isinstance(item, dict):
+                    continue
+                uid = str(item.get("utteranceId") or "")
+                target_spk = str(item.get("speakerId") or "")
+                utt = self._utterances.get(uid)
+                if utt is None or target_spk not in self.speaker_ids:
+                    continue
+                if utt.get("speakerSource") == "manual":
+                    continue
+                src_type = "hybrid" if item.get("speakerSource") == "hybrid" else "content"
+                conf = float(item.get("contentConfidence") or 0.75)
+                reason = str(item.get("reason") or "").strip()
+                utt["speakerId"] = target_spk
+                utt["speakerSource"] = src_type
+                utt["contentConfidence"] = round(conf, 2)
+                if reason:
+                    utt["speakerReason"] = reason
+                self._utterance_content_meta[uid] = {
+                    "contentConfidence": round(conf, 2),
+                    **({"speakerReason": reason} if reason else {}),
+                }
+                for h in self._history:
+                    if h.get("id") == uid:
+                        h["speakerId"] = target_spk
+                        break
+                applied_reassignments.append(
+                    {
+                        "utteranceId": uid,
+                        "speakerId": target_spk,
+                        "speakerSource": src_type,
+                        "contentConfidence": round(conf, 2),
+                        "reason": reason,
+                    }
+                )
+
+            # Update speaker inferred profiles if available
+            sp_map = {str(s["id"]): s for s in self.speakers}
+            for prof in res.get("speakerProfiles") or []:
+                if not isinstance(prof, dict):
+                    continue
+                sid = str(prof.get("speakerId") or "")
+                sp = sp_map.get(sid)
+                if not sp:
+                    continue
+                if prof.get("inferredName"):
+                    sp["inferredName"] = str(prof["inferredName"])
+                if prof.get("inferredIdentity"):
+                    sp["inferredIdentity"] = str(prof["inferredIdentity"])
+                if prof.get("evidence"):
+                    sp["identityEvidence"] = str(prof["evidence"])
+                if prof.get("confidence") is not None:
+                    sp["identityConfidence"] = float(prof["confidence"])
+
+            return {
+                "engine": str(res.get("engine") or "local_rules"),
+                "reassignments": applied_reassignments,
+                "speakerProfiles": list(res.get("speakerProfiles") or []),
+                "duplicateHints": list(res.get("duplicateHints") or []),
+                "newSpeakers": applied_new_speakers,
+                "summary": str(res.get("summary") or ""),
+            }
 
 
 def should_trigger_insight(
@@ -1796,6 +2369,17 @@ class LiveCopilot:
                 return
             self.speakers.append(dict(speaker))
 
+    def rename_speaker(self, speaker_id: str, new_name: str) -> None:
+        sid = str(speaker_id or "").strip()
+        sname = str(new_name or "").strip()
+        if not sid or not sname:
+            return
+        with self._lock:
+            for s in self.speakers:
+                if str(s.get("id")) == sid:
+                    s["name"] = sname
+                    break
+
     def trigger_manual(self) -> None:
         if not self.enabled:
             return
@@ -1985,6 +2569,531 @@ class LiveCopilot:
             }
         except Exception:
             return None
+
+
+def build_speaker_content_analysis_prompt(ctx: Dict[str, Any]) -> str:
+    scenario = str(ctx.get("scenario") or "interview")
+    prep = ctx.get("prep") or {}
+    speakers = ctx.get("speakers") or []
+    utterances = ctx.get("utterances") or []
+    mode = str(ctx.get("mode") or "hybrid")
+    allow_new = bool(ctx.get("allowNewSpeakers", False))
+    speaker_by_id = {str(s.get("id")): s for s in speakers}
+
+    speaker_lines = [
+        f"- speakerId={s.get('id')}, name={s.get('name')}, role={s.get('role')}, kind={s.get('speakerKind') or 'unknown'}"
+        for s in speakers
+    ]
+
+    utt_lines: List[str] = []
+    for u in utterances:
+        uid = str(u.get("id") or "")
+        st_ms = int(u.get("startMs") or 0)
+        spk_id = str(u.get("speakerId") or "")
+        spk_name = str(speaker_by_id.get(spk_id, {}).get("name") or spk_id or "发言人")
+        src = str(u.get("speakerSource") or "fallback")
+        vp_conf = u.get("voiceprintConfidence")
+        vp_cluster = str(u.get("voiceprintCluster") or "")
+        if src == "manual":
+            src_tag = "已人工确认锚点(严禁修改)"
+        elif src == "cloud":
+            src_tag = f"云端声纹({vp_cluster or 'c'})"
+        elif src == "voiceprint":
+            pct = f"{int(round(float(vp_conf) * 100))}%" if isinstance(vp_conf, (int, float)) else "未知"
+            src_tag = f"本地声纹({vp_cluster or 'v'}, {pct})"
+        elif src == "hybrid":
+            src_tag = f"声纹+内容({vp_cluster or 'h'})"
+        elif src == "content":
+            src_tag = "内容识别"
+        else:
+            src_tag = "待定(fallback)"
+        utt_lines.append(
+            f"[{uid}][{_format_mm_ss(st_ms)}] speakerId={spk_id}({spk_name}) [{src_tag}]: {u.get('text', '')}"
+        )
+
+    mode_desc = (
+        "内容优先模式：当声纹与上下文语义/对话逻辑冲突时，优先采信内容逻辑。"
+        if mode == "content"
+        else "声纹+内容协同模式：尊重「已人工确认锚点」与高置信度声纹(>=85%)，重点修正低置信度声纹、短句fallback、以及明显违背问答逻辑或自我介绍的归属。"
+    )
+    new_spk_rule = (
+        "如确实发现现有席位无法涵盖的新增人物（如新自我介绍的嘉宾），可在 newSpeakers 中补充最多 4 位（id 用 spk_ai_<序号>）。"
+        if allow_new
+        else "严禁新增发言人，reassignments 中的 speakerId 必须严格来自上方现有席位列表。"
+    )
+
+    return (
+        f"# 发言人内容分析任务\n"
+        f"- 场景: {scenario}\n"
+        f"- 主题: {prep.get('topic') or '未填写'}\n"
+        f"- 背景: {prep.get('counterpartBackground') or '无'}\n"
+        f"- 分析模式: {mode_desc}\n\n"
+        f"# 现有发言人席位\n" + ("\n".join(speaker_lines) if speaker_lines else "无") + "\n\n"
+        f"# 请综合以下 5 个维度分析每句真实发言人：\n"
+        f"1. 问答交替与对话承接（提问句后紧跟回答、回应“你刚才/谢谢提问”通常发生发言人切换）。\n"
+        f"2. 称呼与点名交接（如“接下来请张总说说…”后一句通常归属张总）。\n"
+        f"3. 语义连贯与断句粘连（如“另外/而且/所以说”开头的连续阐述不应中途跳变发言人）。\n"
+        f"4. 角色身份、第一人称自述与立场视角一致性（从中提取发言人真实姓名 inferredName 与身份定位 inferredIdentity）。\n"
+        f"5. 绝对保护规则：任何标注为「已人工确认锚点」的句子严禁出现在 reassignments 中，请将它们作为判断上下文的基准锚点。\n"
+        f"6. {new_spk_rule}\n\n"
+        f"# 对话逐句列表\n" + "\n".join(utt_lines) + "\n\n"
+        f"# 严格输出合法 JSON（仅包含确实需要修正或提取出的信息，无把握不要硬改）：\n"
+        f"{{\n"
+        f'  "reassignments": [{{"utteranceId": "u_2", "speakerId": "spk_other_1", "confidence": 0.88, "reason": "<=30字依据"}}],\n'
+        f'  "speakerProfiles": [{{"speakerId": "spk_other_1", "inferredName": "仅确定姓名时填写否则留空", "inferredIdentity": "身份/职责/视角<=30字", "evidence": "<=35字依据", "confidence": 0.85}}],\n'
+        f'  "duplicateHints": [{{"sourceSpeakerId": "spk_3", "targetSpeakerId": "spk_2", "confidence": 0.86, "reason": "相同自我介绍/立场一致<=35字"}}],\n'
+        f'  "newSpeakers": [],\n'
+        f'  "summary": "<=60字本次内容辨人总结"\n'
+        f"}}"
+    )
+
+
+def normalize_speaker_content_analysis(
+    raw: Dict[str, Any],
+    utterances: List[Dict[str, Any]],
+    speakers: List[Dict[str, Any]],
+    mode: str = "hybrid",
+    allow_new_speakers: bool = False,
+    max_auto_speakers: int = 12,
+) -> Dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    utt_by_id = {str(u.get("id")): u for u in utterances if u.get("id")}
+    existing_spk_ids = {str(s.get("id")) for s in speakers if s.get("id")}
+
+    new_speakers: List[Dict[str, Any]] = []
+    new_spk_ids: set[str] = set()
+    if allow_new_speakers:
+        for idx, nsp in enumerate((raw.get("newSpeakers") or [])[:4]):
+            if not isinstance(nsp, dict):
+                continue
+            if len(existing_spk_ids) + len(new_speakers) >= max_auto_speakers:
+                break
+            sid = _clip_str(nsp.get("id") or f"spk_ai_{idx + 1}", 32)
+            name = _clip_str(nsp.get("name"), 24)
+            if not sid or sid in existing_spk_ids or sid in new_spk_ids or not name:
+                continue
+            role = "self" if nsp.get("role") == "self" else "counterpart"
+            new_speakers.append(
+                {
+                    "id": sid,
+                    "name": name,
+                    "role": role,
+                    "speakerKind": "host" if role == "self" else "guest",
+                }
+            )
+            new_spk_ids.add(sid)
+
+    all_valid_spk_ids = existing_spk_ids | new_spk_ids
+
+    reassignments: List[Dict[str, Any]] = []
+    seen_uids: set[str] = set()
+    for item in raw.get("reassignments") or []:
+        if not isinstance(item, dict):
+            continue
+        uid = str(item.get("utteranceId") or "")
+        target_spk = str(item.get("speakerId") or "")
+        if not uid or uid in seen_uids or uid not in utt_by_id or target_spk not in all_valid_spk_ids:
+            continue
+        utt = utt_by_id[uid]
+        if utt.get("speakerSource") == "manual":
+            continue
+        if target_spk == str(utt.get("speakerId") or ""):
+            continue
+        try:
+            conf = float(item.get("confidence") or 0.0)
+        except Exception:
+            conf = 0.0
+        conf = max(0.0, min(1.0, conf))
+
+        src = str(utt.get("speakerSource") or "")
+        vp_conf = utt.get("voiceprintConfidence")
+        if mode == "content":
+            min_conf = 0.65
+        else:
+            if src == "cloud" or (isinstance(vp_conf, (int, float)) and float(vp_conf) >= 0.85):
+                min_conf = 0.80
+            else:
+                min_conf = 0.68
+        if conf < min_conf:
+            continue
+
+        seen_uids.add(uid)
+        reassignments.append(
+            {
+                "utteranceId": uid,
+                "speakerId": target_spk,
+                "speakerSource": "hybrid" if mode == "hybrid" and src in ("cloud", "voiceprint") else "content",
+                "contentConfidence": round(conf, 2),
+                "reason": _clip_str(item.get("reason") or "内容语义分析", 40),
+            }
+        )
+
+    speaker_profiles: List[Dict[str, Any]] = []
+    seen_prof_sids: set[str] = set()
+    for prof in raw.get("speakerProfiles") or []:
+        if not isinstance(prof, dict):
+            continue
+        sid = str(prof.get("speakerId") or "")
+        if not sid or sid in seen_prof_sids or sid not in all_valid_spk_ids:
+            continue
+        inf_name = _clip_str(prof.get("inferredName"), 24)
+        if inf_name and not _is_valid_extracted_name(inf_name):
+            inf_name = ""
+        inf_id = _clip_str(prof.get("inferredIdentity"), 40)
+        evidence = _clip_str(prof.get("evidence"), 50)
+        if not inf_name and not inf_id:
+            continue
+        try:
+            pconf = float(prof.get("confidence") or 0.8)
+        except Exception:
+            pconf = 0.8
+        seen_prof_sids.add(sid)
+        p_obj: Dict[str, Any] = {"speakerId": sid, "confidence": round(max(0.0, min(1.0, pconf)), 2)}
+        if inf_name:
+            p_obj["inferredName"] = inf_name
+        if inf_id:
+            p_obj["inferredIdentity"] = inf_id
+        if evidence:
+            p_obj["evidence"] = evidence
+        speaker_profiles.append(p_obj)
+
+    duplicate_hints: List[Dict[str, Any]] = []
+    seen_pairs: set[Tuple[str, str]] = set()
+    for dh in raw.get("duplicateHints") or []:
+        if not isinstance(dh, dict):
+            continue
+        s_id = str(dh.get("sourceSpeakerId") or "")
+        t_id = str(dh.get("targetSpeakerId") or "")
+        if not s_id or not t_id or s_id == t_id:
+            continue
+        if s_id not in existing_spk_ids or t_id not in existing_spk_ids:
+            continue
+        pair_key = (min(s_id, t_id), max(s_id, t_id))
+        if pair_key in seen_pairs:
+            continue
+        try:
+            dconf = float(dh.get("confidence") or 0.0)
+        except Exception:
+            dconf = 0.0
+        if dconf < 0.72:
+            continue
+        seen_pairs.add(pair_key)
+        duplicate_hints.append(
+            {
+                "sourceSpeakerId": s_id,
+                "targetSpeakerId": t_id,
+                "confidence": round(max(0.0, min(1.0, dconf)), 2),
+                "reason": _clip_str(dh.get("reason") or "内容角色与表达一致", 50),
+            }
+        )
+
+    summary = _clip_str(raw.get("summary"), 80)
+    if not summary:
+        summary = (
+            f"内容分析完成：优化 {len(reassignments)} 段发言归属，提取 {len(speaker_profiles)} 项身份画像"
+            if (reassignments or speaker_profiles)
+            else "内容分析完成，当前发言归属与语义一致"
+        )
+
+    return {
+        "reassignments": reassignments,
+        "speakerProfiles": speaker_profiles,
+        "duplicateHints": duplicate_hints,
+        "newSpeakers": new_speakers,
+        "summary": summary,
+    }
+
+
+def analyze_speakers_by_content(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analyzes utterance speaker attribution, speaker profiles, and duplicate hints by transcript content.
+    Uses Cloud LLM when configured, with automatic fallback to deterministic local rules.
+    """
+    scenario = str(payload.get("scenario") or "interview")
+    prep = payload.get("prep") or {}
+    speakers = list(payload.get("speakers") or [])
+    utterances = list(payload.get("utterances") or [])
+    mode = str(payload.get("mode") or "hybrid")
+    if mode not in VALID_SPEAKER_ANALYSIS_MODES:
+        mode = "hybrid"
+    allow_new = bool(payload.get("allowNewSpeakers", scenario == "chat"))
+    llm_cfg = payload.get("llmConfig") or {}
+
+    if not utterances or not speakers:
+        return {
+            "engine": "local_rules",
+            "reassignments": [],
+            "speakerProfiles": [],
+            "duplicateHints": [],
+            "newSpeakers": [],
+            "summary": "暂无足够发言内容可供分析",
+        }
+
+    has_llm = (
+        not llm_cfg.get("forceLocalOnly")
+        and llm_cfg.get("provider") != "local_only"
+        and bool(str(llm_cfg.get("apiKey") or "").strip())
+    )
+
+    if not has_llm:
+        return analyze_speakers_by_local_rules(
+            utterances=utterances,
+            speakers=speakers,
+            scenario=scenario,
+            prep=prep,
+            mode=mode,
+            allow_new_speakers=allow_new,
+        )
+
+    # Batch up to 3 chunks (100 utterances each) so long recordings stay within token & timeout budgets
+    chunk_size = 100
+    chunks: List[List[Dict[str, Any]]] = []
+    if len(utterances) <= 120:
+        chunks = [utterances]
+    else:
+        for i in range(0, min(len(utterances), chunk_size * 3), chunk_size):
+            chunks.append(utterances[i : i + chunk_size])
+
+    merged_reassignments: List[Dict[str, Any]] = []
+    seen_re_uids: set[str] = set()
+    merged_profiles_map: Dict[str, Dict[str, Any]] = {}
+    merged_dups: List[Dict[str, Any]] = []
+    seen_dup_pairs: set[Tuple[str, str]] = set()
+    merged_new_spks: List[Dict[str, Any]] = []
+    seen_new_ids: set[str] = set()
+    last_summary = ""
+
+    try:
+        for chunk in chunks:
+            prompt = build_speaker_content_analysis_prompt(
+                {
+                    "scenario": scenario,
+                    "prep": prep,
+                    "speakers": speakers + merged_new_spks,
+                    "utterances": chunk,
+                    "mode": mode,
+                    "allowNewSpeakers": allow_new,
+                }
+            )
+            raw_text = podcraft_ai.call_cloud_llm(
+                prompt,
+                llm_cfg,
+                system_prompt="你是资深对话记录校对与说话人分析专家。请严格输出合法 JSON，绝对不要修改已人工确认锚点。",
+                timeout=35,
+                temperature=0.15,
+            )
+            parsed = _extract_json_obj(raw_text)
+            norm = normalize_speaker_content_analysis(
+                parsed,
+                utterances=chunk,
+                speakers=speakers + merged_new_spks,
+                mode=mode,
+                allow_new_speakers=allow_new,
+            )
+            for nsp in norm["newSpeakers"]:
+                if nsp["id"] not in seen_new_ids:
+                    seen_new_ids.add(nsp["id"])
+                    merged_new_spks.append(nsp)
+            for r in norm["reassignments"]:
+                if r["utteranceId"] not in seen_re_uids:
+                    seen_re_uids.add(r["utteranceId"])
+                    merged_reassignments.append(r)
+            for p in norm["speakerProfiles"]:
+                sid = p["speakerId"]
+                cur = merged_profiles_map.setdefault(sid, {"speakerId": sid})
+                for k in ("inferredName", "inferredIdentity", "evidence", "confidence"):
+                    if p.get(k) and not cur.get(k):
+                        cur[k] = p[k]
+            for dh in norm["duplicateHints"]:
+                pk = (min(dh["sourceSpeakerId"], dh["targetSpeakerId"]), max(dh["sourceSpeakerId"], dh["targetSpeakerId"]))
+                if pk not in seen_dup_pairs:
+                    seen_dup_pairs.add(pk)
+                    merged_dups.append(dh)
+            if norm.get("summary"):
+                last_summary = norm["summary"]
+
+        # Supplement missing self-intro profiles via deterministic local rules
+        local_res = analyze_speakers_by_local_rules(
+            utterances=utterances,
+            speakers=speakers,
+            scenario=scenario,
+            prep=prep,
+            mode=mode,
+            allow_new_speakers=False,
+        )
+        for lp in local_res.get("speakerProfiles") or []:
+            sid = lp["speakerId"]
+            cur = merged_profiles_map.setdefault(sid, {"speakerId": sid})
+            for k in ("inferredName", "inferredIdentity", "evidence", "confidence"):
+                if lp.get(k) and not cur.get(k):
+                    cur[k] = lp[k]
+
+        return {
+            "engine": f"cloud_llm_{llm_cfg.get('provider', 'deepseek')}",
+            "reassignments": merged_reassignments,
+            "speakerProfiles": list(merged_profiles_map.values()),
+            "duplicateHints": merged_dups,
+            "newSpeakers": merged_new_spks,
+            "summary": last_summary or "大模型内容辨人分析完成",
+        }
+    except Exception as exc:
+        fallback_res = analyze_speakers_by_local_rules(
+            utterances=utterances,
+            speakers=speakers,
+            scenario=scenario,
+            prep=prep,
+            mode=mode,
+            allow_new_speakers=allow_new,
+        )
+        fallback_res["fallbackReason"] = str(exc)
+        return fallback_res
+
+
+class LiveSpeakerContentAnalyzer:
+    """Single-flight background worker that periodically refines speakers using transcript content."""
+
+    def __init__(
+        self,
+        scenario: str,
+        prep: Dict[str, Any],
+        speakers: List[Dict[str, Any]],
+        llm_config: Dict[str, Any],
+        mode: str = "hybrid",
+        on_result: Optional[Callable[[Dict[str, Any], str], None]] = None,
+    ) -> None:
+        self.scenario = scenario
+        self.prep = dict(prep or {})
+        self.speakers = [dict(s) for s in (speakers or [])]
+        self.llm_config = dict(llm_config or {})
+        self.mode = mode if mode in VALID_SPEAKER_ANALYSIS_MODES else "hybrid"
+        self.on_result = on_result
+
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._utterances: List[Dict[str, Any]] = []
+        self._pending = False
+        self._manual_mode_override: Optional[str] = None
+        self._pending_trigger_kind = "realtime"
+        self._stopping = False
+        self._new_utts_since_last = 0
+        self._new_chars_since_last = 0
+        self._last_run_sec = 0.0
+        self._thread = threading.Thread(
+            target=self._worker_loop, name="LiveSpeakerContentAnalyzer", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in VALID_SPEAKER_ANALYSIS_MODES:
+            return
+        with self._lock:
+            self.mode = mode
+
+    def add_speaker(self, speaker: Dict[str, Any]) -> None:
+        sid = str(speaker.get("id") or "")
+        if not sid:
+            return
+        with self._lock:
+            if any(str(s.get("id")) == sid for s in self.speakers):
+                return
+            self.speakers.append(dict(speaker))
+
+    def rename_speaker(self, speaker_id: str, new_name: str) -> None:
+        sid = str(speaker_id or "").strip()
+        sname = str(new_name or "").strip()
+        if not sid or not sname:
+            return
+        with self._lock:
+            for s in self.speakers:
+                if str(s.get("id")) == sid:
+                    s["name"] = sname
+                    break
+
+    def update_utterance_speaker(self, utterance_id: str, speaker_id: str, source: str = "manual") -> None:
+        with self._lock:
+            for u in self._utterances:
+                if u.get("id") == utterance_id:
+                    u["speakerId"] = speaker_id
+                    u["speakerSource"] = source
+                    break
+
+    def update_utterance_text(self, utterance_id: str, new_text: str) -> None:
+        with self._lock:
+            for u in self._utterances:
+                if u.get("id") == utterance_id:
+                    u["text"] = new_text
+                    break
+
+    def on_final_utterance(self, utt: Dict[str, Any]) -> None:
+        txt_len = len(str(utt.get("text") or ""))
+        with self._cond:
+            self._utterances.append(dict(utt))
+            self._new_utts_since_last += 1
+            self._new_chars_since_last += txt_len
+            if self.mode != "voiceprint" and len(self._utterances) >= 2:
+                elapsed = time.monotonic() - self._last_run_sec
+                if elapsed >= 18.0 and (self._new_utts_since_last >= 4 or self._new_chars_since_last >= 120):
+                    self._pending = True
+                    self._pending_trigger_kind = "realtime"
+                    self._cond.notify()
+
+    def trigger_manual(self, mode_override: Optional[str] = None) -> None:
+        with self._cond:
+            if mode_override in VALID_SPEAKER_ANALYSIS_MODES:
+                self._manual_mode_override = mode_override
+            self._pending = True
+            self._pending_trigger_kind = "manual"
+            self._cond.notify()
+
+    def stop(self, timeout_sec: float = 4.0) -> None:
+        with self._cond:
+            self._stopping = True
+            self._pending = False
+            self._cond.notify_all()
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout_sec)
+
+    def _run_once(self, trigger_kind: str, mode_to_use: str) -> None:
+        with self._lock:
+            utts_snap = [dict(u) for u in self._utterances]
+            spks_snap = [dict(s) for s in self.speakers]
+            self._new_utts_since_last = 0
+            self._new_chars_since_last = 0
+            self._last_run_sec = time.monotonic()
+        if not utts_snap:
+            return
+        res = analyze_speakers_by_content(
+            {
+                "scenario": self.scenario,
+                "prep": self.prep,
+                "speakers": spks_snap,
+                "utterances": utts_snap,
+                "mode": mode_to_use,
+                "allowNewSpeakers": self.scenario == "chat",
+                "llmConfig": self.llm_config,
+            }
+        )
+        if self.on_result is not None:
+            self.on_result(res, trigger_kind)
+
+    def _worker_loop(self) -> None:
+        while True:
+            with self._cond:
+                while not self._pending and not self._stopping:
+                    self._cond.wait(timeout=10.0)
+                if self._stopping and not self._pending:
+                    break
+                self._pending = False
+                trigger_kind = self._pending_trigger_kind
+                mode_to_use = self._manual_mode_override or self.mode
+                self._manual_mode_override = None
+                self._pending_trigger_kind = "realtime"
+            try:
+                self._run_once(trigger_kind, mode_to_use)
+            except Exception:
+                pass
 
 
 def stream_cloud_llm(
@@ -2271,6 +3380,13 @@ def run_live_session() -> None:
         }
     )
     enable_stream_correction = bool(start_cmd.get("enableStreamCorrection", True))
+    speaker_analysis_mode = str(
+        start_cmd.get("speakerAnalysisMode")
+        or prep.get("speakerAnalysisMode")
+        or "hybrid"
+    ).strip()
+    if speaker_analysis_mode not in VALID_SPEAKER_ANALYSIS_MODES:
+        speaker_analysis_mode = "hybrid"
 
     wav_file = wave.open(wav_path, "wb")
     wav_file.setnchannels(1)
@@ -2288,6 +3404,9 @@ def run_live_session() -> None:
         speakers=speakers,
         first_speaker_id=first_speaker_id,
         auto_discover=(scenario == "chat"),
+        scenario=scenario,
+        prep=prep,
+        analysis_mode=speaker_analysis_mode,
     )
 
     def _build_session_doc() -> Dict[str, Any]:
@@ -2334,6 +3453,49 @@ def run_live_session() -> None:
         on_request=lambda uid: emit({"type": "insight_request", "upToUtteranceId": uid}),
     )
 
+    def _on_speaker_analysis_result(res: Dict[str, Any], trigger_kind: str) -> None:
+        applied = resolver.apply_content_analysis(res)
+        for nsp in applied.get("newSpeakers") or []:
+            copilot.add_speaker(nsp)
+        reassigned = applied.get("reassignments") or []
+        if reassigned:
+            re_map = {r["utteranceId"]: r for r in reassigned}
+            with state_lock:
+                for u in utterances:
+                    hit = re_map.get(u.get("id"))
+                    if hit and u.get("speakerSource") != "manual":
+                        u["speakerId"] = hit["speakerId"]
+                        u["speakerSource"] = hit["speakerSource"]
+                        u["contentConfidence"] = hit["contentConfidence"]
+                        if hit.get("reason"):
+                            u["speakerReason"] = hit["reason"]
+            for r in reassigned:
+                copilot.update_utterance_speaker(r["utteranceId"], r["speakerId"])
+
+        has_changes = bool(
+            reassigned
+            or applied.get("speakerProfiles")
+            or applied.get("duplicateHints")
+            or applied.get("newSpeakers")
+        )
+        if trigger_kind == "manual" or has_changes:
+            emit(
+                {
+                    "type": "speaker_analysis",
+                    "mode": trigger_kind,
+                    **applied,
+                }
+            )
+
+    content_analyzer = LiveSpeakerContentAnalyzer(
+        scenario=scenario,
+        prep=prep,
+        speakers=resolver.speakers,
+        llm_config=llm_cfg,
+        mode=speaker_analysis_mode,
+        on_result=_on_speaker_analysis_result,
+    )
+
     def _on_correction(uid: str, status: str, corrected_text: str, raw_text: str) -> None:
         if status == "done":
             with state_lock:
@@ -2343,6 +3505,7 @@ def run_live_session() -> None:
                         u["text"] = corrected_text
                         break
             copilot.update_utterance_text(uid, corrected_text)
+            content_analyzer.update_utterance_text(uid, corrected_text)
         emit(
             {
                 "type": "utterance_correction",
@@ -2383,11 +3546,14 @@ def run_live_session() -> None:
             int(f["startMs"]),
             int(f["endMs"]),
             cloud_speaker_id=f.get("cloudSpeakerId"),
+            text=str(f.get("text") or ""),
         )
         for added_spk in resolver.pop_newly_added_speakers():
             copilot.add_speaker(added_spk)
+            content_analyzer.add_speaker(added_spk)
             emit({"type": "speaker_added", "speaker": added_spk})
         vp_meta = resolver.get_utterance_voiceprint(uid)
+        content_meta = resolver.get_utterance_content_meta(uid)
         utt_obj = {
             "id": uid,
             "text": f["text"],
@@ -2397,11 +3563,13 @@ def run_live_session() -> None:
             "speakerLabel": label,
             "speakerSource": source,
             **vp_meta,
+            **content_meta,
         }
         with state_lock:
             utterances.append(utt_obj)
         emit({"type": "final", "utterance": utt_obj})
         copilot.on_final_utterance(utt_obj)
+        content_analyzer.on_final_utterance(utt_obj)
         corrector.enqueue(utt_obj)
 
     def _on_asr_error(msg: str, fatal: bool) -> None:
@@ -2444,6 +3612,7 @@ def run_live_session() -> None:
         }
     )
     copilot.start()
+    content_analyzer.start()
     corrector.start()
     asr.start()
 
@@ -2488,11 +3657,14 @@ def run_live_session() -> None:
             if sid:
                 added = resolver.add_speaker(sid, sname, srole)
                 copilot.add_speaker(added)
+                content_analyzer.add_speaker(added)
         elif ctype == "rename_speaker":
             sid = str(cmd.get("speakerId") or "").strip()
             sname = str(cmd.get("name") or "").strip()
             if sid and sname:
                 resolver.rename_speaker(sid, sname)
+                copilot.rename_speaker(sid, sname)
+                content_analyzer.rename_speaker(sid, sname)
         elif ctype == "assign_speaker":
             uid = str(cmd.get("utteranceId") or "")
             sid = str(cmd.get("speakerId") or "")
@@ -2506,7 +3678,17 @@ def run_live_session() -> None:
                             u["speakerSource"] = "manual"
                             break
                 copilot.update_utterance_speaker(uid, sid)
+                content_analyzer.update_utterance_speaker(uid, sid, "manual")
                 emit({"type": "utterance_update", **upd})
+        elif ctype == "set_speaker_analysis_mode":
+            next_mode = str(cmd.get("mode") or "hybrid").strip()
+            cleaned = resolver.set_analysis_mode(next_mode)
+            content_analyzer.set_mode(cleaned)
+        elif ctype == "analyze_speakers":
+            mode_ovr = cmd.get("mode")
+            content_analyzer.trigger_manual(
+                str(mode_ovr).strip() if mode_ovr in VALID_SPEAKER_ANALYSIS_MODES else None
+            )
         elif ctype == "request_insight":
             copilot.trigger_manual()
         elif ctype == "question_feedback":
@@ -2524,6 +3706,7 @@ def run_live_session() -> None:
 
     # Ordered shutdown
     asr.stop()
+    content_analyzer.stop(timeout_sec=4.0)
     corrector.stop(timeout_sec=4.0)
     copilot.wait_current_and_stop(timeout_sec=25.0)
     final_summary = copilot.generate_final_summary(timeout_sec=30.0)

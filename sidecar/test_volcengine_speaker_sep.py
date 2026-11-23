@@ -266,6 +266,51 @@ class VolcengineSpeakerSeparationTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_handle_analyze_live_speakers_and_content_diarization_fallback(self) -> None:
+        # 1. podcraft_ai.handle_analyze_live_speakers local_rules integration
+        res = podcraft_ai.handle_analyze_live_speakers(
+            {
+                "command": "analyze_live_speakers",
+                "scenario": "interview",
+                "speakers": [
+                    {"id": "spk_self", "name": "我", "role": "self"},
+                    {"id": "spk_other", "name": "嘉宾", "role": "counterpart"},
+                ],
+                "utterances": [
+                    {"id": "u1", "text": "请问您当时为什么选择开源这条路？", "startMs": 0, "endMs": 3000, "speakerId": "spk_self", "speakerSource": "manual"},
+                    {"id": "u2", "text": "谢谢邀请，我是觉得开源社区能带来最直接的反馈。", "startMs": 3500, "endMs": 8000, "speakerId": "spk_self", "speakerSource": "fallback"},
+                ],
+                "mode": "hybrid",
+                "llmConfig": {"provider": "local_only"},
+            }
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["engine"], "local_rules")
+        self.assertEqual(len(res["reassignments"]), 1)
+        self.assertEqual(res["reassignments"][0]["speakerId"], "spk_other")
+
+        # 2. diarize_single_track_locally content fallback when acoustic voice is identical
+        sr = 16000
+        t = np.arange(sr * 8, dtype=np.float32) / sr
+        uniform_voice = 0.3 * np.sin(2 * np.pi * 180.0 * t)
+        dialogue_tokens = [
+            {"text": "请问你对今年行业变化怎么看？", "startMs": 0, "endMs": 1500},
+            {"text": "谢谢邀请，我觉得AI工程化正在加速落地。", "startMs": 2200, "endMs": 4000},
+            {"text": "能具体聊聊成本控制吗？", "startMs": 4700, "endMs": 6000},
+            {"text": "关于你刚才的问题，核心是做好量化与缓存。", "startMs": 6700, "endMs": 7900},
+        ]
+        sp_order, _, _ = podcraft_ai.diarize_single_track_locally(uniform_voice, dialogue_tokens)
+        self.assertEqual(len(sp_order), 2)
+
+        # Pure monologue should stay 1 speaker
+        monologue_tokens = [
+            {"text": "今天我来分享一下端侧部署的经验。", "startMs": 0, "endMs": 1800},
+            {"text": "首先我们需要关注内存占用。", "startMs": 2500, "endMs": 4200},
+            {"text": "其次是首字延迟的优化。", "startMs": 5000, "endMs": 6800},
+        ]
+        mono_order, _, _ = podcraft_ai.diarize_single_track_locally(uniform_voice, monologue_tokens)
+        self.assertEqual(len(mono_order), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
